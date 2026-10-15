@@ -19,7 +19,8 @@ package com.zilliz.milvus.storage
   * Format knowledge stays out: `core.delete` and `core.manifest` call resolve
   * with their own `_delta/` and `_metadata/manifest-N.avro` fragments.
   *
-  * Main type: StoragePath. Capabilities: R3 (see docs/design/capabilities.md).
-  * Design: docs/design/architecture/storage-access.html 2.2.
+  * Main type: StoragePath. Capabilities: R3 (see
+  * docs/design/projects/spark-milvus/capabilities.md). Design:
+  * docs/design/projects/spark-milvus/architecture/storage-access.html 2.2.
   */
 package object path

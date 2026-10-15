@@ -15,17 +15,17 @@ package com.zilliz.milvus.storage.write
   * empty prefix for a local backend already rooted at that directory.
   *
   * The rules a writer keeps are the ones the reader keeps
-  * (docs/design/architecture/storage-io.html section 3): a handle never crosses
-  * serialization, a constructor that throws releases what it took, `close()` is
-  * idempotent. One rule is the writer's own: a batch handed to `write` is
-  * exported through the Arrow C Data Interface and the C++ writer keeps
-  * referring to its buffers until it flushes, so the caller builds a fresh
-  * `VectorSchemaRoot` per batch and never reuses one. V3SegmentWriter owns a
-  * MilvusStorageWriter, V2SegmentWriter owns a MilvusPackedWriter, and each
-  * retains its MilvusStorageProperties until destruction. WrittenColumnGroups
-  * owns the returned native groups; ManifestTransaction owns an upstream
-  * transaction until commit finishes or fails. All JNI declarations and native
-  * loading belong to milvus-storage.
+  * (docs/design/projects/spark-milvus/architecture/storage-io.html section 3):
+  * a handle never crosses serialization, a constructor that throws releases
+  * what it took, `close()` is idempotent. One rule is the writer's own: a batch
+  * handed to `write` is exported through the Arrow C Data Interface and the C++
+  * writer keeps referring to its buffers until it flushes, so the caller builds
+  * a fresh `VectorSchemaRoot` per batch and never reuses one. V3SegmentWriter
+  * owns a MilvusStorageWriter, V2SegmentWriter owns a MilvusPackedWriter, and
+  * each retains its MilvusStorageProperties until destruction.
+  * WrittenColumnGroups owns the returned native groups; ManifestTransaction
+  * owns an upstream transaction until commit finishes or fails. All JNI
+  * declarations and native loading belong to milvus-storage.
   *
   * `ColumnGroupSplit` is the rule Milvus applies when it splits a segment's
   * columns into column groups, as the patterns of milvus-storage's
@@ -37,6 +37,7 @@ package com.zilliz.milvus.storage.write
   * `SegmentWriter.metrics` is what the write cost on the crossing, as
   * `WriteMetrics` (G5). The caller supplies G2's validated
   * `writer.file_rolling.size` property. Capabilities: W1, W2, G2, G5 (see
-  * docs/design/capabilities.md). Design: docs/design/README.md section 2.4.
+  * docs/design/projects/spark-milvus/capabilities.md). Design:
+  * docs/design/projects/spark-milvus/README.md section 2.4.
   */
 package object exec

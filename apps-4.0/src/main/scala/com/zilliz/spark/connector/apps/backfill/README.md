@@ -4,8 +4,8 @@ The Backfill API adds new fields to existing Milvus collections by joining
 snapshot rows with new field values and writing per-segment binlog files
 directly into Milvus storage. The collection primary key remains the default
 join key; callers can instead use an explicitly selected persisted physical
-field. It can run as a programmatic API
-from Scala/PySpark, or as a standalone `spark-submit` job (for example on
+field. It can run as a programmatic Scala API,
+or as a standalone `spark-submit` job (for example on
 Apache Spark Operator / Kubernetes).
 
 ## Required snapshot
@@ -19,12 +19,17 @@ before the input parquet is opened.
 ## Spark-submit entry point: `BackfillApp`
 
 `com.zilliz.spark.connector.apps.backfill.BackfillApp` is the main
-class for running backfill as a Spark application:
+class for running backfill as a Spark application. Use the
+[user guide](../../../../../../../../../../docs/user-guide-snapshot-backfill.md#53-submit-the-spark-job)
+for a complete submission command, including the platform native bundle,
+`libjsig` preload, Spark plugin and Hadoop dependencies. The application flags
+below are a reference; bracketed flags are optional and are not literal shell
+arguments:
 
 ```bash
 spark-submit \
   --class com.zilliz.spark.connector.apps.backfill.BackfillApp \
-  spark-connector-assembly-<branch>-amd64-SNAPSHOT.jar \
+  "spark-connector-assembly-2.0.0-<branch>-<arch>-SNAPSHOT.jar" \
   --input-path   s3a://source-bucket/new_fields.parquet \
   --snapshot     s3a://milvus-bucket/snapshots/foo.json \
   --s3-endpoint  s3.us-west-2.amazonaws.com \
@@ -48,6 +53,12 @@ spark-submit \
 
 `--parquet <path>` is still accepted as a legacy alias for `--input-path`;
 passing both is an error.
+
+The application reads `s3a://` input Parquet and writes its result JSON through
+Hadoop S3A. Supply `hadoop-aws` at the version matching Spark's Hadoop runtime;
+it is not bundled in the connector assembly. The executable
+[`run_backfill_demo.sh`](../../../../../../../../../../scripts/run_backfill_demo.sh)
+shows the dependency and JVM startup configuration.
 
 ### Authentication and dual-bucket credentials
 
@@ -191,8 +202,7 @@ Arrow `Binary`, matching Milvus storage metadata and endianness.
 
 ## Merge modes (`--mode`)
 
-Distinct from the read-mode choice above (snapshot vs client), `--mode`
-controls how per-row values are merged into each target field. All three
+`--mode` controls how per-row values are merged into each target field. All three
 modes use a LEFT JOIN from the Milvus snapshot to parquet on the resolved join key;
 parquet rows whose key is not in the collection are always dropped. They differ on
 what happens for matched rows and for snapshot rows with no parquet match:
@@ -216,9 +226,8 @@ All modes require exact Parquet-to-Milvus target types; perform required casts
 in the input ETL. Additional `coalesce` / `overwrite` caveats (both read
 snapshot-side target values):
 
-- Require `--snapshot` — each target field is read from the snapshot so
-  the merge can compare against the existing value. Client mode (no
-  `--snapshot`) cannot use these and must pass `--mode replace` explicitly.
+- Read each target field from the required snapshot so the merge can compare
+  against the existing value.
 - Slightly heavier I/O than `replace` because the existing field is read
   per segment.
 - On Storage V2 packed segments, target fields must already exist in the
@@ -235,13 +244,13 @@ worked examples.
 
 ```scala
 import org.apache.spark.sql.SparkSession
-import com.zilliz.spark.connector.MilvusOption
+import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.apps.backfill._
 
 val spark = SparkSession.builder().appName("Backfill").getOrCreate()
 
 val config = BackfillConfig(
-  // Optional in snapshot mode — leave empty when using --snapshot
+  // Schema and collection identity come from the required snapshot.
   milvusUri      = "",
   milvusToken    = "",
   databaseName   = "default",
@@ -264,12 +273,9 @@ val config = BackfillConfig(
 
   batchSize = 1024,
 
-  // Merge mode. Defaults to "coalesce" (fill-if-null). Set to
-  // MilvusOption.BackfillModeOverwrite for matched-rows-only overwrite
-  // (parquet wins on matched join keys, unmatched snapshot rows preserved), or
-  // MilvusOption.BackfillModeReplace for full overwrite (unmatched snapshot
-  // rows get null target columns). See "Merge modes" above.
-  mode = MilvusOption.BackfillModeCoalesce,
+  // Initial backfill of new fields: unmatched snapshot rows receive NULL.
+  // Use coalesce/overwrite only when the snapshot has readable target fields.
+  mode = MilvusOption.BackfillModeReplace,
 
   // Optional. Omit for the collection PK.
   joinKey = BackfillJoinKey.PhysicalField("external_row_id")
@@ -279,7 +285,7 @@ val result = MilvusBackfill.run(
   spark            = spark,
   backfillDataPath = "s3a://source-bucket/new_fields.parquet",
   snapshotPath     = "s3a://milvus-bucket/snapshots/foo.json",
-  config           = config
+  initialConfig    = config
 )
 
 result match {
@@ -291,6 +297,13 @@ result match {
     error.cause.foreach(_.printStackTrace())
 }
 ```
+
+`Right(success)` means the segment files were written; it does not register
+the result with Milvus. Persist `success` using
+`BackfillStorage.writeResultJson(spark, success, outputPath, config)`, check the
+returned `Either`, then follow the user guide's commit and query-verification
+steps. `BackfillApp --output-result` performs the JSON-writing step for CLI
+users.
 
 ## Configuration reference
 
@@ -357,8 +370,8 @@ Override via `customOutputPath` if needed.
 
 1. Validate S3/writer configuration and require a snapshot path. Empty AK/SK
    is allowed (IAM/IRSA).
-2. Load the snapshot manifest JSON (per-bucket S3A credentials are
-   configured automatically).
+2. Load the snapshot manifest JSON through native object storage (or from a
+   local file).
 3. Resolve the configured join field and field ID from the snapshot schema.
 4. Read the new-field parquet, configuring S3A credentials for the source
    bucket as needed.

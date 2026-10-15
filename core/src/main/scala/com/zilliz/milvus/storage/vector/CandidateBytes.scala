@@ -12,9 +12,10 @@ import com.zilliz.milvus.storage.schema.MetricType
   * first under [[Candidate.ranking]]. Packing them into one array per query is
   * what keeps the first stage's output at "queries × k × Width" bytes rather
   * than that many JVM objects. The merge stage walks two answers directly, or
-  * selects the best heads of a larger batch (docs/design/architecture/
-  * candidate-merge.html). Inputs and returned arrays are read-only; an empty
-  * side or a single run may return an input array itself.
+  * selects the best heads of a larger batch
+  * (docs/design/projects/spark-milvus/architecture/ candidate-merge.html).
+  * Inputs and returned arrays are read-only; an empty side or a single run may
+  * return an input array itself.
   *
   * The bytes are big-endian, so what one executor writes another reads.
   */

@@ -16,9 +16,10 @@ import com.zilliz.milvus.storage.credential.StorageProperties
 import io.milvus.grpc.milvus.RestoreSnapshotState
 
 /** What `CALL milvus.system.restore_snapshot(...)` takes, asks Milvus, and
-  * answers with (docs/design/architecture/vector-search.html section 2.7). The
-  * root check before the call is core's, tested with a real snapshot in
-  * `SnapshotWriteTest`.
+  * answers with
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.7). The root check before the call is core's, tested with a real snapshot
+  * in `SnapshotWriteTest`.
   */
 class RestoreSnapshotProcedureTest extends AnyFunSuite with Matchers {
 

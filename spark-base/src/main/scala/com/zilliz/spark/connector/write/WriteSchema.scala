@@ -25,7 +25,7 @@ import io.milvus.grpc.schema.{CollectionSchema, FieldSchema}
   * the field id in each column's metadata, which is all the task writer needs
   * to build the Arrow schema and name the columns by field id.
   *
-  * Design: docs/design/architecture/write.html section 3.
+  * Design: docs/design/projects/spark-milvus/architecture/write.html section 3.
   */
 object WriteSchema {
 

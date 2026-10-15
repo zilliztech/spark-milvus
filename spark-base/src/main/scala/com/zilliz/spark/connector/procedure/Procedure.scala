@@ -38,7 +38,7 @@ final case class ProcedureArgs(
 /** A procedure a `CALL milvus.system.<name>(...)` statement runs on the driver.
   * The body knows nothing of SQL or Spark plans; it takes its arguments and
   * returns the rows of its result table. Design:
-  * docs/design/architecture/procedure.html section 3.
+  * docs/design/projects/spark-milvus/architecture/procedure.html section 3.
   */
 trait Procedure {
   def name: String

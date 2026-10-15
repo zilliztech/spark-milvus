@@ -15,7 +15,8 @@ import com.zilliz.milvus.storage.schema.{
 }
 
 /** Which vectors Knowhere scores as Spark's float functions do
-  * (docs/design/architecture/dataframe-api.html section 2).
+  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
+  * 2).
   */
 class EngineRangeTest extends AnyFunSuite with Matchers {
 

@@ -61,7 +61,8 @@ import com.zilliz.milvus.storage.vector.RankingFunction
 
 /** A plan with the result of Spark 4.2's `RewriteNearestByJoin`, built from
   * operators every line has, for the lines before 4.2
-  * (docs/design/architecture/dataframe-api.html section 6).
+  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
+  * 6).
   *
   * Each query row gets a `uuid()` and is joined to every base row, INNER or
   * LEFT OUTER as asked, and the ranking is computed for each pair. A window
@@ -251,7 +252,9 @@ final class ReplaceNearestByJoinRequest(session: SparkSession)
 
 /** `nearest_by_join(TABLE(query), TABLE(base), 'ranking', num_results, mode,
   * direction[, join_type])`, the SQL form of a nearest-by join on the lines
-  * before 4.2 (docs/design/architecture/dataframe-api.html section 6).
+  * before 4.2
+  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
+  * 6).
   *
   * The two `TABLE` arguments arrive as the plans the analyzer resolved, and
   * each is aliased by its side's name, so the ranking, parsed by the session's

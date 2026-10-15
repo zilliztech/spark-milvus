@@ -578,7 +578,7 @@ and MinIO. Additional Scala cross-version checks, integration tests, native
 builds and publication follow the task's scope and authorization.
 
 Run `sbt checkCapabilityIndex` before every commit that touches
-`docs/design/capabilities.md` or a `package.scala`; it needs the `docs/design`
+`docs/design/projects/spark-milvus/capabilities.md` or a `package.scala`; it needs the `docs/design`
 submodule checked out, and CI does not run it. CI does run
 `python3 -m unittest discover -s native-build -p 'test_*.py'` plus the same
 discovery over `scripts/tests`; run them when touching `native-build/`.
@@ -618,17 +618,17 @@ guide, [reference-en.md](reference-en.md) and
 describe what the connector is, how to use it and how to build it; design
 rationale, decision history and measurements do not belong in them.
 
-The design documents are the private repository
-[zilliztech/spark-milvus-design](https://github.com/zilliztech/spark-milvus-design),
+The design documents live under `projects/spark-milvus` in the private repository
+[zilliztech/vector-batch-knowledge](https://github.com/zilliztech/vector-batch-knowledge),
 mounted as the submodule `docs/design` and tracked on its `master`. The build
 and CI do not read it; `git submodule update --init docs/design` checks it out
-for those with access, and its `AGENTS.md` is the full orientation for working
-on the connector. A document change there is two commits:
+for those with access. `docs/design/projects/spark-milvus/AGENTS.md` is the full
+orientation for working on the connector. A document change there is two commits:
 
 ```bash
 cd docs/design
 git checkout master && git pull --ff-only  # submodule update leaves a detached HEAD
-git add <files> && git commit              # in spark-milvus-design
+git add <files> && git commit              # in vector-batch-knowledge
 git push origin master
 cd ../..
 git add docs/design && git commit          # the new gitlink, with the code it describes

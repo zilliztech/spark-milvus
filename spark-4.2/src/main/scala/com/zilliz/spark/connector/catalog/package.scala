@@ -6,6 +6,7 @@ package com.zilliz.spark.connector
   * remain unsupported. The createTable signature differs between Spark lines,
   * so each line keeps one thin public class.
   *
-  * Capabilities: R1, R2, C1, C2 (see docs/design/capabilities.md).
+  * Capabilities: R1, R2, C1, C2 (see
+  * docs/design/projects/spark-milvus/capabilities.md).
   */
 package object catalog

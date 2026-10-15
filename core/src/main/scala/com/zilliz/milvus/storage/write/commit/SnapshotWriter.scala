@@ -54,7 +54,8 @@ final case class WrittenSnapshot(
   * What the job owns is exactly this: the index registrations in each segment
   * manifest, the collection index definitions, the build ids, the segment id
   * list, and the snapshot's own name, id and timestamp
-  * (docs/design/architecture/vector-search.html section 2.7).
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.7).
   *
   * Restoring the result into a collection is Milvus's side; `restore_snapshot`
   * asks it to. A restore refuses a snapshot whose files are not under the root

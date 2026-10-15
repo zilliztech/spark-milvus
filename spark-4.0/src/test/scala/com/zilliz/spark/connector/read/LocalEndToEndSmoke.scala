@@ -365,7 +365,7 @@ object LocalEndToEndSmoke {
       // up to about 2,100, where a float's last place is 2.4e-4, and the
       // distances near the K-th are about 2. A row whose distance is within a
       // few such places of the K-th may take its place
-      // (docs/design/architecture/dataframe-api.html section 2).
+      // (docs/design/projects/spark-milvus/architecture/dataframe-api.html section 2).
       def checkExact(
           got: Map[Long, Seq[(Long, Float)]],
           filtered: Boolean,

@@ -14,8 +14,8 @@ import org.apache.spark.sql.execution.LogicalRDD
 /** A DataFrame from a logical plan, and a relation over rows, on this line:
   * Spark's own `Dataset.ofRows` is internal, so the plan is analyzed first and
   * the DataFrame made with the public constructor and a row encoder of its
-  * schema (docs/design/architecture/dataframe-api.html section 6). Both need
-  * the classic session, which a plan only ever runs in.
+  * schema (docs/design/projects/spark-milvus/architecture/dataframe-api.html
+  * section 6). Both need the classic session, which a plan only ever runs in.
   */
 private[connector] object Datasets {
 

@@ -5,7 +5,8 @@ import scala.util.Try
 
 /** The memory limit the process runs under, read from Linux cgroup and procfs.
   * A value that cannot be read is None, so the caller decides the fallback
-  * (docs/design/architecture/search-resources.html section 3.1).
+  * (docs/design/projects/spark-milvus/architecture/search-resources.html
+  * section 3.1).
   */
 object MachineResources {
 

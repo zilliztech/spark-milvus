@@ -18,7 +18,8 @@ import com.zilliz.milvus.storage.Logging
   * the caller filled, Knowhere builds and serializes, and what comes back is a
   * set of named payloads. Encoding them into Milvus's index files and writing
   * them belongs to the Milvus `TableFormat` side
-  * (docs/design/architecture/vector-search.html section 2.7).
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.7).
   *
   * What can be built is what section 2.4's loader can read back: the same index
   * types, the same metrics per element type. An index this connector could not

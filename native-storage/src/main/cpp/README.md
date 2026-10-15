@@ -11,5 +11,5 @@ upstream `NativeLibraryLoader`; the upstream loader still performs
 `System.load`. Without a unified bundle, the upstream `native/{os}-{arch}/`
 resource and system-library-path behavior remains available.
 
-See [the I/O design](../../../../docs/design/architecture/storage-io.html#upstream-jni)
+See [the I/O design](../../../../docs/design/projects/spark-milvus/architecture/storage-io.html#upstream-jni)
 for ownership, Arrow transfer and validation requirements.

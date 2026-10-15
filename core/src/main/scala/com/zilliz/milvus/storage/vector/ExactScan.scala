@@ -18,7 +18,9 @@ import io.knowhere.DType
   * input: a Milvus segment's from the format side, a DataFrame input's from its
   * rows ([[VectorBatch]]). This only calls the engine and turns what comes back
   * into candidates, a candidate's place being the unit's id and the row's
-  * position in it (docs/design/architecture/vector-search.html section 2.3).
+  * position in it
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.3).
   *
   * A float32 batch goes to the batched distance entry, which hands every query
   * of the group to the bundled faiss in one call so that it takes its SGEMM
@@ -31,7 +33,8 @@ import io.knowhere.DType
   * A search ranked by a [[RankingFunction]] hands Knowhere only the rows in
   * [[EngineRange]]; the function scores the batch's other rows against every
   * query of the group, and both kinds of score meet in the group's merger
-  * (docs/design/architecture/dataframe-api.html section 2).
+  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
+  * 2).
   *
   * Under L2 the batched entry computes |x|^2 + |y|^2 - 2x.y in float32, which
   * errs by as much as the squared norms are large, whatever the distance, and
@@ -41,8 +44,8 @@ import io.knowhere.DType
   * on the entry's error shows that the rows it did not name cannot beat them,
   * and a query it cannot show that for is searched over the batch again pair by
   * pair (decision 37,
-  * docs/design/architecture/exact-search-and-index-build-internals.html section
-  * 1.8).
+  * docs/design/projects/spark-milvus/architecture/exact-search-and-index-build-internals.html
+  * section 1.8).
   */
 object ExactScan {
 

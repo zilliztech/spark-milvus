@@ -15,7 +15,8 @@ import com.zilliz.milvus.storage.Logging
   * The two strategies take the same input and give the same output: exact
   * scanning works on the vector batches a segment hands out, indexed search on
   * the index handle it opens. Whichever runs, the task keeps each query's best
-  * k and nothing else (docs/design/architecture/vector-search.html sections
+  * k and nothing else
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html sections
   * 2.1, 2.3 and 2.4).
   */
 object SegmentSearch extends Logging {
@@ -48,7 +49,8 @@ object SegmentSearch extends Logging {
     * one at a time, and what stays is the segment set, which the planner sized
     * against the task's segment budget. A task that can keep its queries uses
     * [[runGroups]] instead and holds one segment at a time
-    * (docs/design/architecture/vector-search.html sections 2.1 and 2.3).
+    * (docs/design/projects/spark-milvus/architecture/vector-search.html
+    * sections 2.1 and 2.3).
     */
   final class Held private[vector] (
       private val sources: Seq[Source],
@@ -57,7 +59,7 @@ object SegmentSearch extends Logging {
       private val ranked: Map[VectorBatch, EngineRange.Batch] = Map.empty,
       private val rankNonFinite: Boolean = false,
       // How many segments' index searches a group keeps in flight at once
-      // (section 4 of docs/design/enhance/2026-10-13-search-task-pipelining.html):
+      // (section 4 of docs/design/projects/spark-milvus/enhance/2026-10-13-search-task-pipelining.html):
       // 1 is the sequential search; 2 lets the next segment's call fill the
       // tail of the current one and the collect of the current one run behind.
       private val callsInFlight: Int = 1
@@ -279,7 +281,8 @@ object SegmentSearch extends Logging {
   /** A set that did not fit: the segment whose batch went over, the bytes
     * retained by then, and the budget. Everything read so far is closed; the
     * caller streams the set instead, one batch at a time for every query group
-    * (docs/design/architecture/search-resources.html section 3.3).
+    * (docs/design/projects/spark-milvus/architecture/search-resources.html
+    * section 3.3).
     */
   final case class Overflow(
       segmentId: Long,
@@ -450,12 +453,15 @@ object SegmentSearch extends Logging {
     * groups stay: an exact scan hands every batch to every group before it
     * reads the next batch; indexed search uses the loaded index for every
     * group. Each group has its own merger, returned in the order the groups
-    * were given (docs/design/architecture/vector-search.html section 2.1).
+    * were given
+    * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+    * 2.1).
     *
     * A search ranked by `function` classifies each exact-scan batch once, for
     * all its groups ([[EngineRange.Batch]]), and ranks an index's NaN or
     * infinite scores rather than failing on them
-    * (docs/design/architecture/dataframe-api.html section 2).
+    * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
+    * 2).
     */
   def runGroups(
       segments: Seq[Long],

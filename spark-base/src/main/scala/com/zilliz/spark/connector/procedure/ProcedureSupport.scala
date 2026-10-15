@@ -123,8 +123,9 @@ private[procedure] object ProcedureSupport {
   /** The table a `build_index` or `write_snapshot` call works on is given one
     * of two ways: `table`, a name Spark resolves, whose read already carries
     * its connection and storage options, or `collection`, reached through the
-    * options the call gives (docs/design/architecture/dataframe-api.html
-    * section 9). Returns the table name, or None for a collection.
+    * options the call gives
+    * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
+    * 9). Returns the table name, or None for a collection.
     */
   def tableName(args: ProcedureArgs, procedure: String): Option[String] =
     (args.stringOpt("table"), args.stringOpt("collection")) match {

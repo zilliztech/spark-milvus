@@ -12,7 +12,8 @@ import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
   * to end in one buffer, in the element type of the field.
   *
   * A task builds this once and every segment it searches uses it again
-  * (docs/design/architecture/vector-search.html section 2.2).
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.2).
   */
 final class QueryMatrix private (
     val buffer: ByteBuffer,
@@ -99,7 +100,8 @@ object QueryMatrix {
 
   /** The whole query set as one byte array, in the field's element type: what
     * the driver packs once and ships, by broadcast or with the shuffle
-    * (docs/design/architecture/vector-search.html section 2.1).
+    * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+    * 2.1).
     */
   def packFloats(
       queries: Seq[Array[Float]],

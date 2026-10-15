@@ -33,7 +33,8 @@ package com.zilliz.milvus.storage
   *
   * Main types: ObjectStore, ObjectStoreFactory, NativeObjectStore, FileInfo,
   * ConcurrentRangeReads. Capabilities: R2, R3, W1 (see
-  * docs/design/capabilities.md). Design:
-  * docs/design/architecture/storage-access.html section 4.
+  * docs/design/projects/spark-milvus/capabilities.md). Design:
+  * docs/design/projects/spark-milvus/architecture/storage-access.html section
+  * 4.
   */
 package object io

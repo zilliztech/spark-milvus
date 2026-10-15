@@ -6,8 +6,8 @@ package com.zilliz.milvus.storage.write.commit
   * the job wrote into (backfill) is registered by its id and new manifest
   * version through `BatchUpdateManifest`; a segment the job created has no id
   * and needs `RegisterSegments`, which Milvus does not have yet
-  * (docs/design/README.md section 5). A job holding such a segment is refused
-  * here rather than half registered.
+  * (docs/design/projects/spark-milvus/README.md section 5). A job holding such
+  * a segment is refused here rather than half registered.
   */
 object Registration {
 

@@ -20,7 +20,9 @@ import com.zilliz.milvus.storage.Logging
   * path version decides the prefix, the index version is part of it, and the
   * build id names the build. A connector-built index carries the ids of the
   * segment it was built from; Milvus assigns its own build id when it restores
-  * the snapshot (docs/design/architecture/vector-search.html section 2.7).
+  * the snapshot
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.7).
   */
 final case class IndexObjectTarget(
     collectionId: Long,

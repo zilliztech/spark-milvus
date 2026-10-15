@@ -18,7 +18,9 @@ import com.zilliz.milvus.storage.schema.FieldMetadata
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
-/** One test per rule of docs/design/architecture/write.html section 3. */
+/** One test per rule of
+  * docs/design/projects/spark-milvus/architecture/write.html section 3.
+  */
 class WriteSchemaTest extends AnyFunSuite with Matchers {
 
   private val id =

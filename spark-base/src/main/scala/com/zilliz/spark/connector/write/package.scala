@@ -15,6 +15,7 @@ package com.zilliz.spark.connector
   * canonical system field ids from `core.schema.SchemaMapper`. Staging paths
   * and their storage-root policy belong to `core.write.exec.StagingLayout`.
   *
-  * Capabilities: W1, W2, G2 (see docs/design/capabilities.md).
+  * Capabilities: W1, W2, G2 (see
+  * docs/design/projects/spark-milvus/capabilities.md).
   */
 package object write

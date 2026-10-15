@@ -7,7 +7,8 @@ import org.apache.spark.sql.SparkSessionExtensions
   * installs: the parser that recognises `CALL milvus.system.<name>(...)` and
   * the strategy that runs it, and the nearest-by join over a Milvus table: this
   * line's way in (`NearestByExtensions`) and the strategy that plans
-  * [[MilvusNearestByJoin]] (docs/design/architecture/dataframe-api.html).
+  * [[MilvusNearestByJoin]]
+  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html).
   * Everything else in the session is untouched.
   */
 class MilvusSparkSessionExtensions extends (SparkSessionExtensions => Unit) {

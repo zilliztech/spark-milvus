@@ -40,8 +40,9 @@ import com.zilliz.spark.connector.testkit.LocalMilvusCollection.{
 
 /** A nearest-by join over a Milvus table, taken over by the connector, on every
   * Spark line: Spark 4.2's own NEAREST BY, and the connector's `nearestByJoin`
-  * and `nearest_by_join` before it (docs/design/architecture/dataframe-api.html
-  * sections 2 to 6).
+  * and `nearest_by_join` before it
+  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html sections
+  * 2 to 6).
   *
   * Every result is checked against the join over the same rows as a table that
   * is not a Milvus table, which the connector does not take over: Spark's own

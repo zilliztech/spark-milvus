@@ -12,7 +12,8 @@ import com.zilliz.milvus.storage.schema.{
 }
 
 /** What a build accepts and what it hands Knowhere
-  * (docs/design/architecture/vector-search.html section 2.7).
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.7).
   */
 class IndexBuilderTest extends AnyFunSuite with Matchers {
 

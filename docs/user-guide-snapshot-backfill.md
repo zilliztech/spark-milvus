@@ -37,8 +37,14 @@ Use snapshot backfill when you need to:
 | Object storage             | S3 / MinIO / GCS with S3-compatible endpoint. Must be accessible from both Milvus and Spark.    |
 | Spark / Java               | Spark 4.0.x built for Scala 2.13, with Java 21. Cluster mode on YARN, Kubernetes, or standalone. |
 | Connector JARs             | `spark-connector-assembly-*.jar`. It carries the unified native bundle (milvus-storage and Knowhere libraries) selected at build time; see `native-build/README.md`. |
+| Hadoop S3A                 | Reading `s3a://` input and writing the result JSON require `hadoop-aws` matching Spark's Hadoop version. It is a provided dependency, not included in the connector JAR. |
 | New-field input data        | A Parquet file or an Iceberg table (`--input-format`), containing the resolved join-key column plus one column per new field. |
-| Network                    | Spark executors must reach the object store. Schema setup and snapshot creation use the Milvus SDK; result commit must reach the Proxy management HTTP endpoint. |
+| Network                    | Spark driver and executors must reach the object store. Schema setup and snapshot creation use the Milvus SDK; result commit must reach the Proxy management HTTP endpoint. |
+
+For an executable local example that creates sample data, runs the job, commits
+the result and verifies the values, use
+[`scripts/run_backfill_demo.sh`](../scripts/run_backfill_demo.sh). It documents
+the required Spark, Java and Python environment.
 
 ## 3. The flow at a glance
 
@@ -174,9 +180,14 @@ info = client.describe_snapshot(
     collection_name="my_collection",
 )
 snapshot_location = info.s3_location
-# SnapshotInfo commonly returns a bucket-relative object key, for example:
-# files/snapshots/<collection-id>/metadata/<snapshot-id>.json
-snapshot_path = f"s3a://bucket/{snapshot_location.lstrip('/')}"
+# Keep a complete URI, including minio://endpoint/bucket/key, unchanged.
+# Only bucket-relative keys need the configured bucket added.
+snapshot_path = (
+    snapshot_location
+    if "://" in snapshot_location
+    else f"s3a://bucket/{snapshot_location.lstrip('/')}"
+)
+print(snapshot_path)  # Use this value for --snapshot below.
 ```
 
 `compaction_protection_seconds` tells Milvus to keep segment files pinned
@@ -189,22 +200,37 @@ column groups and fail when the new field has no column group yet.
 
 ### 5.3 Submit the Spark job
 
-Minimal `spark-submit` example (standalone / YARN):
+The following example uses Linux and YARN cluster mode. Set `CONNECTOR_JAR`
+to the assembly built for the cluster's OS and architecture, `HADOOP_VERSION`
+to the version in the Spark distribution, and `JSIG_PATH` to the Java 21
+`libjsig.so` path present on both driver and executor hosts. Preloading it must
+happen before each JVM starts. The example uses Hadoop 3.4.1, as shipped with
+the project's Spark 4.0.0 baseline.
 
 ```bash
+CONNECTOR_JAR=/path/to/spark-connector-assembly.jar
+HADOOP_VERSION=3.4.1
+JSIG_PATH=/path/to/java-21/lib/libjsig.so
+
 spark-submit \
   --master yarn \
   --deploy-mode cluster \
+  --packages "org.apache.hadoop:hadoop-aws:$HADOOP_VERSION" \
+  --exclude-packages software.amazon.awssdk:bundle \
+  --conf spark.plugins=com.zilliz.spark.connector.extensions.MilvusSparkPlugin \
+  --conf "spark.yarn.appMasterEnv.LD_PRELOAD=$JSIG_PATH" \
+  --conf "spark.executorEnv.LD_PRELOAD=$JSIG_PATH" \
   --class com.zilliz.spark.connector.apps.backfill.BackfillApp \
   --conf spark.executor.memory=8g \
   --conf spark.executor.memoryOverhead=8g \
-  spark-connector-assembly-2.0.0-<branch>-<arch>-SNAPSHOT.jar \
-  --snapshot   s3a://bucket/snapshots/123/metadata/456.json \
+  "$CONNECTOR_JAR" \
+  --snapshot   s3a://bucket/files/snapshots/123/metadata/456.json \
   --parquet    s3a://bucket/input/new_fields.parquet \
   --s3-endpoint s3.us-west-2.amazonaws.com \
   --s3-bucket   bucket \
   --s3-root-path files \
   --s3-region   us-west-2 \
+  --s3-use-ssl \
   --use-iam \
   --column-mapping doc_id:pk_field,category:category,score:score \
   --mode replace \
@@ -217,11 +243,17 @@ column-mapping target `external_row_id`.
 
 On Kubernetes with Spark Operator, use the same application arguments and set
 `mainClass` to
-`com.zilliz.spark.connector.apps.backfill.BackfillApp`.
+`com.zilliz.spark.connector.apps.backfill.BackfillApp`. Set `LD_PRELOAD` in both
+the driver and executor container environments instead of the YARN-specific
+setting. For client mode, preload the submitting driver JVM as shown in the
+demo script. The `--packages` option requires repository access unless the
+matching Hadoop dependencies are already installed in the runtime.
 
 ### 5.4 Read the result
 
-The job emits `backfill_result.json` to `--output-result`. Shape:
+The job emits `backfill_result.json` to `--output-result`. A successful Spark
+job means the files and result JSON were written; it does not commit them to
+Milvus. Continue with step 5.5 before querying the new values. Shape:
 
 ```json
 {
@@ -281,14 +313,16 @@ address for your deployment. A successful response includes
 `total_segments`, `committed_segments`, `failed_segments`, and
 `segment_statuses`. Check that `failed_segments` is zero instead of relying on
 HTTP status alone. The `result_path` must be readable through Milvus's object
-storage configuration.
+storage configuration. QueryNode may reopen the segments after the commit
+response; verify the values in step 5.7 before declaring the operation complete.
 
 ### 5.6 (Optional) Build an index on the new field
 
 Backfill does **not** build indexes. If you need one:
 
 ```python
-index_params = MilvusClient.prepare_index_params(
+index_params = client.prepare_index_params()
+index_params.add_index(
     field_name="category",
     index_type="Trie",
 )
@@ -303,9 +337,21 @@ Milvus will index the new binlogs and re-reopen the segments when done.
 ### 5.7 Verify
 
 - `describe_collection` → confirm schema includes new fields.
-- `query(expr="pk in [...]", output_fields=["category", "score"])` → confirm values.
-- `get_segment_info` → confirm every segment's `DataVersion` (or
-  `manifest_version`) moved forward.
+- Query known matched and unmatched keys and compare the returned values with
+  the selected merge mode. For the example collection whose primary key is
+  `pk_field`:
+
+```python
+rows = client.query(
+    collection_name="my_collection",
+    filter="pk_field in [1, 2]",
+    output_fields=["pk_field", "category", "score"],
+)
+print(rows)
+```
+
+If the segments have not reopened yet, retry this verification with a bounded
+timeout. A successful commit response alone does not prove query visibility.
 
 ## 6. Modes: replace vs coalesce vs overwrite
 

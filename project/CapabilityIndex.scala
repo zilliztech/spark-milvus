@@ -3,8 +3,9 @@ import scala.util.matching.Regex
 import sbt._
 import sbt.Keys._
 
-/** Checks that the capability index in docs/design/capabilities.md and the
-  * capability ids declared in package docs still agree.
+/** Checks that the capability index in
+  * docs/design/projects/spark-milvus/capabilities.md and the capability ids
+  * declared in package docs still agree.
   *
   * The index is the only thing tying a feature to the code that implements it,
   * and nothing else notices when it drifts: renaming a package, moving code or
@@ -16,7 +17,8 @@ object CapabilityIndex {
   val checkCapabilityIndex =
     taskKey[Unit]("Verify capabilities.md and the package docs still agree")
 
-  private val CapabilitiesDoc = "docs/design/capabilities.md"
+  private val CapabilitiesDoc =
+    "docs/design/projects/spark-milvus/capabilities.md"
 
   /** A row in one of the capability tables: `| R1 | ... | ... | location | ...`
     */
@@ -94,12 +96,12 @@ object CapabilityIndex {
   }
 
   /** The ids a package doc claims: those inside its `Capabilities: ... (see
-    * docs/design/capabilities.md)` sentence, which may wrap across lines. Ids
-    * anywhere else are prose — "Storage V2", "DataSource V2", "the RPC behind
-    * C1" — and must not count as a claim.
+    * docs/design/projects/spark-milvus/capabilities.md)` sentence, which may
+    * wrap across lines. Ids anywhere else are prose — "Storage V2", "DataSource
+    * V2", "the RPC behind C1" — and must not count as a claim.
     */
   private val ClaimSentence: Regex =
-    raw"(?s)Capabilities:(.*?)\(see[\s*]+docs/design/capabilities\.md\)".r
+    raw"(?s)Capabilities:(.*?)\(see[\s*]+docs/design/projects/spark-milvus/capabilities\.md\)".r
 
   private def claimedIn(doc: String): Set[String] =
     ClaimSentence
@@ -137,7 +139,7 @@ object CapabilityIndex {
       val doc = root / CapabilitiesDoc
       if (!doc.isFile)
         sys.error(
-          s"$CapabilitiesDoc not found: docs/design is the spark-milvus-design submodule; run `git submodule update --init docs/design`"
+          s"$CapabilitiesDoc not found: docs/design is the vector-batch-knowledge submodule; run `git submodule update --init docs/design`"
         )
 
       val (body, section11) = sections(IO.read(doc))

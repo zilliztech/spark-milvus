@@ -7,9 +7,9 @@ import java.util.BitSet
   * from: `rows` vectors laid out end to end in a buffer Knowhere reads, the
   * rows the search skips, and where the batch starts in its unit, so that row
   * `firstRow + i` of the unit is row `i` of the batch
-  * (docs/design/architecture/table-version.html section 3). A Milvus segment's
-  * batches come from `SegmentVectors`, a DataFrame input's from
-  * [[VectorBatch.borrow]].
+  * (docs/design/projects/spark-milvus/architecture/table-version.html section
+  * 3). A Milvus segment's batches come from `SegmentVectors`, a DataFrame
+  * input's from [[VectorBatch.borrow]].
   */
 trait VectorBatch extends AutoCloseable {
   def base: KnowhereBuffers.Base

@@ -14,8 +14,8 @@ package com.zilliz.milvus.storage
   * shim with a written exit condition.
   *
   * Main types: StorageProperties. Capabilities: R3 (see
-  * docs/design/capabilities.md). Design:
-  * docs/design/architecture/storage-access.html section 3 and
-  * storage-auth.html.
+  * docs/design/projects/spark-milvus/capabilities.md). Design:
+  * docs/design/projects/spark-milvus/architecture/storage-access.html section 3
+  * and storage-auth.html.
   */
 package object credential

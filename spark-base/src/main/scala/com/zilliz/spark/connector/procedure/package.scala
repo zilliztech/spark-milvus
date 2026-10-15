@@ -4,7 +4,7 @@ package com.zilliz.spark.connector
   * the interface (parameters, result table, `run` on the driver), `Procedures`
   * the registry by name, and each body is a plain Scala entry point a job can
   * also call directly. The SQL front that reaches them is `spark.extensions`.
-  * Design: docs/design/architecture/procedure.html.
+  * Design: docs/design/projects/spark-milvus/architecture/procedure.html.
   *
   * Snapshot, index, collection-lifecycle, and describe procedures delegate to
   * `client.api` and own their client for the duration of one driver-side call.
@@ -31,9 +31,10 @@ package com.zilliz.spark.connector
   * way. `RestoreSnapshotProcedure` asks Milvus to restore such a snapshot into
   * a new collection through `RestoreExternalSnapshot`, after the same root
   * check, and can wait on the restore job. Design:
-  * docs/design/architecture/vector-search.html section 2.7.
+  * docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.7.
   *
   * Capabilities: A1, A2, A3, A4, A5, A7, W6, W8 (see
-  * docs/design/capabilities.md).
+  * docs/design/projects/spark-milvus/capabilities.md).
   */
 package object procedure

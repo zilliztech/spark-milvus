@@ -342,7 +342,7 @@ lazy val spark42 = sparkProject(Versions.line("4.2"))
   .settings(lineBundle(Versions.line("4.2")))
   .dependsOn(core % "test->test")
 
-// Spark Connect on the 4.x lines (docs/design/architecture/dataframe-api.html
+// Spark Connect on the 4.x lines (docs/design/projects/spark-milvus/architecture/dataframe-api.html
 // section 9). The suite runs the server in its own JVM, beside the classic
 // session, and starts the client as a JVM of its own: the client jar carries
 // the sql-api classes rebuilt against a relocated Arrow, which would replace
@@ -404,7 +404,7 @@ lazy val searchMergeSuite: Seq[Setting[_]] = Seq(
 )
 
 // A Spark line's bundle that runs: packed by root's rules and versioned as
-// root's artifact (docs/design/architecture/modules.md section 4, constraints
+// root's artifact (docs/design/projects/spark-milvus/architecture/modules.md section 4, constraints
 // 6 and 17).
 def lineBundle(l: Versions.SparkLine): Seq[Setting[_]] =
   fatJarRules ++ Seq(
@@ -529,7 +529,7 @@ lazy val rootAssemblySettings: Seq[Setting[_]] = fatJarRules ++ Seq(
 )
 
 // How a fat jar is packed: root's, and a Spark line's bundle
-// (docs/design/architecture/modules.md section 4, constraint 6).
+// (docs/design/projects/spark-milvus/architecture/modules.md section 4, constraint 6).
 lazy val fatJarRules: Seq[Setting[_]] = Seq(
   assembly / parallelExecution := true,
   assembly / assemblyPackageScala / assembleArtifact := false,

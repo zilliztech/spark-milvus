@@ -20,7 +20,7 @@ import io.milvus.grpc.schema.{DataType, FieldSchema}
   *
   * A file that cannot be read fails the task: an empty plan in its place would
   * return deleted rows with no error, the failure the delete path once had
-  * (docs/design/architecture/snapshot.html section 3).
+  * (docs/design/projects/spark-milvus/architecture/snapshot.html section 3).
   */
 object DeletePlans {
 

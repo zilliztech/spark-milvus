@@ -1,6 +1,6 @@
 // The one statement the connector adds to Spark SQL:
 //   CALL milvus.system.<name>( positional, name => constant, `option.key` => constant )
-// Design: docs/design/architecture/procedure.html. Values are constants only,
+// Design: docs/design/projects/spark-milvus/architecture/procedure.html. Values are constants only,
 // so this grammar does not depend on Spark's expression grammar and one file
 // serves every Spark line (decision 17).
 grammar MilvusCall;

@@ -6,7 +6,7 @@ package com.zilliz.spark.connector
   * (`spark-base`); this directory holds the parser antlr generates at this
   * line's version and `MilvusSqlParser`, the `ParserInterface` adapter, which
   * on Spark 3.5 has no `parseRoutineParam`. Design:
-  * docs/design/architecture/procedure.html.
+  * docs/design/projects/spark-milvus/architecture/procedure.html.
   *
   * The shared directory also holds `MilvusSparkPlugin`: set through
   * `spark.plugins`, it loads the native bundle on every executor at start, so
@@ -27,9 +27,10 @@ package com.zilliz.spark.connector
   * `VectorKernels`). This directory's `NearestByExtensions` registers the
   * functions, the table function and the rule, and `Datasets` builds a
   * DataFrame over a plan and a relation over rows with this line's
-  * constructors. Design: docs/design/architecture/dataframe-api.html.
+  * constructors. Design:
+  * docs/design/projects/spark-milvus/architecture/dataframe-api.html.
   *
   * Capabilities: A1, A2, A3, A4, A5, V5, V7, V9 (see
-  * docs/design/capabilities.md).
+  * docs/design/projects/spark-milvus/capabilities.md).
   */
 package object extensions

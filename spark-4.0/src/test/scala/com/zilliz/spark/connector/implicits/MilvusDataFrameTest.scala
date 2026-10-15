@@ -40,8 +40,9 @@ import com.zilliz.spark.connector.testkit.LocalMilvusCollection.{
 
 /** `buildIndex` and `writeSnapshot` on a Milvus table's DataFrame, and the
   * `table` argument of `CALL milvus.system.build_index` and `write_snapshot`
-  * they run through (docs/design/architecture/dataframe-api.html section 9), on
-  * every Spark line.
+  * they run through
+  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
+  * 9), on every Spark line.
   *
   * The collection is two local segments of eight rows, each with an L2 HNSW
   * index; the builds here are for the inner product, so a search through the

@@ -35,7 +35,8 @@ import io.milvus.grpc.milvus.RestoreSnapshotState
   * instead of after Milvus has opened a job for it. Without `wait` the row
   * reports the job Milvus opened; with `wait` the job is polled with the
   * bounded rule the other management procedures share, and the row reports how
-  * it ended (docs/design/architecture/vector-search.html section 2.7).
+  * it ended (docs/design/projects/spark-milvus/architecture/vector-search.html
+  * section 2.7).
   */
 object RestoreSnapshotProcedure extends Procedure {
 

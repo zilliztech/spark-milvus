@@ -22,7 +22,8 @@ import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 /** Which rows a search must not see, decided before any search path runs
-  * (docs/design/architecture/vector-search.html sections 2.3 and 2.4).
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html sections
+  * 2.3 and 2.4).
   */
 class RowExclusionsTest extends AnyFunSuite with Matchers {
 

@@ -31,13 +31,14 @@ import io.milvus.grpc.schema.CollectionSchema
   * The task opens what the Milvus format side offers for each of its segments —
   * vector batches for exact scan, or an index handle for indexed search — and
   * the computation in `core.vector` searches it. The plan chose which side the
-  * task keeps (docs/design/architecture/vector-search.html section 2.1).
-  * Keeping its queries, the task takes every group of its range first and reads
-  * each segment once, one at a time, searching every group on it; that is also
-  * what a task with one group does. Keeping its segments, it reads the set into
-  * memory and the groups arrive one after another. Either way the segments are
-  * read once, whichever way the query set was delivered; a kept set larger than
-  * the task's budget is read again for every group instead
+  * task keeps
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.1). Keeping its queries, the task takes every group of its range first and
+  * reads each segment once, one at a time, searching every group on it; that is
+  * also what a task with one group does. Keeping its segments, it reads the set
+  * into memory and the groups arrive one after another. Either way the segments
+  * are read once, whichever way the query set was delivered; a kept set larger
+  * than the task's budget is read again for every group instead
   * (search-resources.html section 3.3).
   */
 private[search] object SegmentSetSearch extends Logging {
@@ -60,7 +61,7 @@ private[search] object SegmentSetSearch extends Logging {
       // before the top k, with SQL three-valued logic.
       predicate: Option[PredicateExpr] = None,
       // The function a nearest-by join ranks by, for the pairs Knowhere does
-      // not score as it does (docs/design/architecture/dataframe-api.html
+      // not score as it does (docs/design/projects/spark-milvus/architecture/dataframe-api.html
       // section 2); without one Knowhere scores every pair.
       function: Option[RankingFunction] = None
   ) extends Serializable
@@ -161,7 +162,9 @@ private[search] object SegmentSetSearch extends Logging {
     * vectors are copied into a query matrix as it arrives and its heap bytes
     * are let go, so what the task keeps on the heap is ids and top-k. The
     * candidates go out group by group, each group's merger released once its
-    * rows are out (docs/design/architecture/vector-search.html section 2.1).
+    * rows are out
+    * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+    * 2.1).
     */
   private def keepingQueries(
       segments: Seq[Long],
@@ -266,7 +269,8 @@ private[search] object SegmentSetSearch extends Logging {
     * set with an estimated segment is read until it either fits or goes over;
     * what was read by then is released and read again per group, which is the
     * cost of an unrecorded size, not a failure
-    * (docs/design/architecture/search-resources.html section 3.3).
+    * (docs/design/projects/spark-milvus/architecture/search-resources.html
+    * section 3.3).
     */
   private def holdOrStream(
       execution: SearchExecutionPlan.Task,
@@ -338,10 +342,10 @@ private[search] object SegmentSetSearch extends Logging {
     * One record per query rather than one per candidate is what keeps this
     * stage's output at the `queries * k * CandidateBytes.Width` the plan counts
     * on, and what lets the merge stage walk two answers instead of aggregating
-    * candidate by candidate (docs/design/architecture/vector-search.html
-    * section 2.1). The merger retains its primitive columns alongside the
-    * packed bytes until the caller drops the group; SearchPlan budgets for both
-    * payloads.
+    * candidate by candidate
+    * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+    * 2.1). The merger retains its primitive columns alongside the packed bytes
+    * until the caller drops the group; SearchPlan budgets for both payloads.
     */
   private def candidates(
       merger: TopKMerger,

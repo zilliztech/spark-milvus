@@ -51,12 +51,12 @@ private[connector] object MilvusTables {
   /** The Milvus table a name stands for, resolved by Spark's own rules: a
     * temporary view, a global temporary view or a catalog table. A procedure
     * that works on every row of a table takes its table this way
-    * (docs/design/architecture/dataframe-api.html section 9), so the name has
-    * to stand for the whole table: below aliases, views and column projections
-    * there is one read of a Milvus table and nothing that drops or adds rows. A
-    * view made from a DataFrame holds the DataFrame's analyzed plan, so the
-    * table is the object that plan read, with the snapshot it pinned, and the
-    * options are that read's over the table's.
+    * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
+    * 9), so the name has to stand for the whole table: below aliases, views and
+    * column projections there is one read of a Milvus table and nothing that
+    * drops or adds rows. A view made from a DataFrame holds the DataFrame's
+    * analyzed plan, so the table is the object that plan read, with the
+    * snapshot it pinned, and the options are that read's over the table's.
     */
   def named(spark: SparkSession, name: String): Read = {
     @tailrec

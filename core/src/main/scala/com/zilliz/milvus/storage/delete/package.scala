@@ -4,6 +4,6 @@ package com.zilliz.milvus.storage
   *
   * Main types: DeletePlan, DeltaLogReader; DeleteBitset and DeltaLogDecoder are
   * the designed names they grow into. Capabilities: R8 (see
-  * docs/design/capabilities.md).
+  * docs/design/projects/spark-milvus/capabilities.md).
   */
 package object delete

@@ -5,7 +5,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 /** What `CALL milvus.system.build_index(...)` takes and answers with
-  * (docs/design/architecture/vector-search.html section 2.7).
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.7).
   */
 class BuildIndexProcedureTest extends AnyFunSuite with Matchers {
 

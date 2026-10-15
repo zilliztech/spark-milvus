@@ -28,8 +28,9 @@ import com.zilliz.spark.connector.testkit.LocalMilvusCollection.{
 }
 
 /** The connector's DataFrame methods and SQL from a Spark Connect client, on
-  * the 4.x lines (docs/design/architecture/dataframe-api.html sections 6 and
-  * 9).
+  * the 4.x lines
+  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html sections
+  * 6 and 9).
   *
   * The server runs here, in the test JVM, over a classic session with the
   * connector's extension and plugin. The client runs in a JVM of its own

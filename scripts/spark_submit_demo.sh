@@ -53,6 +53,7 @@ CATALOG=spark.sql.catalog.milvus
   --jars "$JAR" \
   --conf spark.sql.extensions=com.zilliz.spark.connector.extensions.MilvusSparkSessionExtensions \
   --conf spark.plugins=com.zilliz.spark.connector.extensions.MilvusSparkPlugin \
+  --conf 'spark.redaction.regex=(?i)secret|password|token|access[._]?key' \
   --conf "spark.executorEnv.$PRELOAD=$JSIG" \
   --conf "$CATALOG=com.zilliz.spark.connector.catalog.MilvusCatalog" \
   --conf "$CATALOG.milvus.uri=$MILVUS_URI" \

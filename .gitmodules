@@ -10,5 +10,5 @@
 	branch = codex/knowhere-jni-pr
 [submodule "docs/design"]
 	path = docs/design
-	url = https://github.com/zilliztech/spark-milvus-design.git
+	url = https://github.com/zilliztech/vector-batch-knowledge.git
 	branch = master

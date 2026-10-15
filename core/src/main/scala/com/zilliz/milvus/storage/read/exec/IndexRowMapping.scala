@@ -10,7 +10,8 @@ import java.util.BitSet
   * rows those are, least significant bit first, and this turns it into the two
   * directions a search needs: a returned label becomes a segment row number,
   * and the rows a search must skip become the labels to mask
-  * (docs/design/architecture/vector-search.html section 2.4).
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.4).
   *
   * A column without nulls maps label to row directly, which is what
   * [[IndexRowMapping.identity]] carries.

@@ -10,7 +10,8 @@ import com.zilliz.milvus.storage.vector.RankingFunction
 
 /** Spark's own computation of one NEAREST BY, which the Spark line that has the
   * syntax gives a [[MilvusNearestByJoin]] when it replaces the join
-  * (docs/design/architecture/dataframe-api.html sections 2 and 4).
+  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html sections
+  * 2 and 4).
   *
   * The connector computes what Knowhere computes as Spark would. The rest is
   * Spark's: `function` scores the base rows Knowhere is not given, and

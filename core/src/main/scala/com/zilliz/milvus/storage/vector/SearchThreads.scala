@@ -19,8 +19,8 @@ import scala.collection.mutable.ArrayBuffer
   * calls the cores are free, and this is what fills them. One pool for the JVM,
   * as wide as the processors it may use (`-XX:ActiveProcessorCount` on the
   * executors), daemon threads named for the log
-  * (docs/design/architecture/vector-search.html section 2.1, 2026-09-27
-  * decision).
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.1, 2026-09-27 decision).
   */
 object SearchThreads {
 

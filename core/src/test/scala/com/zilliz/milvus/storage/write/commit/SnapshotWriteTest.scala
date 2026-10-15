@@ -19,8 +19,9 @@ import com.zilliz.milvus.storage.snapshot.{
 }
 
 /** W8: what a snapshot write produces is the snapshot it copied, carrying the
-  * indexes a build job made (docs/design/architecture/vector-search.html
-  * section 2.7).
+  * indexes a build job made
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.7).
   */
 class SnapshotWriteTest extends AnyFunSuite with Matchers with Inside {
 
