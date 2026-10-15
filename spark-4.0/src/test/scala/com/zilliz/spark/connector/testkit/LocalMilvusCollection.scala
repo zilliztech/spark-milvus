@@ -95,16 +95,18 @@ object LocalMilvusCollection {
           dataType = DataType.Int64,
           nullable = true
         )
-      ) ++ Option.when(floats)(
-        FieldSchema(
-          fieldID = 103L,
-          name = "floats",
-          dataType = DataType.Array,
-          elementType = DataType.Float,
-          typeParams = Seq(KeyValuePair("max_capacity", "16")),
-          nullable = true
-        )
-      )
+      ) ++ (if (floats)
+              Some(
+                FieldSchema(
+                  fieldID = 103L,
+                  name = "floats",
+                  dataType = DataType.Array,
+                  elementType = DataType.Float,
+                  typeParams = Seq(KeyValuePair("max_capacity", "16")),
+                  nullable = true
+                )
+              )
+            else None)
     )
 
   /** Writes the segments under `directory` and returns the options that read

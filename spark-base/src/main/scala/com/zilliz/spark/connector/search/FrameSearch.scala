@@ -26,7 +26,6 @@ import com.zilliz.milvus.storage.schema.{
   VectorLayout
 }
 import com.zilliz.milvus.storage.vector.{
-  CandidateBytes,
   CarriedCandidates,
   EngineRange,
   ExactScan,
@@ -355,22 +354,17 @@ private[connector] object FrameSearch extends Logging {
       val results = merger.results(query)
       if (results.isEmpty) Iterator.empty
       else {
-        val bytes = results.iterator
-          .map(candidate =>
-            CandidateBytes.Width.toLong + 4L +
-              kept.get(candidate.rowOffset).getSizeInBytes.toLong
-          )
-          .sum
+        val bytes = CarriedCandidates.encodedSize(results)(candidate =>
+          kept.get(candidate.rowOffset).getSizeInBytes
+        )
         require(
           bytes <= maxBytes && bytes <= Int.MaxValue.toLong,
           s"DataFrame search query ${ids(query)} encodes $bytes candidate bytes, exceeding the answer limit of ${math
               .min(maxBytes, Int.MaxValue.toLong)}; reduce k or the returned columns, or increase executor memory"
         )
         Iterator.single(
-          ids(query) -> CarriedCandidates.writeSorted(
-            results.map(candidate =>
-              candidate -> kept.get(candidate.rowOffset).getBytes
-            )
+          ids(query) -> CarriedCandidates.writeSorted(results, bytes.toInt)(
+            candidate => kept.get(candidate.rowOffset).getBytes
           )
         )
       }
@@ -383,13 +377,15 @@ private[connector] object FrameSearch extends Logging {
       packed: Array[Byte],
       width: Int
   ): Iterator[(Long, InternalRow)] = {
-    val rows = Vector.newBuilder[UnsafeRow]
+    // Preserve eager format and per-Spark row-region checks before handoff.
+    val row = new UnsafeRow(width)
     CarriedCandidates.foreach(packed) { (_, _, _, at, length) =>
-      val row = new UnsafeRow(width)
       row.pointTo(packed, Platform.BYTE_ARRAY_OFFSET + at, length)
-      rows += row
     }
-    rows.result().iterator.map(row => query -> row.copy())
+    CarriedCandidates.mapRows(packed) { (at, length) =>
+      row.pointTo(packed, Platform.BYTE_ARRAY_OFFSET + at, length)
+      query -> row.copy()
+    }
   }
 
   /** One task for every base partition and query group: task `i` computes base

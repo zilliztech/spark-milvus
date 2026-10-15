@@ -213,8 +213,7 @@ private[search] object SearchTake {
           .getOrElseUpdate(
             row.getLong(segmentColumn),
             mutable.ArrayBuffer.empty[InternalRow]
-          )
-          .addOne(row.copy())
+          ) += row.copy()
     }
     (withoutHit, groups)
   }

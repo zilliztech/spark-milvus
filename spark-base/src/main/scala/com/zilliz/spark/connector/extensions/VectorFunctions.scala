@@ -130,8 +130,8 @@ object VectorFunction {
       messageParameters = Map(
         "paramIndex" -> position,
         "requiredType" -> "\"ARRAY<FLOAT>\"",
-        "inputSql" -> s"\"${argument.sql}\"",
-        "inputType" -> s"\"${argument.dataType.sql}\""
+        "inputSql" -> s""""${argument.sql}"""",
+        "inputType" -> s""""${argument.dataType.sql}""""
       )
     )
 }

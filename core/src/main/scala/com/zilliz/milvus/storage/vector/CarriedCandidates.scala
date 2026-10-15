@@ -32,14 +32,48 @@ object CarriedCandidates {
   ): Array[Byte] = {
     val buffer = ByteBuffer.allocate(rows.map(Header + _._2.length).sum)
     rows.foreach { case (candidate, row) =>
-      buffer
-        .putLong(candidate.segmentId)
-        .putLong(candidate.rowOffset)
-        .putDouble(candidate.score)
-        .putInt(row.length)
-        .put(row)
+      putRecord(buffer, candidate, row)
     }
     buffer.array()
+  }
+
+  /** The encoded size without collecting lengths or fetching row bytes. */
+  def encodedSize(candidates: Seq[Candidate])(
+      rowSize: Candidate => Int
+  ): Long = {
+    var bytes = 0L
+    candidates.foreach { candidate =>
+      bytes += Header.toLong + rowSize(candidate).toLong
+    }
+    bytes
+  }
+
+  /** Writes the supplied order into an exactly sized answer. The caller checks
+    * [[encodedSize]] against its budget and the array limit before narrowing it
+    * to `bytes`; candidates and associated rows must stay unchanged.
+    */
+  def writeSorted(candidates: Seq[Candidate], bytes: Int)(
+      rowBytes: Candidate => Array[Byte]
+  ): Array[Byte] = {
+    val buffer = ByteBuffer.allocate(bytes)
+    candidates.foreach { candidate =>
+      putRecord(buffer, candidate, rowBytes(candidate))
+    }
+    buffer.array()
+  }
+
+  private def putRecord(
+      buffer: ByteBuffer,
+      candidate: Candidate,
+      row: Array[Byte]
+  ): Unit = {
+    buffer
+      .putLong(candidate.segmentId)
+      .putLong(candidate.rowOffset)
+      .putDouble(candidate.score)
+      .putInt(row.length)
+      .put(row)
+    ()
   }
 
   /** The candidates in the order they were packed, best first: each one's place
@@ -60,6 +94,27 @@ object CarriedCandidates {
         length
       )
       at += Header + length
+    }
+  }
+
+  /** Maps each row's byte region when pulled, without retaining row views. The
+    * caller keeps `packed` unchanged while consuming the iterator and performs
+    * any eager checks it needs with [[foreach]] before handing it out.
+    */
+  def mapRows[A](packed: Array[Byte])(
+      read: (Int, Int) => A
+  ): Iterator[A] = new Iterator[A] {
+    private val buffer = ByteBuffer.wrap(packed)
+    private var at = 0
+
+    override def hasNext: Boolean = at < packed.length
+
+    override def next(): A = {
+      if (!hasNext) throw new NoSuchElementException("end of carried answer")
+      val length = buffer.getInt(at + CandidateBytes.Width)
+      val from = at + Header
+      at += Header + length
+      read(from, length)
     }
   }
 
@@ -99,7 +154,12 @@ object CarriedCandidates {
     }
     // The output's size is known once the k are chosen, so they are chosen
     // first, as (side, offset, length), and copied after.
-    val chosen = new Array[Long](k)
+    // Every complete record has at least its header, including an empty row.
+    // Bound the scratch without a counting pass; valid inputs cannot fill it
+    // before reaching k or exhausting both answers.
+    val capacity =
+      math.min(k.toLong, (left.length.toLong + right.length) / Header).toInt
+    val chosen = new Array[Long](capacity)
     var count = 0
     var l = 0
     var r = 0

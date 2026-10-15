@@ -1,5 +1,7 @@
 package com.zilliz.spark.connector.search
 
+import scala.collection.mutable
+
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{Expression, UnsafeProjection}
 import org.apache.spark.sql.catalyst.util.ArrayData
@@ -253,15 +255,43 @@ private[connector] object NearestByQueryRows {
       packedBytes: Int => Long
   ): Counts = rows
     .mapPartitions { rows =>
-      val toUnsafe = UnsafeProjection.create(types)
-      var counts = Counts.Zero
-      rows.foreach { row =>
-        val bytes = toUnsafe(row).getSizeInBytes.toLong
-        counts = counts + Counts.of(judge(row), bytes, packedBytes)
-      }
-      Iterator.single(counts)
+      Iterator.single(countPartition(rows, types, judge, packedBytes))
     }
     .fold(Counts.Zero)(_ + _)
+
+  /** Task-local counters, frozen only after the partition is consumed. */
+  private[search] def countPartition(
+      rows: Iterator[InternalRow],
+      types: Array[DataType],
+      judge: InternalRow => QueryVector,
+      packedBytes: Int => Long
+  ): Counts = {
+    val toUnsafe = UnsafeProjection.create(types)
+    var unranked = 0L
+    var searched = 0L
+    var bySpark = 0L
+    var heldBytes = 0L
+    val lengths = mutable.HashMap.empty[Int, Long]
+    while (rows.hasNext) {
+      val row = rows.next()
+      val bytes = toUnsafe(row).getSizeInBytes.toLong
+      judge(row) match {
+        case QueryVector.Unranked =>
+          unranked += 1L
+          heldBytes += bytes
+        case QueryVector.Searched(vector) =>
+          val length = vector.length
+          val contribution = bytes + packedBytes(length)
+          searched += 1L
+          heldBytes += contribution
+          lengths.update(length, lengths.getOrElse(length, 0L) + 1L)
+        case QueryVector.BySpark =>
+          bySpark += 1L
+          heldBytes += bytes
+      }
+    }
+    Counts(unranked, searched, bySpark, heldBytes, lengths.toMap)
+  }
 
 }
 
