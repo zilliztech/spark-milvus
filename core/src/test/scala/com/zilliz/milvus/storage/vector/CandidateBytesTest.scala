@@ -1,5 +1,7 @@
 package com.zilliz.milvus.storage.vector
 
+import java.lang.{Double => JavaDouble}
+import scala.collection.mutable.ArrayBuffer
 import scala.util.Random
 
 import org.scalatest.funsuite.AnyFunSuite
@@ -139,5 +141,98 @@ class CandidateBytesTest extends AnyFunSuite with Matchers {
     // A metric the search does not rank by has no MetricType, so it cannot
     // reach the packing at all.
     MetricType.fromName("EUCLID") shouldBe None
+  }
+
+  test(
+    "multiway merging matches an independent sorted oracle for every metric"
+  ) {
+    val random = new Random(811)
+    val scores = Vector(
+      Double.NaN,
+      JavaDouble.longBitsToDouble(0x7ff8000000000042L),
+      Double.NegativeInfinity,
+      -0.0,
+      0.0,
+      Double.PositiveInfinity,
+      1.0,
+      -1.0
+    )
+    MetricType.values.foreach { metric =>
+      (0 until 20).foreach { trial =>
+        val entries = Vector.tabulate(trial % 12) { run =>
+          Vector.tabulate(random.nextInt(24)) { row =>
+            candidate(
+              run % 3,
+              run * 100L + row,
+              scores(random.nextInt(scores.size))
+            )
+          }
+        }
+        val runs = entries.map(CandidateBytesFixture.pack(_, metric))
+        val originals = runs.map(_.clone())
+        Seq(1, 7, 37, Int.MaxValue).foreach { k =>
+          val expected = CandidateBytesFixture.pack(
+            entries.flatten.sorted(Candidate.ranking(metric)).take(k),
+            metric
+          )
+          CandidateBytes.merge(runs, k, metric).toSeq shouldBe expected.toSeq
+          CandidateBytes.merge(random.shuffle(runs), k, metric).toSeq shouldBe
+            expected.toSeq
+          val partials =
+            runs.grouped(3).map(CandidateBytes.merge(_, k, metric)).toVector
+          CandidateBytes
+            .merge(partials, k, metric)
+            .toSeq shouldBe expected.toSeq
+        }
+        runs.zip(originals).foreach { case (run, original) =>
+          run.toSeq shouldBe original.toSeq
+        }
+      }
+    }
+  }
+
+  test(
+    "multiway shortcuts accept mutable runs and reuse a complete single run"
+  ) {
+    val packed = CandidateBytesFixture.pack(
+      (0 until 3).map(row => candidate(1L, row, row.toDouble)),
+      MetricType.L2
+    )
+    val inputs = ArrayBuffer(CandidateBytes.Empty, packed)
+    (CandidateBytes.merge(
+      inputs,
+      Int.MaxValue,
+      MetricType.L2
+    ) eq packed) shouldBe true
+    CandidateBytes.count(
+      CandidateBytes.merge(inputs, 2, MetricType.L2)
+    ) shouldBe 2
+    CandidateBytes.merge(Vector.empty, 1, MetricType.L2).length shouldBe 0
+    the[IllegalArgumentException] thrownBy
+      CandidateBytes.merge(Vector.empty, 0, MetricType.L2)
+    Seq(
+      Vector(new Array[Byte](23)),
+      Vector(packed, new Array[Byte](23), packed)
+    )
+      .foreach { malformed =>
+        the[IllegalArgumentException] thrownBy
+          CandidateBytes.merge(malformed, 1, MetricType.L2)
+      }
+  }
+
+  test(
+    "packed output lengths are checked before Int conversion or allocation"
+  ) {
+    CandidateBytes.checkedLength(Int.MaxValue.toLong) shouldBe Int.MaxValue
+    Seq(-1L, Int.MaxValue.toLong + 1L).foreach { bytes =>
+      the[IllegalArgumentException] thrownBy CandidateBytes.checkedLength(bytes)
+    }
+    the[IllegalArgumentException] thrownBy CandidateBytes.writeColumns(
+      Array.emptyLongArray,
+      Array.emptyLongArray,
+      Array.emptyDoubleArray,
+      0,
+      Int.MaxValue
+    )
   }
 }

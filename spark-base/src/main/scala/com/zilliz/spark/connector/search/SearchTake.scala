@@ -214,7 +214,7 @@ private[search] object SearchTake {
             row.getLong(segmentColumn),
             mutable.ArrayBuffer.empty[InternalRow]
           )
-          .addOne(row.copy())
+          .+=(row.copy())
     }
     (withoutHit, groups)
   }

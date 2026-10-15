@@ -1,7 +1,7 @@
 package com.zilliz.milvus.storage.vector
 
-import java.lang.{Double => JavaDouble, Long => JavaLong}
 import java.nio.ByteBuffer
+import scala.collection.IndexedSeq
 
 import com.zilliz.milvus.storage.schema.MetricType
 
@@ -11,9 +11,10 @@ import com.zilliz.milvus.storage.schema.MetricType
   * score — and a task sends at most k of them for each of its queries, best
   * first under [[Candidate.ranking]]. Packing them into one array per query is
   * what keeps the first stage's output at "queries × k × Width" bytes rather
-  * than that many JVM objects, and lets the merge stage join two tasks' answers
-  * by walking both once (docs/design/architecture/vector-search.html sections
-  * 2.1 and 2.6).
+  * than that many JVM objects. The merge stage walks two answers directly, or
+  * selects the best heads of a larger batch (docs/design/architecture/
+  * candidate-merge.html). Inputs and returned arrays are read-only; an empty
+  * side or a single run may return an input array itself.
   *
   * The bytes are big-endian, so what one executor writes another reads.
   */
@@ -72,7 +73,7 @@ object CandidateBytes {
   ): Array[Byte] = {
     require(size >= 0, s"$size candidates")
     if (size == 0) return Empty
-    val packed = new Array[Byte](size * Width)
+    val packed = new Array[Byte](checkedLength(size.toLong * Width))
     val buffer = ByteBuffer.wrap(packed)
     var at = 0
     while (at < size) {
@@ -106,9 +107,8 @@ object CandidateBytes {
     if (rightSize == 0) return if (leftSize <= k) left else left.take(k * Width)
     if (leftSize == 0)
       return if (rightSize <= k) right else right.take(k * Width)
-    val size = math.min(k, leftSize + rightSize)
-    val packed = new Array[Byte](size * Width)
-    val target = ByteBuffer.wrap(packed)
+    val size = math.min(k.toLong, leftSize.toLong + rightSize).toInt
+    val packed = new Array[Byte](checkedLength(size.toLong * Width))
     val leftBuffer = ByteBuffer.wrap(left)
     val rightBuffer = ByteBuffer.wrap(right)
     var leftAt = 0
@@ -118,45 +118,58 @@ object CandidateBytes {
       val takeLeft =
         if (leftAt >= leftSize) false
         else if (rightAt >= rightSize) true
-        else better(sign, leftBuffer, leftAt, rightBuffer, rightAt) <= 0
-      val source = if (takeLeft) leftBuffer else rightBuffer
+        else
+          CandidateHeads.compare(
+            sign,
+            leftBuffer,
+            leftAt * Width,
+            rightBuffer,
+            rightAt * Width
+          ) <= 0
+      val source = if (takeLeft) left else right
       val from = (if (takeLeft) leftAt else rightAt) * Width
       val to = at * Width
-      target.putLong(to, source.getLong(from))
-      target.putLong(to + 8, source.getLong(from + 8))
-      target.putDouble(to + 16, source.getDouble(from + 16))
+      System.arraycopy(source, from, packed, to, Width)
       if (takeLeft) leftAt += 1 else rightAt += 1
       at += 1
     }
     packed
   }
 
-  /** Negative when the left candidate ranks better. */
-  private def better(
-      sign: Int,
-      left: ByteBuffer,
-      leftAt: Int,
-      right: ByteBuffer,
-      rightAt: Int
-  ): Int = {
-    val leftOffset = leftAt * Width
-    val rightOffset = rightAt * Width
-    val score = JavaDouble.compare(
-      left.getDouble(leftOffset + 16),
-      right.getDouble(rightOffset + 16)
-    ) * sign
-    if (score != 0) score
-    else {
-      val segment = JavaLong.compare(
-        left.getLong(leftOffset),
-        right.getLong(rightOffset)
-      )
-      if (segment != 0) segment
-      else
-        JavaLong.compare(
-          left.getLong(leftOffset + 8),
-          right.getLong(rightOffset + 8)
-        )
+  /** The best k across sorted runs, without allocating intermediate answers. */
+  def merge(
+      inputs: IndexedSeq[Array[Byte]],
+      k: Int,
+      metric: MetricType
+  ): Array[Byte] = {
+    require(k > 0, s"topK must be positive: $k")
+    if (inputs.isEmpty) return Empty
+    if (inputs.size == 1) return merge(inputs.head, Empty, k, metric)
+    if (inputs.size == 2) return merge(inputs(0), inputs(1), k, metric)
+    val total = inputs.foldLeft(0L)((sum, run) => sum + count(run))
+    val runs = inputs.filter(_.nonEmpty)
+    if (runs.isEmpty) return Empty
+    if (runs.size == 1) return merge(runs.head, Empty, k, metric)
+    if (runs.size == 2) return merge(runs(0), runs(1), k, metric)
+
+    val size = math.min(k.toLong, total).toInt
+    val packed = new Array[Byte](checkedLength(size.toLong * Width))
+    val buffers = runs.iterator.map(ByteBuffer.wrap).toArray
+    val heads = new CandidateHeads(buffers, metric, (_, _) => Width)
+    var at = 0
+    while (at < size) {
+      System.arraycopy(runs(heads.run), heads.offset, packed, at * Width, Width)
+      at += 1
+      if (at < size) heads.advance()
     }
+    packed
+  }
+
+  private[vector] def checkedLength(bytes: Long): Int = {
+    require(
+      bytes >= 0L && bytes <= Int.MaxValue.toLong,
+      s"Packed candidate output does not fit one array: $bytes bytes"
+    )
+    bytes.toInt
   }
 }

@@ -132,8 +132,8 @@ object NearestByArguments {
     if (!orderable)
       throw failure(
         "NON_ORDERABLE_RANKING_EXPRESSION",
-        s"The ranking expression \"${request.rankingExpression.sql}\" of type " +
-          s"\"${request.rankingExpression.dataType.sql}\" is not orderable. Provide an " +
+        s"""The ranking expression "${request.rankingExpression.sql}" of type """ +
+          s""""${request.rankingExpression.dataType.sql}" is not orderable. Provide an """ +
           "expression that returns an orderable type, such as a numeric distance like " +
           "abs(a.col - b.col) or a numeric similarity score."
       )

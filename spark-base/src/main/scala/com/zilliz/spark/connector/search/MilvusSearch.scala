@@ -12,11 +12,7 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import com.zilliz.milvus.storage.expr.{FilterExpr, PredicateExpr}
 import com.zilliz.milvus.storage.read.exec.SegmentIndexHandle
 import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
-import com.zilliz.milvus.storage.vector.{
-  CandidateBytes,
-  RankingFunction,
-  SearchPlan
-}
+import com.zilliz.milvus.storage.vector.{RankingFunction, SearchPlan}
 import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.options.{MilvusOption, SearchLimits}
 import com.zilliz.spark.connector.read.MilvusInputPartition
@@ -145,11 +141,12 @@ object MilvusSearch extends Logging {
     // The merge and take stages run under Spark's own task slots, so a task's
     // share of the unmanaged heap is the queries' budget at that concurrency.
     val stageHeap = execution.stageHeap
-    val mergeParts = execution.mergePartitions
+    val mergePlan = execution.merge
     logInfo(
-      s"Merge stage: $queryCount queries x ${plan.sets.size} answers of $k over $mergeParts partitions, " +
-        s"about ${queryCount / mergeParts} queries a partition at ${plan.sets.size.toLong * k * CandidateBytes.Width} bytes each " +
-        s"against ${stageHeap.bytes} bytes of heap a task"
+      s"Merge stage: $queryCount queries x ${plan.sets.size} answers of $k over ${mergePlan.partitions} partitions, " +
+        s"about ${mergePlan.queriesPerPartition} queries a partition at ${mergePlan.bytesPerQuery} estimated bytes each " +
+        s"against ${stageHeap.bytes} bytes of heap a task; batches up to ${mergePlan.maxRuns} runs, " +
+        s"${mergePlan.targetBytes} retained bytes per query before compaction"
     )
     val found = candidates(
       spark,
@@ -169,7 +166,7 @@ object MilvusSearch extends Logging {
       segments = plan.sets.map(_.size).sum
     )
     val hits =
-      SearchMerge.merged(spark, found, k, searchMetric, mergeParts, required)
+      SearchMerge.merged(spark, found, searchMetric, mergePlan, required)
     if (outputSchema.isEmpty) {
       val schema = hits.schema
       hits.queryExecution.toRdd.mapPartitions(rows =>

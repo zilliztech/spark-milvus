@@ -156,12 +156,11 @@ private[connector] object FrameSearch extends Logging {
         )
     )
     // Here every candidate carries its row.
-    val parts = execution.mergePartitions
     SearchMerge.byQuery[(Long, InternalRow)](
       spark,
       candidates,
-      parts,
-      CarriedCandidates.merge(_, _, k, metric),
+      execution.merge,
+      metric,
       carried(_, _, width),
       required,
       absent

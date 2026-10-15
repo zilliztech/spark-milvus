@@ -285,6 +285,28 @@ def sparkProject(l: Versions.SparkLine): Project =
       },
       libraryDependencies += scalaTest % Test,
       inConfig(Test)(Modules.nativeTest),
+      // The spill suite changes SparkEnv's process-wide threshold. Keep it
+      // in its own JVM, inheriting this line's Java, options and environment;
+      // every other suite retains its existing group, run policy and tags.
+      Test / testGrouping := {
+        val groups = (Test / testGrouping).value
+        val options = (Test / forkOptions).value
+        groups.flatMap { group =>
+          val (merge, remaining) = group.tests.partition(
+            _.name == "com.zilliz.spark.connector.search.SearchMergeTest"
+          )
+          if (merge.isEmpty) Seq(group)
+          else {
+            val original =
+              if (remaining.isEmpty) Seq.empty
+              else Seq(group.withTests(remaining))
+            original :+ group
+              .withName(s"${group.name}-search-merge")
+              .withTests(merge)
+              .withRunPolicy(Tests.SubProcess(options))
+          }
+        }
+      },
       // A line's assembly is its bundle, the fat jar spark-submit takes on that
       // line. Only a line with lineBundle packs one that runs (4.2 so far), and
       // none is published yet.
@@ -294,7 +316,7 @@ def sparkProject(l: Versions.SparkLine): Project =
     )
 
 lazy val spark35 = sparkProject(Versions.line("3.5"))
-  .settings(uatScenarios, localCollectionSuites)
+  .settings(uatScenarios, localCollectionSuites, searchMergeSuite)
   // The local collection suites build collections with core's segment fixtures.
   .dependsOn(core % "test->test")
   // Arrow 12, which Spark 3.5 ships, cannot allocate on JDK 21 (its MemoryUtil
@@ -310,11 +332,11 @@ lazy val spark40 = sparkProject(Versions.line("4.0"))
   // Reuse core's ObjectStore fixtures for source tests without loading JNI.
   .dependsOn(core % "test->test")
 lazy val spark41 = sparkProject(Versions.line("4.1"))
-  .settings(uatScenarios, localCollectionSuites, connectSuite)
+  .settings(uatScenarios, localCollectionSuites, connectSuite, searchMergeSuite)
   .settings(connectClient(Versions.line("4.1")))
   .dependsOn(core % "test->test")
 lazy val spark42 = sparkProject(Versions.line("4.2"))
-  .settings(uatScenarios, localCollectionSuites, connectSuite)
+  .settings(uatScenarios, localCollectionSuites, connectSuite, searchMergeSuite)
   .settings(connectClient(Versions.line("4.2")))
   // The fat jar for Spark 4.2; on 4.0 it is root's.
   .settings(lineBundle(Versions.line("4.2")))
@@ -372,6 +394,13 @@ lazy val localCollectionSuites: Seq[Setting[_]] = Seq(
     .map(dir =>
       (ThisBuild / baseDirectory).value / "spark-4.0" / "src" / "test" / "scala" / "com" / "zilliz" / "spark" / "connector" / dir
     )
+)
+
+// The native-free candidate merge suite exercises each line's serializers and
+// reduce-side spill. Share only this file, preserving its search package.
+lazy val searchMergeSuite: Seq[Setting[_]] = Seq(
+  Test / unmanagedSources +=
+    (ThisBuild / baseDirectory).value / "spark-4.0" / "src" / "test" / "scala" / "com" / "zilliz" / "spark" / "connector" / "search" / "SearchMergeTest.scala"
 )
 
 // A Spark line's bundle that runs: packed by root's rules and versioned as

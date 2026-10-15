@@ -1,7 +1,8 @@
 package com.zilliz.milvus.storage.vector
 
-import java.lang.{Double => JavaDouble, Long => JavaLong}
 import java.nio.ByteBuffer
+import java.util.Arrays
+import scala.collection.IndexedSeq
 
 import com.zilliz.milvus.storage.schema.MetricType
 
@@ -9,14 +10,11 @@ import com.zilliz.milvus.storage.schema.MetricType
   * first-stage task over a DataFrame input sends on
   * (docs/design/architecture/dataframe-api.html section 4).
   *
-  * A DataFrame input has no table to take a row from after the merge, so a
-  * candidate brings its row along: the three fields of [[CandidateBytes]] --
-  * where the row is, which for this input is its base partition and its
-  * position there, and its score -- then the row's length and the row's bytes,
-  * which nothing here reads. A task sends at most k for each of its queries,
-  * best first under [[Candidate.ranking]], so the merge walks two answers as it
-  * does for [[CandidateBytes]]. Big-endian, so what one executor writes another
-  * reads.
+  * A candidate holds the same place and score as [[CandidateBytes]], followed
+  * by its row's length and opaque bytes. Runs are best first under
+  * [[Candidate.ranking]], with big-endian headers. Binary and multiway merging
+  * select candidates before copying their complete records. Inputs and returned
+  * arrays are read-only; a single run can be returned without copying.
   */
 object CarriedCandidates {
 
@@ -27,10 +25,11 @@ object CarriedCandidates {
     * caller supplies the order used by the merge; encoding preserves it without
     * sorting again.
     */
-  def writeSorted(
-      rows: Seq[(Candidate, Array[Byte])]
-  ): Array[Byte] = {
-    val buffer = ByteBuffer.allocate(rows.map(Header + _._2.length).sum)
+  def writeSorted(rows: Seq[(Candidate, Array[Byte])]): Array[Byte] = {
+    val bytes = rows.foldLeft(0L) { case (sum, (_, row)) =>
+      sum + Header.toLong + row.length
+    }
+    val buffer = ByteBuffer.allocate(CandidateBytes.checkedLength(bytes))
     rows.foreach { case (candidate, row) =>
       buffer
         .putLong(candidate.segmentId)
@@ -51,21 +50,20 @@ object CarriedCandidates {
     val buffer = ByteBuffer.wrap(packed)
     var at = 0
     while (at < packed.length) {
-      val length = buffer.getInt(at + CandidateBytes.Width)
+      val size = recordSize(buffer, at)
       each(
         buffer.getLong(at),
         buffer.getLong(at + 8),
         buffer.getDouble(at + 16),
         at + Header,
-        length
+        size - Header
       )
-      at += Header + length
+      at += size
     }
   }
 
-  /** The best `k` of two answers, each best first, by one walk over both. Two
-    * answers never hold the same place: a base row is in one partition, and a
-    * query in one group.
+  /** The best k of two sorted answers. The row bytes stay with their candidate;
+    * no row is decoded, and neither input is modified.
     */
   def merge(
       left: Array[Byte],
@@ -74,62 +72,134 @@ object CarriedCandidates {
       metric: MetricType
   ): Array[Byte] = {
     require(k > 0, s"topK must be positive: $k")
-    val better = if (metric.smallerIsBetter) 1 else -1
-    val leftBuffer = ByteBuffer.wrap(left)
-    val rightBuffer = ByteBuffer.wrap(right)
-    def length(buffer: ByteBuffer, at: Int): Int =
-      Header + buffer.getInt(at + CandidateBytes.Width)
-    // Negative when the left candidate goes first.
-    def compare(l: Int, r: Int): Int = {
-      val byScore = JavaDouble.compare(
-        leftBuffer.getDouble(l + 16),
-        rightBuffer.getDouble(r + 16)
-      ) * better
-      if (byScore != 0) byScore
-      else {
-        val bySegment =
-          JavaLong.compare(leftBuffer.getLong(l), rightBuffer.getLong(r))
-        if (bySegment != 0) bySegment
-        else
-          JavaLong.compare(
-            leftBuffer.getLong(l + 8),
-            rightBuffer.getLong(r + 8)
-          )
-      }
-    }
-    // The output's size is known once the k are chosen, so they are chosen
-    // first, as (side, offset, length), and copied after.
-    val chosen = new Array[Long](k)
-    var count = 0
+    if (left.isEmpty) return prefix(right, k)
+    if (right.isEmpty) return prefix(left, k)
+    val sign = if (metric.smallerIsBetter) 1 else -1
+    val buffers = Array(ByteBuffer.wrap(left), ByteBuffer.wrap(right))
+    val chosen = new ChosenRecords(buffers, k)
     var l = 0
     var r = 0
-    var bytes = 0
-    while (count < k && (l < left.length || r < right.length)) {
+    var leftSize = recordSize(buffers(0), l)
+    var rightSize = recordSize(buffers(1), r)
+    while (chosen.size < k && (l < left.length || r < right.length)) {
       val fromLeft =
-        r >= right.length || (l < left.length && compare(l, r) <= 0)
+        r >= right.length || (l < left.length &&
+          CandidateHeads.compare(sign, buffers(0), l, buffers(1), r) <= 0)
       if (fromLeft) {
-        chosen(count) = l.toLong
-        bytes += length(leftBuffer, l)
-        l += length(leftBuffer, l)
+        chosen.append(0, l, leftSize)
+        l += leftSize
+        if (chosen.size < k && l < left.length)
+          leftSize = recordSize(buffers(0), l)
       } else {
-        chosen(count) = -(r.toLong + 1L)
-        bytes += length(rightBuffer, r)
-        r += length(rightBuffer, r)
+        chosen.append(1, r, rightSize)
+        r += rightSize
+        if (chosen.size < k && r < right.length)
+          rightSize = recordSize(buffers(1), r)
       }
+    }
+    chosen.result()
+  }
+
+  /** The best k across sorted runs, selecting once before copying rows. */
+  def merge(
+      inputs: IndexedSeq[Array[Byte]],
+      k: Int,
+      metric: MetricType
+  ): Array[Byte] = {
+    require(k > 0, s"topK must be positive: $k")
+    if (inputs.isEmpty) return CandidateBytes.Empty
+    if (inputs.size == 1) return prefix(inputs.head, k)
+    if (inputs.size == 2) return merge(inputs(0), inputs(1), k, metric)
+    val runs = inputs.filter(_.nonEmpty)
+    if (runs.isEmpty) return CandidateBytes.Empty
+    if (runs.size == 1) return prefix(runs.head, k)
+    if (runs.size == 2) return merge(runs(0), runs(1), k, metric)
+    val buffers = runs.iterator.map(ByteBuffer.wrap).toArray
+    val heads = new CandidateHeads(buffers, metric, recordSize)
+    val chosen = new ChosenRecords(buffers, k)
+    while (chosen.size < k && heads.nonEmpty) {
+      chosen.append(heads.run, heads.offset, heads.recordSize)
+      if (chosen.size < k) heads.advance()
+    }
+    chosen.result()
+  }
+
+  private def prefix(packed: Array[Byte], k: Int): Array[Byte] = {
+    val buffer = ByteBuffer.wrap(packed)
+    var at = 0
+    var count = 0
+    while (count < k && at < packed.length) {
+      at += recordSize(buffer, at)
       count += 1
     }
-    val out = new Array[Byte](bytes)
-    var written = 0
-    var at = 0
-    while (at < count) {
-      val (source, buffer, from) =
-        if (chosen(at) >= 0L) (left, leftBuffer, chosen(at).toInt)
-        else (right, rightBuffer, (-chosen(at) - 1L).toInt)
-      val size = length(buffer, from)
-      System.arraycopy(source, from, out, written, size)
-      written += size
-      at += 1
+    if (at == packed.length) packed else Arrays.copyOf(packed, at)
+  }
+
+  /** Validate a complete record before its header participates in ranking. */
+  private def recordSize(buffer: ByteBuffer, at: Int): Int = {
+    val remaining = buffer.limit().toLong - at
+    require(
+      at >= 0 && remaining >= Header,
+      s"Incomplete carried candidate header at byte $at"
+    )
+    val rowLength = buffer.getInt(at + CandidateBytes.Width)
+    require(rowLength >= 0, s"Negative carried row length: $rowLength")
+    val size = Header.toLong + rowLength
+    require(
+      size <= remaining,
+      s"Carried candidate at byte $at needs $size bytes, only $remaining remain"
+    )
+    size.toInt
+  }
+
+  /** Two primitive columns grow with actual winners, not the requested k. */
+  private final class ChosenRecords(buffers: Array[ByteBuffer], k: Int) {
+    private var runs = {
+      // Each record needs at least Header bytes. Bound the initial allocation
+      // without scanning rows, while avoiding growth for common small top-k.
+      val limit = math.min(k, 128)
+      var upperBound = 0L
+      var at = 0
+      while (at < buffers.length && upperBound < limit) {
+        upperBound += buffers(at).limit().toLong / Header
+        at += 1
+      }
+      new Array[Int](math.min(limit.toLong, upperBound).toInt)
     }
-    out
+    private var offsets = new Array[Int](runs.length)
+    private var count = 0
+    private var bytes = 0L
+
+    def size: Int = count
+
+    def append(run: Int, offset: Int, width: Int): Unit = {
+      val total = bytes + width.toLong
+      CandidateBytes.checkedLength(total)
+      if (count == runs.length) {
+        val capacity = math.min(k.toLong, runs.length.toLong * 2L).toInt
+        runs = Arrays.copyOf(runs, capacity)
+        offsets = Arrays.copyOf(offsets, capacity)
+      }
+      runs(count) = run
+      offsets(count) = offset
+      count += 1
+      bytes = total
+    }
+
+    def result(): Array[Byte] = {
+      val out = new Array[Byte](CandidateBytes.checkedLength(bytes))
+      var at = 0
+      var written = 0
+      while (at < count) {
+        val buffer = buffers(runs(at))
+        val offset = offsets(at)
+        // Selection already validated this whole record; its input is read-only.
+        val width = Header + buffer.getInt(offset + CandidateBytes.Width)
+        System.arraycopy(buffer.array(), offset, out, written, width)
+        written += width
+        at += 1
+      }
+      out
+    }
   }
 }

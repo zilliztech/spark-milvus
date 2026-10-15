@@ -3,11 +3,12 @@ package com.zilliz.milvus.storage
 /** Vector execution and its buffers, exclusions and per-segment top-k.
   *
   * Main types: SegmentSearch with ExactScan and IndexSearch, SearchPlan,
-  * TopKMerger, CandidateBytes, QueryMatrix, KnowhereBuffers, MachineResources,
-  * IndexBuilder, RankingFunction and EngineRange. SearchPlan cuts a search into
-  * one task per segment set and query range; TopKMerger keeps each query's best
-  * k in a task, and CandidateBytes.merge joins the tasks' packed answers in the
-  * Spark merge stage. MachineResources reads this machine's memory limit from
+  * TopKMerger, CandidateBytes, CandidateRuns, QueryMatrix, KnowhereBuffers,
+  * MachineResources, IndexBuilder, RankingFunction and EngineRange. SearchPlan
+  * cuts a search into one task per segment set and query range; TopKMerger
+  * keeps each query's best k in a task, and CandidateRuns batches the tasks'
+  * sorted answers for bounded multiway merging with CandidateBytes or
+  * CarriedCandidates. MachineResources reads this machine's memory limit from
   * cgroup and /proc/meminfo, which local mode plans against. KnowhereBuffers
   * hands one Arrow batch of a dense vector column to Knowhere, as it lies when
   * the layout allows and copied once otherwise. IndexBuilder gathers a
@@ -41,10 +42,11 @@ package com.zilliz.milvus.storage
   * IndexFileCodec and MilvusIndexFileDecoder now live in core.codec. TopKMerger
   * keeps k per query for batches and segments alike and packs each query's best
   * k into CandidateBytes for the caller to send on, 24 bytes per candidate in
-  * score order, which merges by walking two sorted lists; KnowhereBuffers hands
-  * Arrow data buffers to Knowhere as ByteBuffers, and IndexBuilder builds a
-  * segment's index and hands its BinarySet to the Milvus TableFormat side,
-  * which encodes and writes the files (W6).
+  * score order. CandidateHeads selects from the heads of multiple sorted runs,
+  * with two-run merges retaining a direct walk; KnowhereBuffers hands Arrow
+  * data buffers to Knowhere as ByteBuffers, and IndexBuilder builds a segment's
+  * index and hands its BinarySet to the Milvus TableFormat side, which encodes
+  * and writes the files (W6).
   *
   * A search can be ranked by a RankingFunction, the vector function of a
   * nearest-by join (docs/design/architecture/dataframe-api.html section 2).

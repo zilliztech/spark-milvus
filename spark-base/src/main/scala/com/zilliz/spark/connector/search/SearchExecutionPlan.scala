@@ -8,6 +8,7 @@ import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
 import com.zilliz.milvus.storage.vector.{
   CandidateBytes,
+  CandidateRuns,
   IndexSearch,
   SearchPlan
 }
@@ -48,7 +49,7 @@ private[connector] object SearchExecutionPlan {
       tasks: Vector[Task],
       batch: SearchResources.Choice,
       stageHeap: SearchResources.Choice,
-      mergePartitions: Int,
+      merge: SearchMerge.Plan,
       takePartitioning: Option[SearchTake.Partitioning]
   )
 
@@ -60,7 +61,7 @@ private[connector] object SearchExecutionPlan {
       blockMaxBytes: Long,
       retainedMaxBytes: Long,
       tasks: Int,
-      mergePartitions: Int
+      merge: SearchMerge.Plan
   )
 
   def milvus(
@@ -161,10 +162,16 @@ private[connector] object SearchExecutionPlan {
       policies,
       batch,
       stageHeap,
-      mergePartitions(
-        spark,
+      SearchMerge.plan(
+        mergePartitions(
+          spark,
+          queries.count,
+          plan.tasks,
+          plan.sets.size,
+          k,
+          stageHeap.bytes
+        ),
         queries.count,
-        plan.tasks,
         plan.sets.size,
         k,
         stageHeap.bytes
@@ -243,13 +250,22 @@ private[connector] object SearchExecutionPlan {
       blockMaxBytes,
       retainedMaxBytes,
       tasks,
-      mergePartitions(
-        spark,
+      // Here every candidate carries its row.
+      SearchMerge.plan(
+        mergePartitions(
+          spark,
+          queries.count,
+          math.max(1, tasks),
+          math.max(1, basePartitions),
+          k,
+          taskHeap.bytes,
+          CandidateBytes.Width.toLong + 4L + rowBytes
+        ),
         queries.count,
-        math.max(1, tasks),
         math.max(1, basePartitions),
         k,
         taskHeap.bytes,
+        CandidateRuns.Carried,
         CandidateBytes.Width.toLong + 4L + rowBytes
       )
     )
