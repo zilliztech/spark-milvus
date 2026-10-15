@@ -38,7 +38,8 @@ private[connector] object SearchExecutionPlan {
       batchMaxBytes: Long,
       collectThreads: Int,
       callsInFlight: Int,
-      prefetchIndexes: Boolean
+      prefetchIndexes: Boolean,
+      pipelineGroups: Boolean
   ) extends Serializable
 
   final case class Milvus(
@@ -78,7 +79,7 @@ private[connector] object SearchExecutionPlan {
       takeColumns: Boolean
   ): Milvus = {
     val index = mode == SearchMode.PreferIndex
-    val budget = Budget.of(spark, limits, index, layout, k)
+    val budget = Budget.of(spark, limits, index, layout, k, queries.count)
     val delivery = queryDelivery(queries, layout, limits.queriesMaxBytes)
     val batch = SearchResources.exactScanBatch(configuredBatch)
     val descriptors =
@@ -94,7 +95,12 @@ private[connector] object SearchExecutionPlan {
       budget.concurrency,
       queries.count.toInt,
       k,
-      budget.group.bytes,
+      SearchResources.groupPlanBytes(
+        budget.group.bytes,
+        layout,
+        k,
+        budget.pipelineGroups
+      ),
       SearchPlan.Budget(budget.segments.bytes, budget.queries.bytes),
       segment =>
         selected(segment.segmentId) match {
@@ -142,7 +148,8 @@ private[connector] object SearchExecutionPlan {
               k,
               1
             )
-          )
+          ),
+          pipelineGroups = budget.pipelineGroups && keep == Retention.Segments
         )
       }
     }.toVector
@@ -359,7 +366,8 @@ private[connector] object SearchExecutionPlan {
       fraction: Double,
       segments: SearchResources.Choice,
       queries: SearchResources.Choice,
-      group: SearchResources.Choice
+      group: SearchResources.Choice,
+      pipelineGroups: Boolean
   ) {
 
     /** The first-stage tasks the whole search runs at once. */
@@ -378,7 +386,8 @@ private[connector] object SearchExecutionPlan {
         limits: SearchLimits,
         index: Boolean,
         layout: VectorLayout,
-        k: Int
+        k: Int,
+        queryCount: Long
     ): Budget = {
       val resources = TaskResources.of(spark)
       val profile = if (index) resources.wholeExecutor else None
@@ -389,6 +398,15 @@ private[connector] object SearchExecutionPlan {
       val (memoryLimit, heap) = SearchResources.executorMemory(spark)
       val fraction = SearchResources.memoryFraction(spark)
       val queries = SearchResources.queryBudget(heap, fraction, slots)
+      val pipelineGroups =
+        index && cores >= resources.executorCores && cores > 1 &&
+          queryCount > 1L && limits.groupMaxBytes.forall(
+            _ >= SearchResources.groupBytesPerQuery(
+              layout,
+              k,
+              pipelineGroups = true
+            )
+          )
       Budget(
         resources,
         profile,
@@ -408,8 +426,9 @@ private[connector] object SearchExecutionPlan {
           limits.groupMaxBytes,
           queries.bytes,
           cores,
-          SearchPlan.bytesPerQuery(layout, k)
-        )
+          SearchResources.groupBytesPerQuery(layout, k, pipelineGroups)
+        ),
+        pipelineGroups
       )
     }
   }

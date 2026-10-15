@@ -5,7 +5,12 @@ import scala.util.Try
 import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.sql.SparkSession
 
-import com.zilliz.milvus.storage.vector.MachineResources
+import com.zilliz.milvus.storage.schema.VectorLayout
+import com.zilliz.milvus.storage.vector.{
+  CandidateBytes,
+  MachineResources,
+  SearchPlan
+}
 import com.zilliz.spark.connector.options.{MilvusOption, SearchLimits}
 
 /** The sizes of a search that are not the user's to know: the exact scan's base
@@ -237,6 +242,42 @@ private[search] object SearchResources {
     * GiB group ran. The explicit option is not capped.
     */
   val MaxDerivedGroupBytes: Long = 2L << 30
+
+  /** The current merger and packed output can overlap the next merger. Two
+    * query groups also retain their vectors, ids and queue metadata. Native
+    * query matrices do not overlap: search closes one before returning its
+    * merger and starting the next group. Spark manages shuffle pages
+    * separately.
+    */
+  def groupBytesPerQuery(
+      layout: VectorLayout,
+      k: Int,
+      pipelineGroups: Boolean
+  ): Long =
+    if (pipelineGroups)
+      2L * (layout.rowBytes.toLong + SearchPlan.QueryIdBytes + SearchPlan.TopKQueueBytes) +
+        3L * k * CandidateBytes.Width
+    else SearchPlan.bytesPerQuery(layout, k)
+
+  /** Convert the execution budget into the equivalent limit for core's
+    * single-group algorithm, preserving the number of queries, including an
+    * explicit option too small for one overlapping query pair.
+    */
+  def groupPlanBytes(
+      bytes: Long,
+      layout: VectorLayout,
+      k: Int,
+      pipelineGroups: Boolean
+  ): Long = {
+    if (!pipelineGroups) return bytes
+    val perQuery = groupBytesPerQuery(layout, k, pipelineGroups)
+    require(
+      bytes >= perQuery,
+      s"${MilvusOption.SearchGroupMaxBytes}=$bytes cannot hold one query " +
+        s"with overlapping search and output ($perQuery bytes)"
+    )
+    (bytes / perQuery) * SearchPlan.bytesPerQuery(layout, k)
+  }
 
   /** How many bytes of queries one Knowhere call takes: the explicit
     * `milvus.search.group.max.bytes` as it is, otherwise the larger of the old

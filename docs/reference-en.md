@@ -68,14 +68,24 @@ which a task reads one group at a time, holding at most two; the hits then
 meet their query rows in a join after the last stage. Every way gives the same
 result. Read by group, a job reads the query vectors once per segment set in
 total, and the executors' local disks need room for about two copies of them.
-`milvus.search.group.max.bytes` is what one task answers at a time, counted as
-queries × (dimension × element width + K × 48 bytes). Left unset, the planner
-sizes the group for the task: the larger of 512 MiB and 8 queries for every
-core the task holds, capped at half the task's query heap budget (the `Search
-budget` log line says which applied). A 32-core executor at K=100,000 then
-answers 256 queries a Knowhere call instead of the 104 a fixed 512 MiB gives,
-and 13 at the 64 MiB a smaller executor would want; set the option to pin the
-size.
+`milvus.search.group.max.bytes` limits one task's query-group heap estimate.
+Serial search counts each query's vector row plus K × 48 bytes for primitive
+and packed candidates. An index search holding every core of a multicore
+executor reserves overlapping search and output: each query counts
+`2 × (vector row bytes + 8 + 128) + K × 72` bytes for two groups' vectors, ids,
+queue metadata, the current primitive/packed candidates and the next merger.
+This estimate applies to the explicit option too. A single query, or an explicit
+limit too small for one overlapping query pair, uses the serial estimate.
+Such a task searches at most
+one group ahead when it retains its segment set; query-resident and streaming
+tasks execute serially and may leave the overlap reserve unused. Spark accounts
+for its shuffle pages separately.
+Left unset, the planner takes the larger of 512 MiB and 8 queries per task
+core, capped at half the task's query heap budget and 2 GiB, with a floor of one
+query. The `Search budget` log line reports the resulting query count. At
+768 float32 dimensions and K=100,000, a 24 GiB-heap, 32-core executor still
+targets 256 queries per call; an explicit 512 MiB holds 74 with overlap
+reserved, compared with 111 under the serial estimate.
 `milvus.search.collect.threads` (default 0, the cores the task holds) is how many
 threads a search task checks, collects and packs a group's candidates on between
 two Knowhere calls; at large K that work is a third of the task, and on one
