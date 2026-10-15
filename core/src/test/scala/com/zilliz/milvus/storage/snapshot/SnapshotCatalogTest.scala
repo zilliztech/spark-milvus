@@ -394,7 +394,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
     withDir { dir =>
       def withV2(name: String, ts: Long, avro: String) =
         snapshotJson(name, ts, Seq.empty)
-          .replace("\"manifest_list\": []", s"\"manifest_list\": [\"$avro\"]")
+          .replace("\"manifest_list\": []", s""""manifest_list": ["$avro"]""")
       write(
         dir,
         "files/snapshots/10/metadata/1.json",
