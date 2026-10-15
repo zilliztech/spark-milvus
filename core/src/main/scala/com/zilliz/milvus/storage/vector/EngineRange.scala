@@ -12,7 +12,9 @@ import com.zilliz.milvus.storage.schema.{
 }
 
 /** Which vectors Knowhere scores the way a [[RankingFunction]] computed in
-  * float does (docs/design/architecture/dataframe-api.html section 2).
+  * float does
+  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
+  * 2).
   *
   * Knowhere computes in float32: L2 as |x|^2 + |y|^2 - 2x.y over a whole batch
   * (decision 27), the inner product as a dot product, COSINE over the vectors'

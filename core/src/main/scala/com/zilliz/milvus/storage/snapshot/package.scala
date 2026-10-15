@@ -15,14 +15,16 @@ package com.zilliz.milvus.storage
   * intersects the common partition and segment selectors; `retainDataSegments`
   * applies optimizer output. Both retain the applicable partition and
   * collection-wide L0 delete segments. See
-  * docs/design/architecture/snapshot.html and vector-search.html section 2.4.
+  * docs/design/projects/spark-milvus/architecture/snapshot.html and
+  * vector-search.html section 2.4.
   *
   * `Snapshot` is the Milvus snapshot. Decision 25, as revised on 2026-09-17,
   * evolves it into `TableVersion`, the table model every input produces: the
   * format-neutral part moves there and these Milvus fields become the Milvus
   * part that only the Milvus `TableFormat` reads. See
-  * docs/design/architecture/table-version.html.
+  * docs/design/projects/spark-milvus/architecture/table-version.html.
   *
-  * Capabilities: R2, R3, R9, R13, R16, C3 (see docs/design/capabilities.md).
+  * Capabilities: R2, R3, R9, R13, R16, C3 (see
+  * docs/design/projects/spark-milvus/capabilities.md).
   */
 package object snapshot

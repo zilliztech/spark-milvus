@@ -15,7 +15,8 @@ import com.zilliz.milvus.storage.schema.MetricType
   * output during compaction. Only runs and pure parameters are serialized;
   * merge cursors and heaps are local to a compaction call.
   *
-  * See docs/design/architecture/candidate-merge.html sections 4-6.
+  * See docs/design/projects/spark-milvus/architecture/candidate-merge.html
+  * sections 4-6.
   */
 final class CandidateRuns(
     val k: Int,

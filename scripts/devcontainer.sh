@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Drive the development container defined in .devcontainer/ from the command
-# line. Design: docs/design/engineering/devcontainer.html.
+# line. Design: docs/design/projects/spark-milvus/engineering/devcontainer.html.
 #
 #   scripts/devcontainer.sh up [--services]   build the dev image if needed and start it;
 #                                              --services also starts Milvus, etcd and MinIO

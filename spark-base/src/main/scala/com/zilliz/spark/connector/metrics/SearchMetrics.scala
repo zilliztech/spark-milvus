@@ -11,10 +11,12 @@ import com.zilliz.milvus.storage.vector.SegmentSearch
   * numbers do not reach Spark through the `CustomMetric` classes above. The
   * nearest-by join that runs it counts into the SQL metrics of its plan node,
   * which the SQL tab shows on that node and the stage page lists under the
-  * names below (docs/design/architecture/dataframe-api.html section 4).
-  * Knowhere computes in its own thread pool, which Spark's task CPU time does
-  * not cover; `milvus.search.knowhere.nanos` is where that time shows up
-  * (docs/design/architecture/vector-search.html section 1.3).
+  * names below
+  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
+  * 4). Knowhere computes in its own thread pool, which Spark's task CPU time
+  * does not cover; `milvus.search.knowhere.nanos` is where that time shows up
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 1.3).
   */
 final class SearchMetrics private (
     val segmentSearches: SearchMetrics.Counter,

@@ -58,7 +58,12 @@ def search(spark, name, queries):
     )
     plan = frame._jdf.queryExecution().executedPlan().toString()
     node = next((line.strip() for line in plan.splitlines() if "MilvusNearestByJoin" in line), None)
-    print(f"Executed by: {node or 'Spark (the connector did not take the join over)'}")
+    if node is None:
+        raise RuntimeError(
+            "The connector did not take over the search. Check the session extension "
+            "and MilvusSparkPlugin startup settings.\n" + plan
+        )
+    print(f"Executed by: {node}")
     hits = {}
     for row in frame.collect():
         hits.setdefault(row.qid, []).append(row.id)

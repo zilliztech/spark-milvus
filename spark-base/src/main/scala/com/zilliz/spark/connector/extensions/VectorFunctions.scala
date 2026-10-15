@@ -21,7 +21,8 @@ import com.zilliz.milvus.storage.vector.RankingFunction
 
 /** `vector_l2_distance`, `vector_cosine_similarity` and `vector_inner_product`
   * on the Spark lines that do not have them built in, 3.5 to 4.1
-  * (docs/design/architecture/dataframe-api.html section 6).
+  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
+  * 6).
   *
   * Spark 4.2's NULL, empty-array and dimension rules apply: a NULL array is
   * NULL without a call, arrays of different lengths fail, an array with a NULL

@@ -4,7 +4,7 @@ import sbt._
 import sbt.Keys._
 
 /** Shared settings and build constraints for the 2.0 modules. See section 4 of
-  * docs/design/architecture/modules.md.
+  * docs/design/projects/spark-milvus/architecture/modules.md.
   */
 object Modules {
 
@@ -50,7 +50,7 @@ object Modules {
         }
         sys.error(
           s"${name.value} has ${offenders.size} Spark dependencies " +
-            "(constraint 1, section 4 of docs/design/architecture/modules.md)"
+            "(constraint 1, section 4 of docs/design/projects/spark-milvus/architecture/modules.md)"
         )
       }
     },

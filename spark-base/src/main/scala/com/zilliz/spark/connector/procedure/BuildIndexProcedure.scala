@@ -43,10 +43,11 @@ import io.milvus.grpc.schema.FieldSchema
   * of the snapshot the read selects — and each task builds what section 2.4's
   * loader can read back. The records land in the job manifest together with the
   * snapshot the job planned against, which is what delivery (W8) copies into a
-  * snapshot Milvus can restore (docs/design/architecture/vector-search.html
-  * section 2.7, docs/design/architecture/dataframe-api.html section 9). A
-  * snapshot not read from a snapshot document cannot be delivered, so it is
-  * refused before the job runs.
+  * snapshot Milvus can restore
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.7, docs/design/projects/spark-milvus/architecture/dataframe-api.html
+  * section 9). A snapshot not read from a snapshot document cannot be
+  * delivered, so it is refused before the job runs.
   */
 object BuildIndexProcedure extends Procedure {
 
@@ -128,7 +129,7 @@ object BuildIndexProcedure extends Procedure {
     )
     // What write_snapshot will copy. A snapshot that was not read from a
     // snapshot document can never be written, so the build stops here, before
-    // the job runs (docs/design/architecture/dataframe-api.html section 9).
+    // the job runs (docs/design/projects/spark-milvus/architecture/dataframe-api.html section 9).
     val source = SnapshotWriter
       .sourceOf(
         table.snapshot,
@@ -182,7 +183,7 @@ object BuildIndexProcedure extends Procedure {
     // Segments go to tasks in the order they were planned, so a task's segments
     // are a contiguous range of the plan and no two tasks share one. Knowhere
     // builds on a thread pool the size of the machine, so a build task takes
-    // every core of its executor (docs/design/architecture/vector-search.html
+    // every core of its executor (docs/design/projects/spark-milvus/architecture/vector-search.html
     // section 1.1).
     val built = spark.sparkContext
       .parallelize(partitions, partitions.size)

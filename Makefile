@@ -78,7 +78,7 @@ help:
 	@echo "  $(GREEN)package$(NC)                - Package JAR with the selected platform resources"
 	@echo "  $(GREEN)test$(NC)                   - Type-check tests (incl. integration) and run unit tests"
 	@echo "  $(GREEN)compile-it$(NC)             - Type-check integration tests (no external services)"
-	@echo "  $(GREEN)run-demo$(NC)               - Run demo"
+	@echo "  $(GREEN)run-demo$(NC)               - Run the read/search demo (needs Milvus 3.0+, MinIO and SPARK_HOME)"
 	@echo "  $(GREEN)init-submodules$(NC)        - Initialize Git submodules"
 	@echo "  $(GREEN)status$(NC)                 - Show build status"
 	@echo ""
@@ -159,10 +159,10 @@ compile-it: package
 	@$(NATIVE_SBT) "integration40/Test/compile"
 	@echo "$(GREEN)Integration tests compile complete$(NC)"
 
-# Run demo
+# Run the maintained read/search example after packaging the connector.
 run-demo: package
 	@echo "$(BLUE)Running demo...$(NC)"
-	@$(NATIVE_TEST_ENV) $(NATIVE_SBT) "runMain com.zilliz.spark.connector.jni.MilvusStorageJNI"
+	@bash scripts/spark_submit_demo.sh
 
 # Development targets
 rebuild:

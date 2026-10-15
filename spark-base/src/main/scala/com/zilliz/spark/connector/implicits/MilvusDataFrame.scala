@@ -6,7 +6,8 @@ import scala.jdk.CollectionConverters._
 import org.apache.spark.sql.{Column, DataFrame, Dataset}
 
 /** The connector's methods on one DataFrame
-  * (docs/design/architecture/dataframe-api.html sections 6 and 9).
+  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html sections
+  * 6 and 9).
   *
   * `buildIndex` and `writeSnapshot` run `CALL milvus.system.build_index` and
   * `write_snapshot` over the Milvus table this DataFrame reads, and return the

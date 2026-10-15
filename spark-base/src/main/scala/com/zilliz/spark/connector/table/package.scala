@@ -12,7 +12,8 @@ package com.zilliz.spark.connector
   * resolver to core without introducing a dependency from core to compat.
   * `MilvusTables.named` resolves a name Spark resolves (a catalog table or a
   * view) to the whole Milvus table it reads, for the procedures that take a
-  * `table` (docs/design/architecture/dataframe-api.html section 9).
+  * `table` (docs/design/projects/spark-milvus/architecture/dataframe-api.html
+  * section 9).
   *
   * Field identity, Milvus type, nullability, key flags and vector dimensions
   * all come from the Snapshot schema. `_segment_id` and `_row_offset` are
@@ -20,6 +21,7 @@ package com.zilliz.spark.connector
   * deletion through Spark SQL is deliberately not implemented (section 10 of
   * capabilities.md); the table does not implement SupportsDeleteV2.
   *
-  * Capabilities: R12, R16 (see docs/design/capabilities.md).
+  * Capabilities: R12, R16 (see
+  * docs/design/projects/spark-milvus/capabilities.md).
   */
 package object table

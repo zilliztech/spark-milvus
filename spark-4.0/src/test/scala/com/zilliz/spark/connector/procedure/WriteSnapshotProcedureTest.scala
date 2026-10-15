@@ -8,8 +8,9 @@ import com.zilliz.milvus.storage.write.commit.SourceSnapshot
 
 /** What `CALL milvus.system.write_snapshot(...)` takes and answers with, and
   * how it holds to the snapshot the build job recorded
-  * (docs/design/architecture/vector-search.html section 2.7,
-  * docs/design/architecture/dataframe-api.html section 9).
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.7, docs/design/projects/spark-milvus/architecture/dataframe-api.html
+  * section 9).
   */
 class WriteSnapshotProcedureTest extends AnyFunSuite with Matchers {
 

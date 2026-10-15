@@ -40,7 +40,9 @@ import com.zilliz.spark.connector.metrics.SearchMetrics
   * session counts under the same names, and it leaves the listener bus when the
   * job that runs the search's first stage ends, whether that job succeeded or
   * not; a listener left behind would see every later event and count every
-  * later search (docs/design/architecture/vector-search.html section 1.3).
+  * later search
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 1.3).
   *
   * @param context
   *   the bus the listener is on

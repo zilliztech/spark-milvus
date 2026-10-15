@@ -22,7 +22,8 @@ import io.milvus.grpc.schema.{CollectionSchema, FieldSchema}
   *
   * Deciding this is what the Milvus format does with its delete files and its
   * filter semantics; a computation only reads the bitmap that comes out
-  * (docs/design/architecture/vector-search.html sections 2.3 and 2.6).
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html sections
+  * 2.3 and 2.6).
   */
 final class RowExclusions private (
     filter: Option[FilterExpr],
@@ -60,7 +61,8 @@ final class RowExclusions private (
     * segment's bitmap before the first query runs. Building it reads the
     * primary key, the timestamp and the filter's columns and nothing else: the
     * vector column is never opened on this path
-    * (docs/design/architecture/vector-search.html section 2.4).
+    * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+    * 2.4).
     */
   def bitmap(
       task: SegmentReadTask,

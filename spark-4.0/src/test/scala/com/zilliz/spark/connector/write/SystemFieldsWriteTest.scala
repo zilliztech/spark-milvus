@@ -9,7 +9,7 @@ import org.scalatest.matchers.should.Matchers
 import com.zilliz.milvus.storage.schema.HybridTimestamp
 
 /** The two system columns a connector-written segment carries (decision 22,
-  * docs/design/architecture/write.html section 6).
+  * docs/design/projects/spark-milvus/architecture/write.html section 6).
   */
 class SystemFieldsWriteTest extends AnyFunSuite with Matchers {
 

@@ -1,8 +1,9 @@
 package com.zilliz.milvus.storage.vector
 
 /** The function a search ranks a pair by when the engine does not score that
-  * pair the way the function computes it (docs/design/architecture/
-  * dataframe-api.html section 2).
+  * pair the way the function computes it
+  * (docs/design/projects/spark-milvus/architecture/ dataframe-api.html section
+  * 2).
   *
   * A NEAREST BY that the connector executes is ranked by one of Spark's vector
   * functions. Knowhere scores the pairs inside [[EngineRange]], where its

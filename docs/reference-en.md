@@ -33,11 +33,16 @@ takes none. Encrypted indexes are unsupported. Cardinal `_mem.index.bin`
 requires the pinned Cardinal-enabled native build; see
 [native build instructions](contributing.md#knowhere-library-loading).
 
-Set `spark.plugins=com.zilliz.spark.connector.extensions.MilvusSparkPlugin` and
-every executor loads the connector's native libraries as it starts, instead of
-when its first task touches Knowhere, so extracting and verifying the bundle
-does not land on the first search task. Without the plugin nothing changes but
-that.
+Set `spark.plugins=com.zilliz.spark.connector.extensions.MilvusSparkPlugin`
+before starting Spark, together with the session extension shown below. The
+plugin loads the native libraries on each executor at startup and is required
+for the connector to execute NEAREST BY joins. A cluster-provided
+`spark.plugins.defaultList` containing the same plugin also satisfies this
+requirement. Without it, the join uses the Spark fallback rather than the
+connector's search execution, which can compare every query with every base
+row. Check `hits.explain(true)` for `input=Milvus table` or `input=DataFrame`
+and inspect the search counters in the Spark SQL UI; a successful query alone
+does not establish that persisted indexes were used.
 
 Executors that read persisted indexes from object storage should run with
 glibc's malloc tuned, through the executor environment:
@@ -233,6 +238,7 @@ result from a plan built of operators these lines have.
 
 ```scala
 import com.zilliz.spark.connector.implicits._   // also harmless on 4.2
+import org.apache.spark.sql.functions.call_function
 
 val hits = queries.nearestByJoin(docs,
   call_function("vector_cosine_similarity", queries("vec"), docs("embedding")),
@@ -293,13 +299,21 @@ For Milvus 2.5 and earlier versions, please use the `legacy` branch which is no 
 
 Milvus Spark Connector provides the **`milvus`** data source format for reading and writing Milvus data.
 
-Additionally, a convenient `MilvusDataReader` utility class is provided to simplify collection data reading operations.
+Use `spark.read.format("milvus")` for a DataFrame read, or configure
+`MilvusCatalog` to read collections with `spark.table`. Writes currently produce
+staged segments only; they do not make new rows visible in Milvus. See
+[Write Parameters](#24-write-parameters) before using `df.write`.
 
 ## Catalog Discovery, Table DDL, and Snapshot Time Travel
 
 Register `MilvusCatalog` once to use a Milvus collection as a three-part Spark
 table. Spark removes the `spark.sql.catalog.milvus.` prefix and passes the
 remaining connection, storage, and read options to the connector.
+
+If you use static `fs.access_key_id` and `fs.access_key_value` options, set
+`spark.redaction.regex=(?i)secret|password|token|access[._]?key` before starting
+Spark. Its default redaction pattern does not match these underscore-separated
+keys. Preserve any additional redaction rules required by your runtime.
 
 ```scala
 spark.conf.set(
@@ -453,95 +467,45 @@ unsupported. Table CREATE/DROP does not support AutoID, dynamic fields,
 partition keys, table constraints, generated/default/identity columns, or Spark partition
 transforms.
 
-## 1. `MilvusDataReader` Convenient Reading Method
+## 1. Reading with DataFrames
 
-`MilvusDataReader` provides a convenient method to read collection data.
-
-```scala
-import com.zilliz.spark.connector.{MilvusDataReader, MilvusDataReaderConfig, MilvusOption}
-
-// Basic usage
-val milvusDF = MilvusDataReader.read(
-  spark,
-  MilvusDataReaderConfig(
-    uri = "http://localhost:19530",
-    token = "your-token",
-    collectionName = "your_collection"
-  )
-)
-
-// Usage with additional options
-val milvusDFWithOptions = MilvusDataReader.read(
-  spark,
-  MilvusDataReaderConfig(
-    uri = "http://localhost:19530",
-    token = "your-token",
-    collectionName = "your_collection",
-    options = Map(
-      MilvusOption.MilvusDatabaseName -> "your_database",
-      MilvusOption.MilvusPartitions -> "100,101",
-      MilvusOption.MilvusSegments -> "2001,2002"
-    )
-  )
-)
-```
-
-### 1.1 MilvusDataReaderConfig Parameters
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `uri` | String | Yes | Milvus server connection URI |
-| `token` | String | Yes | Milvus authentication token |
-| `collectionName` | String | Yes | Collection name |
-| `options` | Map[String, String] | No | Additional configuration options, supports the following parameters |
-
-### 1.2 Supported options Parameters
-
-**Basic Connection Parameters:**
-- `MilvusOption.MilvusDatabaseName` - Database name
-- `MilvusOption.MilvusPartitions` - Comma-separated numeric partition IDs
-- `MilvusOption.MilvusSegments` - Comma-separated numeric segment IDs
-
-**S3 Storage Parameters:**
-- `MilvusOption.S3Endpoint` - S3 service endpoint
-- `MilvusOption.S3BucketName` - S3 bucket name
-- `MilvusOption.S3RootPath` - S3 root path
-- `MilvusOption.S3AccessKey` - S3 access key
-- `MilvusOption.S3SecretKey` - S3 secret key
-- `MilvusOption.S3UseSSL` - Whether to use SSL connection ("true"/"false")
-- `MilvusOption.S3PathStyleAccess` - Whether to use path-style access ("true"/"false")
-  - **Note**: For Alibaba Cloud OSS, this must be manually set to "false"
-  - Other S3-compatible storage typically doesn't require setting this parameter
-
-### 1.3 S3 Configuration Example
+Use Spark's DataFrame reader and the current option constants:
 
 ```scala
-// Alibaba Cloud OSS Configuration Example
-val ossOptions = Map(
-  MilvusOption.S3Endpoint -> "oss-cn-hangzhou.aliyuncs.com",
-  MilvusOption.S3BucketName -> "your-bucket-name",
-  MilvusOption.S3RootPath -> "your-root-path",
-  MilvusOption.S3AccessKey -> "your-access-key",
-  MilvusOption.S3SecretKey -> "your-secret-key",
-  MilvusOption.S3UseSSL -> "true",
-  MilvusOption.S3PathStyleAccess -> "false",  // Must be set to false for OSS
-  MilvusOption.MilvusDatabaseName -> "default"
+import com.zilliz.spark.connector.options.MilvusOption
+
+val collectionOptions = Map(
+  MilvusOption.MilvusUri -> "http://localhost:19530",
+  MilvusOption.MilvusToken -> "your-token",
+  MilvusOption.MilvusDatabaseName -> "default",
+  MilvusOption.MilvusCollectionName -> "your_collection",
+  "fs.address" -> "s3.us-west-2.amazonaws.com",
+  "fs.bucket_name" -> "your-milvus-bucket",
+  "fs.root_path" -> "files",
+  "fs.cloud_provider" -> "aws",
+  "fs.region" -> "us-west-2",
+  "fs.use_ssl" -> "true",
+  "fs.use_iam" -> "true"
 )
 
-// AWS S3 Configuration Example
-val s3Options = Map(
-  MilvusOption.S3Endpoint -> "s3.amazonaws.com",
-  MilvusOption.S3BucketName -> "your-bucket-name",
-  MilvusOption.S3RootPath -> "your-root-path",
-  MilvusOption.S3AccessKey -> "your-access-key",
-  MilvusOption.S3SecretKey -> "your-secret-key",
-  MilvusOption.S3UseSSL -> "true",
-  MilvusOption.MilvusDatabaseName -> "default"
-  // S3PathStyleAccess typically doesn't need to be set
-)
+val milvusDF = spark.read.format("milvus").options(collectionOptions).load()
+milvusDF.show(false)
 ```
 
-### 1.4 How It Works
+Replace the connection and storage values with those of your deployment.
+`fs.root_path` must match Milvus's storage root, and a snapshot must already
+exist: a read does not create one. This AWS example uses the process credential
+chain on both the driver and executors; the Milvus token does not grant access
+to object storage. The native libraries must be available as described in
+[Native dependency bundle](#native-dependency-bundle).
+
+Once the catalog above is configured, the equivalent entry is
+`spark.table("milvus.default.your_collection")`. Apply ordinary DataFrame
+`select` and `where` operations to either result. Optional partition and
+segment selectors take numeric IDs; see [Data Operation
+Parameters](#23-data-operation-parameters).
+
+### 1.1 How It Works
 
 Table loading (`getTable` or Catalog `loadTable`) resolves exactly one immutable
 snapshot. That same `Snapshot` supplies
@@ -558,7 +522,7 @@ its segment, then drops rows by primary key and timestamp. An unreadable delete
 file or a segment that yields fewer rows than its declared count fails the task
 instead of returning incomplete data.
 
-### 1.5 Metrics
+### 1.2 Metrics
 
 Every read and write reports what it cost on the C/JVM boundary as task metrics on the scan or write node of the Spark SQL page; nothing has to be switched on. A scan reports `milvus.jni.calls`, `milvus.jni.nanos`, `milvus.arrow.batches`, `milvus.arrow.bytes` (Arrow bytes handed over), `milvus.copies` and `milvus.copied.bytes` (columns the native side had to copy because a batch arrived sliced), `milvus.rows.materialized` (rows turned into Spark rows; zero on the columnar path) and `milvus.arrow.allocated.max` (the Arrow allocator's peak, the maximum over tasks). A write reports the first four and the peak. Bytes read from object storage for segment data are not among them: that read happens inside milvus-storage.
 
@@ -659,17 +623,20 @@ it, as they refuse any other filter. JSON paths, Array predicates, and
 
 ### 2.4 Write Parameters
 
-`df.write.format("milvus").mode("append")` writes the DataFrame as Milvus
-segments straight to object storage; no Milvus service is involved and nothing
-is registered. The table is resolved the same way as for a read, so the
+`df.write.format("milvus").mode("append")` writes the DataFrame as staged
+Milvus segments straight to object storage. Successful completion means the
+staging job committed; no new segments are registered and no new rows become
+queryable in Milvus. The table is resolved the same way as for a read, so the
 collection schema comes from one of: `milvus.uri` plus the collection name
 (the latest snapshot of the collection), `milvus.snapshot.path`, or
 `milvus.snapshot.schema.bytes` (a schema alone, for a write with no snapshot
 at all). Field ids and vector dimensions come from that schema.
 
-The current staged segments omit the Milvus system fields RowID (field 0) and
-Timestamp (field 1). They therefore cannot be registered with or loaded by
-Milvus yet; append registration waits for a Milvus `RegisterSegments` API.
+New segments include the system fields RowID (field 0) and Timestamp (field 1),
+using row positions and a write-time HybridTS as placeholders. Append
+registration still waits for a Milvus `RegisterSegments` API; the existing
+`register` procedure accepts only backfill jobs that update existing segments.
+Do not use this staged-write path as an online insert or collection refresh.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
@@ -681,16 +648,16 @@ Milvus yet; append registration waits for a Milvus `RegisterSegments` API.
 What the write checks before any task starts: every DataFrame column is a
 field of the collection with the same Spark type as a read gives it (vector
 columns may also be the raw `BinaryType` bytes); every field except Milvus
-function outputs is present (give a nullable field a null column); the
-collection does not use `autoID` or a partition key. An `Array<Int8>` or
+function outputs is present (give a nullable field a null column); function
+output columns are omitted; the collection does not use `autoID` or a partition
+key. An `Array<Int8>` or
 `Array<Int16>` element must be within its type's range, as the Milvus proxy
 checks on insert; a value outside it stops the task. Only `mode("append")` is
 supported. `overwrite` is deliberately not supported: it would make every
 existing row of the collection invisible and Milvus has no rollback, so Spark
-refuses it at analysis time and no data is touched. For a full refresh, drop
-and recreate the collection on the Milvus side, or delete all rows through the
-SDK, then append. `errorIfExists`/`ignore` are not supported by Spark for this
-kind of source.
+refuses it at analysis time and no data is touched. A full refresh is not
+supported by this write path. `errorIfExists`/`ignore` are not supported by
+Spark for this kind of source.
 
 ### 2.5 Offline Backup Read Parameters
 
@@ -772,13 +739,14 @@ fails during planning.
 
 ### 3.1 Reading Data
 
+Reuse `collectionOptions` and the `MilvusOption` import from
+[Reading with DataFrames](#1-reading-with-dataframes). The IDs below must exist
+in the selected snapshot; omit those selectors to read the whole collection.
+
 ```scala
 val df = spark.read
   .format("milvus")
-  .option(MilvusOption.MilvusUri, "http://localhost:19530")
-  .option(MilvusOption.MilvusToken, "your-token")
-  .option(MilvusOption.MilvusCollectionName, "your_collection")
-  .option(MilvusOption.MilvusDatabaseName, "your_database")
+  .options(collectionOptions)
   .option(MilvusOption.MilvusPartitions, "100,101")
   .option(MilvusOption.MilvusSegments, "2001,2002")
   .option(MilvusOption.ReaderFieldIDs, "100,101")  // Read only specified collection fields
@@ -786,22 +754,26 @@ val df = spark.read
   .load()
 ```
 
-### 3.2 Writing Data
+### 3.2 Writing Staged Segments
+
+This example writes files only; append registration is not available. Use a
+DataFrame containing all writable collection fields and no metadata columns,
+as described in [Write Parameters](#24-write-parameters). This example assumes
+`milvusDF` reads a collection without AutoID, partition keys or function-output
+fields:
 
 ```scala
-df.write
+milvusDF.write
   .format("milvus")
   .mode("append")
-  .option(MilvusOption.MilvusUri, "http://localhost:19530")
-  .option(MilvusOption.MilvusToken, "your-token")
-  .option(MilvusOption.MilvusCollectionName, "your_collection")
-  .option("fs.root_path", "files")           // plus the fs.* storage options
+  .options(collectionOptions)
   .save()
 ```
 
-The segments land under `files/staging/<job-id>/` with a job manifest; they
-become part of the collection only when registered (a later step). A rerun of a job that already committed
-writes nothing.
+The segments land under `files/staging/<job-id>/` with a job manifest. They do
+not become part of the online collection. Retrying the commit of the same
+internal job is idempotent; running `.save()` again creates a new job ID and
+writes another set of staged segments.
 
 ### 3.3 Registering a backfill with Milvus
 
@@ -889,12 +861,16 @@ before any index is built. `index_type` defaults to `HNSW` and
 and 0. The result has one row per segment: `segment_id`, `partition_id`,
 `row_count`, `objects`, `bytes`, `build_id` and `job_id`.
 
-A second call writes the snapshot that describes what the build produced:
+A second call writes the snapshot that describes what the build produced.
+These examples assume the source data, deletes and statistics are under
+`files/`. Use that common root as `output`, so the snapshot includes both the
+original files and the new indexes under `files/built-index/`:
 
 ```sql
 CALL milvus.system.write_snapshot('your_db.your_collection',
   job              => 'index-1789478390101',
   input            => 'files/built-index',
+  output           => 'files',
   `milvus.snapshot.path` => 'https://.../metadata/4691.json',
   `fs.bucket_name` => 'milvus-bucket',
   `fs.address`     => 's3.us-west-2.amazonaws.com',
@@ -962,11 +938,13 @@ val coll  = spark.table("milvus.your_db.your_collection")  // or spark.read.form
 val built = coll.buildIndex("embedding", "files/built-index",
   indexType = "HNSW", metric = "COSINE", params = Map("M" -> "16", "efConstruction" -> "200"))
 val job   = built.select("job_id").head.getString(0)
-coll.writeSnapshot(job, "files/built-index")
+val written = coll.writeSnapshot(job, "files/built-index", output = "files")
 ```
 
-The named arguments are the CALL's in camel case, and one left out is not
-passed, so the procedure's default applies. Java writes
+Here `files` must be the common root of every file the snapshot references;
+use your deployment's actual root. `written` returns the snapshot path for the
+restore call below. The named arguments are the CALL's in camel case, and one
+left out is not passed, so the procedure's default applies. Java writes
 `new MilvusDataFrame(coll).buildIndex("embedding", "files/built-index",
 Map.of("index_type", "HNSW"))`, with the other arguments under their CALL
 names; a string, an integer or a boolean is passed as that constant and a map

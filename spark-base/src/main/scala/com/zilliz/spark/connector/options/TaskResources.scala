@@ -16,7 +16,8 @@ import org.apache.spark.sql.SparkSession
   * `spark.task.cpus` for the whole job, which holds every other stage to one
   * task per executor too, such a stage declares its own cores per task through
   * Spark's stage-level scheduling (`TaskResourceProfile`,
-  * docs/design/architecture/vector-search.html section 1.1).
+  * docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 1.1).
   *
   * Spark runs a task-only profile on the default executors only when dynamic
   * allocation is off (`ResourceProfileManager.canBeScheduled`, 3.5 and 4.x),

@@ -92,7 +92,7 @@ jobs:
         run: sbt scalafmtCheckAll
 
       # `sbt checkCapabilityIndex` is not run here: it reads
-      # docs/design/capabilities.md from the private design submodule. It runs
+      # docs/design/projects/spark-milvus/capabilities.md from the private design submodule. It runs
       # before every commit instead (docs/contributing.md, Unit tests).
 
       # `compile` aggregates over the eleven unit-tested modules, which covers all

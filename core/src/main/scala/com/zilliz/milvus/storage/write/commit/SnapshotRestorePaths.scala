@@ -21,7 +21,8 @@ import com.zilliz.milvus.storage.snapshot.json.ManifestContentJson
   * data already sits below. This object states the rule once, so that
   * `write_snapshot` refuses at planning what a restore would refuse at run
   * time, and `restore_snapshot` checks before it asks
-  * (docs/design/architecture/vector-search.html section 2.7).
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.7).
   */
 object SnapshotRestorePaths {
 

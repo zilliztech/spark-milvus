@@ -9,6 +9,6 @@ package com.zilliz.milvus.client
   * are what W8's `restore_snapshot` procedure calls.
   *
   * Capabilities: C1, C2, A1, A2, A3, A4, A5, W8 (see
-  * docs/design/capabilities.md).
+  * docs/design/projects/spark-milvus/capabilities.md).
   */
 package object api

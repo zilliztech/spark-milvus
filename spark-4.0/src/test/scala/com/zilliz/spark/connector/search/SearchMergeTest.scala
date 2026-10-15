@@ -1,6 +1,8 @@
 package com.zilliz.spark.connector.search
 
+import java.lang.{Long => JavaLong}
 import java.util.concurrent.{LinkedBlockingQueue, TimeUnit}
+import java.util.HashSet
 import scala.collection.concurrent.TrieMap
 
 import org.apache.spark.{SparkEnv, TaskContext}
@@ -11,6 +13,7 @@ import org.apache.spark.scheduler.{
 }
 import org.apache.spark.serializer.{JavaSerializer, KryoSerializer, Serializer}
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.HashPartitioner
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
@@ -20,6 +23,7 @@ import com.zilliz.milvus.storage.schema.MetricType
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
 import com.zilliz.milvus.storage.vector.{
   Candidate,
+  CandidateBytes,
   CandidateBytesFixture,
   CandidateRuns,
   CarriedCandidates
@@ -94,6 +98,225 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       k,
       heap
     )
+
+  private def completed(
+      answers: Seq[(Long, Array[Byte])],
+      partitions: Int,
+      required: Option[Array[Long]]
+  ) = SearchMerge.byQuery[(Long, Option[Int])](
+    spark,
+    spark.sparkContext.parallelize(answers, 2),
+    SearchMerge.plan(
+      partitions,
+      math.max(1L, answers.map(_._1).distinct.size.toLong),
+      2,
+      16,
+      1L << 30
+    ),
+    MetricType.L2,
+    (query, packed) =>
+      Iterator.tabulate(CandidateBytes.count(packed))(at =>
+        query -> Some(CandidateBytes.segmentId(packed, at).toInt)
+      ),
+    required,
+    query => query -> None
+  )
+
+  private def completedAnswer(value: Int): Array[Byte] =
+    CandidateBytesFixture.pack(
+      Seq(Candidate(0, value.toLong, 0L, value.toDouble)),
+      MetricType.L2
+    )
+
+  test("required ids use buckets only above two partitions with enough ids") {
+    Seq(1, 2, 3, 8).foreach { partitions =>
+      Seq(0, partitions - 1, partitions, partitions + 1).foreach { count =>
+        val ids = Array.tabulate(count)(_.toLong)
+        val original = ids.toVector
+        val prepared =
+          SearchMerge.requiredIds(ids, new HashPartitioner(partitions))
+        val bucketed = partitions > 2 && count >= partitions
+
+        prepared.ends.length shouldBe (if (bucketed) partitions else 0)
+        prepared.ids.length shouldBe count
+        (prepared.ids eq ids) shouldBe !bucketed
+        ids.toVector shouldBe original
+        if (bucketed) prepared.ends.last shouldBe count
+      }
+    }
+    // The small-Q path needs no offsets even when P+1 would overflow Int.
+    SearchMerge
+      .requiredIds(Array(1L), new HashPartitioner(Int.MaxValue))
+      .ends shouldBe empty
+  }
+
+  test("required buckets preserve id order, duplicates and Spark's Long hash") {
+    val ids = Array(
+      0L,
+      -1L,
+      1L,
+      Long.MinValue,
+      1L << 32,
+      0x100000001L,
+      Long.MaxValue,
+      -2L,
+      -1L,
+      17L,
+      0x100000001L,
+      0L,
+      -17L,
+      8L
+    )
+    Seq(1, 2, 3, 7, 11, 16).foreach { partitions =>
+      val partitioner = new HashPartitioner(partitions)
+      val prepared = SearchMerge.requiredIds(ids, partitioner)
+      Seq(false, true).foreach { hasFound =>
+        val found = new HashSet[JavaLong]()
+        if (hasFound) {
+          found.add(0L)
+          found.add(Long.MinValue)
+          found.add(17L)
+        }
+        (0 until partitions).foreach { index =>
+          val expected = ids.iterator
+            .filter(id =>
+              partitioner.getPartition(id) == index && !found.contains(id)
+            )
+            .toVector
+          prepared.missing(index, partitioner, found).toVector shouldBe expected
+          prepared.missing(index, partitioner, found).toVector shouldBe expected
+        }
+      }
+    }
+  }
+
+  test("required-id lookahead stops at its bucket and stays exhausted") {
+    val ids = Array(0L, 3L, 6L, 9L, 1L, 4L, 7L, 10L)
+    val partitioner = new HashPartitioner(3)
+    val prepared = SearchMerge.requiredIds(ids, partitioner)
+    val original = prepared.ids.toVector
+    val found = new HashSet[JavaLong]()
+    found.add(0L)
+    found.add(6L)
+    found.add(7L)
+
+    val first = prepared.missing(0, partitioner, found)
+    first.hasNext shouldBe true
+    first.hasNext shouldBe true
+    first.next() shouldBe 3L
+    first.next() shouldBe 9L
+    first.hasNext shouldBe false
+    first.hasNext shouldBe false
+    the[NoSuchElementException] thrownBy first.next()
+
+    prepared.missing(1, partitioner, found).toVector shouldBe Vector(
+      1L,
+      4L,
+      10L
+    )
+    val empty = prepared.missing(2, partitioner, found)
+    empty.hasNext shouldBe false
+    the[NoSuchElementException] thrownBy empty.next()
+
+    val allFound = new HashSet[JavaLong]()
+    ids.foreach(id => allFound.add(id))
+    val skipped = prepared.missing(0, partitioner, allFound)
+    skipped.hasNext shouldBe false
+    the[NoSuchElementException] thrownBy skipped.next()
+    prepared.missing(0, partitioner, found).toVector shouldBe Vector(3L, 9L)
+    prepared.ids.toVector shouldBe original
+  }
+
+  test(
+    "required ids complete by found key on both paths and can be read again"
+  ) {
+    val ids = Array(
+      0L,
+      -1L,
+      7L,
+      -1L,
+      0x100000001L,
+      Long.MinValue,
+      Long.MaxValue,
+      8L,
+      9L,
+      9L,
+      1L,
+      1L << 32
+    )
+    val answers = Seq(
+      0L -> completedAnswer(2),
+      0L -> completedAnswer(3),
+      // A key is found even when rowsOf produces no output for it.
+      -1L -> Array.emptyByteArray,
+      0x100000001L -> completedAnswer(4),
+      // Found keys outside required still keep their rows.
+      99L -> completedAnswer(5)
+    )
+    val found = Set(0L, -1L, 0x100000001L, 99L)
+    val expected = Vector(
+      0L -> Some(2),
+      0L -> Some(3),
+      0x100000001L -> Some(4),
+      99L -> Some(5)
+    ) ++ ids.iterator.filterNot(found).map(id => id -> None).toVector
+
+    Seq(1, 2, 3, 5, 16).foreach { partitions =>
+      val result = completed(answers, partitions, Some(ids))
+      // The output type is arbitrary; the input's key partitioner is not its
+      // downstream partitioner, even when this test happens to return pairs.
+      result.partitioner shouldBe None
+      result.collect().toVector should contain theSameElementsAs expected
+      result.collect().toVector should contain theSameElementsAs expected
+    }
+  }
+
+  test("None and empty required ids add no rows on either merge path") {
+    val answers = Seq(4L -> completedAnswer(2), 9L -> Array.emptyByteArray)
+    Seq(1, 3).foreach { partitions =>
+      Seq(None, Some(Array.empty[Long])).foreach { required =>
+        completed(answers, partitions, required).collect().toVector shouldBe
+          Vector(4L -> Some(2))
+        completed(Seq.empty, partitions, required).collect() shouldBe empty
+      }
+    }
+  }
+
+  test("outer completion keeps duplicate missing ids and NULL hit columns") {
+    val ids = Array(1L, 2L, 2L, -1L, Long.MinValue, Long.MaxValue, 0x100000001L)
+    val hits = candidates(Seq((1L, 10L, 3L, 1.0)))
+    Seq(2, 3).foreach { partitions =>
+      val mergePlan =
+        SearchMerge.plan(partitions, ids.length.toLong, 2, 1, 1L << 30)
+      val result =
+        SearchMerge.merged(spark, hits, MetricType.L2, mergePlan, Some(ids))
+      result.schema shouldBe SearchMerge.NullableHitSchema
+      val rows = result.collect().toVector
+      rows.map(_.getLong(0)) should contain theSameElementsAs ids.toVector
+      rows
+        .filter(_.getLong(0) == 1L)
+        .map(row => row.getLong(1) -> row.getLong(2)) shouldBe Vector(10L -> 3L)
+      rows.filter(_.getLong(0) != 1L).foreach { row =>
+        row.isNullAt(1) shouldBe true
+        row.isNullAt(2) shouldBe true
+      }
+      val empty = SearchMerge
+        .merged(
+          spark,
+          candidates(Seq.empty),
+          MetricType.L2,
+          mergePlan,
+          Some(ids)
+        )
+        .collect()
+        .toVector
+      empty.map(_.getLong(0)) should contain theSameElementsAs ids.toVector
+      empty.foreach { row =>
+        row.isNullAt(1) shouldBe true
+        row.isNullAt(2) shouldBe true
+      }
+    }
+  }
 
   test("each query keeps its own best k addresses, best first") {
     val merged = this.merged(
@@ -523,6 +746,7 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       for {
         layout <- Seq(CandidateRuns.Plain, CandidateRuns.Carried)
         required <- Seq(None, Some((0L until 9L).toArray))
+        partitions <- Seq(2, 3)
       } {
         val source = inputs.map { case (query, entries) =>
           query -> packed(layout, entries)
@@ -535,7 +759,7 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
         } ++ (if (required.isDefined) Map(8L -> Vector.empty[Byte])
               else Map.empty[Long, Vector[Byte]])
         val plan = SearchMerge.plan(
-          2,
+          partitions,
           9L,
           72,
           7,

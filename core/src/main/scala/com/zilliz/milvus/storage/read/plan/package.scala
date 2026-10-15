@@ -23,11 +23,12 @@ package com.zilliz.milvus.storage.read
   * and a trait with a single implementation and no second caller would be
   * guesswork. The two shapes that would need one are reporting a Spark
   * partition per Milvus partition, whose worth is decision 19 in section 4 of
-  * docs/design/README.md and still open, and segment selection.
+  * docs/design/projects/spark-milvus/README.md and still open, and segment
+  * selection.
   *
   * Main types: SegmentReadTask, ReadLimits, SegmentLayout, DeleteSource,
   * ReadPlan, DeleteFileListing. Capabilities: R3, R5, R8, R13 (see
-  * docs/design/capabilities.md). Design: docs/design/architecture/read.html
-  * section 5.1.
+  * docs/design/projects/spark-milvus/capabilities.md). Design:
+  * docs/design/projects/spark-milvus/architecture/read.html section 5.1.
   */
 package object plan

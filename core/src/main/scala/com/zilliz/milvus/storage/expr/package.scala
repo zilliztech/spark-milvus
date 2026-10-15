@@ -8,6 +8,6 @@ package com.zilliz.milvus.storage
   * the schema-bound R6 Spark V2 predicate contract without changing R7 syntax
   * semantics. Both preserve null through three-valued logic and give the rows
   * they exclude as a `ExclusionBitmap`. Capabilities: R6, R7 (see
-  * docs/design/capabilities.md).
+  * docs/design/projects/spark-milvus/capabilities.md).
   */
 package object expr

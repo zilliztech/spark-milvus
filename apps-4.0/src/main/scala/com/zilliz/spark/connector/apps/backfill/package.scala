@@ -7,6 +7,6 @@ package com.zilliz.spark.connector.apps
   * row statistics. BackfillVectorColumns encodes the input's vector columns for
   * the collection schema before the backfill merge.
   *
-  * Capabilities: O1 (see docs/design/capabilities.md).
+  * Capabilities: O1 (see docs/design/projects/spark-milvus/capabilities.md).
   */
 package object backfill

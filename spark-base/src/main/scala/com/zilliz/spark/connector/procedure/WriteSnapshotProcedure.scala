@@ -44,8 +44,10 @@ import com.zilliz.spark.connector.table.{MilvusTables, SnapshotReference}
   * recorded document, else through the collection id, the table's or the one
   * Milvus reports for the name. What lands on storage is one Avro manifest per
   * segment and the snapshot JSON that names them, in the layout a snapshot read
-  * expects (docs/design/architecture/vector-search.html section 2.7,
-  * docs/design/architecture/dataframe-api.html section 9).
+  * expects (docs/design/projects/spark-milvus/architecture/vector-search.html
+  * section 2.7,
+  * docs/design/projects/spark-milvus/architecture/dataframe-api.html section
+  * 9).
   *
   * Restoring the result into a Milvus collection is the separate
   * `restore_snapshot` call; this procedure writes the files and returns where

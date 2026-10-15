@@ -22,8 +22,9 @@ import com.zilliz.milvus.storage.schema.MetricType
   * that was profiled a group's search took 238 ms of native time and its
   * checking and collecting 30 ms of Java time, one after the other on the task
   * thread while the other cores waited; pipelined, the Java time hides behind
-  * the next search (docs/design/architecture/vector-search.html section 2.1,
-  * 2026-09-24 decision).
+  * the next search
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.1, 2026-09-24 decision).
   *
   * At k = 10,000 the same chunk's answer holds a hundred times the candidates
   * of the profiled k = 100 and its checking and collecting take longer than the
@@ -75,8 +76,9 @@ object IndexSearch {
 
   /** How wide the HNSW search is: `ef` if the caller named it, otherwise
     * `max(64, k)`. It is the only search parameter this connector accepts, and
-    * it cannot be smaller than k (docs/design/architecture/vector-search.html
-    * section 2.4).
+    * it cannot be smaller than k
+    * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+    * 2.4).
     */
   def searchEf(topK: Int, parameters: Map[String, String]): Int = {
     require(
@@ -124,8 +126,8 @@ object IndexSearch {
     * once; one keeps everything on the worker thread. With `rankNonFinite` a
     * NaN or infinite score is a value like any other, ranked by
     * `Double.compare`, as the ranking function of a nearest-by join ranks it
-    * (docs/design/architecture/dataframe-api.html section 2); without it such a
-    * score fails the search.
+    * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
+    * 2); without it such a score fails the search.
     */
   /** A group's search in progress on one pipeline: handed out by
     * [[Pipeline.begin]], run by [[Pipeline.search]] on any thread, handed to

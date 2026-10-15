@@ -102,7 +102,8 @@ final case class CommittedSegment(
   * versions are what Milvus reads an index by: `indexVersion` is part of the
   * object prefix and `vectorIndexVersion` is the format version of the index
   * itself. `buildId` is the connector's, and Milvus assigns its own when it
-  * restores the snapshot (docs/design/architecture/vector-search.html section
+  * restores the snapshot
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
   * 2.7).
   */
 final case class CommittedIndex(
@@ -127,7 +128,9 @@ final case class CommittedIndex(
   * `key` is the snapshot document as a key of `bucket` (empty on the local
   * backend): the object a snapshot write copies. The collection id checks the
   * collection a write names; the name and the HybridTS `createdAt` name the
-  * snapshot in errors (docs/design/architecture/dataframe-api.html section 9).
+  * snapshot in errors
+  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
+  * 9).
   */
 final case class SourceSnapshot(
     @JsonProperty("key") key: String,

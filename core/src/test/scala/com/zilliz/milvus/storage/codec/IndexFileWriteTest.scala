@@ -10,7 +10,8 @@ import org.scalatest.matchers.should.Matchers
 import com.zilliz.milvus.storage.io.LocalObjectStore
 
 /** The index objects a build writes, read back by the decoder that loads them
-  * (docs/design/architecture/vector-search.html sections 2.5 and 2.7).
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html sections
+  * 2.5 and 2.7).
   */
 class IndexFileWriteTest extends AnyFunSuite with Matchers {
 

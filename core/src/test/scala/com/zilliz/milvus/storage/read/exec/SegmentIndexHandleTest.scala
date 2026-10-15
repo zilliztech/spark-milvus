@@ -22,7 +22,8 @@ import com.zilliz.milvus.storage.snapshot.{
 }
 
 /** What the Milvus format side accepts before it opens an index
-  * (docs/design/architecture/vector-search.html sections 2.4 and 2.5).
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html sections
+  * 2.4 and 2.5).
   */
 class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
   private val layout = VectorLayout(VectorElementType.Float32, 4)

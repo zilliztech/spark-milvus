@@ -5,6 +5,6 @@ package com.zilliz.milvus.client
   *
   * The read RPCs behind C1, C2 and A1 through A5 are retried here; writes are
   * sent once. capabilities.md records those rows against client.api (see
-  * docs/design/capabilities.md).
+  * docs/design/projects/spark-milvus/capabilities.md).
   */
 package object grpc

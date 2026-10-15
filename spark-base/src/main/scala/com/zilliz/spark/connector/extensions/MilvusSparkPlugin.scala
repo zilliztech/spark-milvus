@@ -24,8 +24,8 @@ import com.zilliz.milvus.jni.vector.NativeVectorLibrary
   * driver is still planning and delivering the query set -- so the same work
   * done here costs the job nothing. A load that fails here is logged and left
   * to the first task, which reports the failure the way it always did
-  * (docs/design/architecture/vector-search.html section 2.1, 2026-09-24
-  * decision).
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.1, 2026-09-24 decision).
   */
 class MilvusSparkPlugin extends SparkPlugin {
   override def driverPlugin(): DriverPlugin = null

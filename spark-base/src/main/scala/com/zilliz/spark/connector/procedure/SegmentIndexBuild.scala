@@ -22,7 +22,8 @@ import io.milvus.grpc.schema.CollectionSchema
   * The task reads the segment's vector column into one buffer, Knowhere builds
   * and serializes, and the Milvus `TableFormat` side writes the objects. What
   * comes back is the record a segment's index entry is written from
-  * (docs/design/architecture/vector-search.html section 2.7).
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.7).
   */
 private[procedure] object SegmentIndexBuild extends Logging {
 

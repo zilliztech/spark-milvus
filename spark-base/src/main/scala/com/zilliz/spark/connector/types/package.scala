@@ -14,6 +14,7 @@ package com.zilliz.spark.connector
   * supplies consecutive row positions, and `SelectedRowsColumn` presents
   * selected rows of another column without copying its buffers.
   *
-  * Capabilities: R15, G3 (see docs/design/capabilities.md).
+  * Capabilities: R15, G3 (see
+  * docs/design/projects/spark-milvus/capabilities.md).
   */
 package object types

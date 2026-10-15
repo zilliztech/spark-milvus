@@ -6,8 +6,9 @@ import org.apache.spark.sql.DataFrame
 
 /** The connector's methods on a DataFrame: Spark 4.2's `nearestByJoin` on the
   * Spark lines before 4.2, and `buildIndex` and `writeSnapshot` on a Milvus
-  * table's DataFrame on every line (docs/design/architecture/dataframe-api.html
-  * sections 6 and 9).
+  * table's DataFrame on every line
+  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html sections
+  * 6 and 9).
   *
   * `MilvusDataFrame` holds the methods, and importing this package's members
   * puts them on any DataFrame; Java constructs `MilvusDataFrame` itself. On 4.2
@@ -20,7 +21,8 @@ import org.apache.spark.sql.DataFrame
   * and on 4.0 and 4.1 it tells a Connect DataFrame by its class name and leaves
   * the plan to `ClassicNearestByJoin`.
   *
-  * Capabilities: V5, V7, W6, W8 (see docs/design/capabilities.md).
+  * Capabilities: V5, V7, W6, W8 (see
+  * docs/design/projects/spark-milvus/capabilities.md).
   */
 package object implicits {
 

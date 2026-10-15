@@ -65,7 +65,8 @@ import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
   * bytes its shuffles wrote and what its take stage read. It sums the hits'
   * scores, and NEAREST BY has no score column, so it computes the ranking again
   * for every hit and reads the hit's vector to do it
-  * (docs/design/architecture/dataframe-api.html section 7).
+  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
+  * 7).
   */
 object ExactSearchScale {
 

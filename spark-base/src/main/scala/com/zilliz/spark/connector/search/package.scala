@@ -1,11 +1,12 @@
 package com.zilliz.spark.connector
 
 /** The connector's execution of a NEAREST BY join
-  * (docs/design/architecture/dataframe-api.html sections 2 and 4). The
-  * `extensions` package plans the join into `MilvusNearestByJoinExec` over a
-  * Milvus table or `MilvusNearestByJoinFrameExec` over any other base, and
-  * either node's `doExecute` runs `NearestBySearch`; the distances are computed
-  * in `core.vector`.
+  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html sections
+  * 2 and 4). The `extensions` package plans the join into
+  * `MilvusNearestByJoinExec` over a Milvus table or
+  * `MilvusNearestByJoinFrameExec` over any other base, and either node's
+  * `doExecute` runs `NearestBySearch`; the distances are computed in
+  * `core.vector`.
   *
   * `NearestBySearch` coordinates the join and assembles its output.
   * `NearestByInput` adapts the base's fields, layout, options and search entry,
@@ -39,11 +40,12 @@ package com.zilliz.spark.connector
   * prefetch and partition counts for both inputs. `SearchResources` holds the
   * resource formulas and `core.vector.SearchPlan` the format-independent
   * grouping algorithm. Executors consume the plan and check actual retained
-  * bytes as data loads (docs/design/architecture/search-resources.html section
-  * 3.3).
+  * bytes as data loads
+  * (docs/design/projects/spark-milvus/architecture/search-resources.html
+  * section 3.3).
   *
   * The search evaluates `milvus.filter` on a Milvus table base (R7) and holds
   * the take stage's Arrow child allocators (G3). Capabilities: R7, V5, V7, V9,
-  * G3 (see docs/design/capabilities.md).
+  * G3 (see docs/design/projects/spark-milvus/capabilities.md).
   */
 package object search

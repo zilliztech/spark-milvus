@@ -5,7 +5,8 @@ import org.scalatest.matchers.should.Matchers
 
 /** The rule Milvus's external restore applies to a snapshot's paths, stated
   * once so that a write and a restore refuse the same snapshots
-  * (docs/design/architecture/vector-search.html section 2.7).
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.7).
   */
 class SnapshotRestorePathsTest extends AnyFunSuite with Matchers {
 

@@ -1,7 +1,8 @@
 package com.zilliz.milvus.storage.read.exec
 
 /** What one segment read cost on the C/JVM crossing, as far as this side can
-  * see it. Design: docs/design/architecture/storage-io.html section 5.
+  * see it. Design:
+  * docs/design/projects/spark-milvus/architecture/storage-io.html section 5.
   *
   * @param jniCalls
   *   calls into the upstream milvus-storage binding by this reader, the opens

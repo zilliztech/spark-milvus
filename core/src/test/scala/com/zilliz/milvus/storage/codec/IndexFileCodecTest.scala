@@ -12,7 +12,8 @@ import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
 import com.zilliz.milvus.storage.snapshot.SegmentIndex
 
 /** The Milvus index file format: slices, identity and payload markers
-  * (docs/design/architecture/vector-search.html section 2.5).
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.5).
   */
 class IndexFileCodecTest extends AnyFunSuite {
   private val descriptor = SegmentIndex(

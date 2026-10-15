@@ -18,4 +18,4 @@ Do not relocate the `io.knowhere` Java package when building an assembly.
 Preload the JRE's `libjsig` before starting the JVM, as required by this build.
 
 Persisted Milvus index decoding and search are subsequent work. The governing
-design is [vector-search.html](../../../../docs/design/architecture/vector-search.html#library-loading).
+design is [vector-search.html](../../../../docs/design/projects/spark-milvus/architecture/vector-search.html#library-loading).

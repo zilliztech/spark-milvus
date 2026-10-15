@@ -31,7 +31,8 @@ import com.zilliz.milvus.storage.vector.IndexSearch
   * it checks the descriptor, reads the objects, decodes them and hands the
   * vector library the payload. A computation searches the handle and never sees
   * the files or the store it came from
-  * (docs/design/architecture/vector-search.html sections 2.4 and 2.5).
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html sections
+  * 2.4 and 2.5).
   */
 final class SegmentIndexHandle private (
     private[storage] val index: NativeVectorIndex,
@@ -84,7 +85,8 @@ object SegmentIndexHandle {
   /** Why a segment's metadata offers no index a search can use. An index search
     * scans such a segment exactly, whatever the reason: an APPROX nearest-by
     * join, whose answer may be the exact one
-    * (docs/design/architecture/dataframe-api.html section 2).
+    * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
+    * 2).
     */
   sealed abstract class Unusable(val label: String) extends Serializable
 
@@ -222,9 +224,10 @@ object SegmentIndexHandle {
     * supported index type over the column's own element type, with a metric and
     * a format version the snapshot states. A nullable column is indexed over
     * the rows that have a value, and the index files say which those are. A
-    * binary vector column is not searched (docs/design/README.md, decision log
-    * 2026-10-09), so its indexes are not loaded. Anything else fails here,
-    * before a file is read.
+    * binary vector column is not searched
+    * (docs/design/projects/spark-milvus/README.md, decision log 2026-10-09), so
+    * its indexes are not loaded. Anything else fails here, before a file is
+    * read.
     */
   def open(
       index: SegmentIndex,

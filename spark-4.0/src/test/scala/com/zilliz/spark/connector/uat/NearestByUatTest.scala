@@ -28,7 +28,8 @@ import com.zilliz.spark.connector.options.MilvusOption
 /** NEAREST BY on the UAT collections, judged against the answer worked out from
   * the ids: row `id` holds `v = [id*10 + d]`, so the squared L2 between rows
   * `a` and `b` is `400 (a - b)^2` and a query's nearest rows are known without
-  * reading the collection (docs/design/architecture/dataframe-api.html section
+  * reading the collection
+  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
   * 10, step 1). Compiled into every line: Spark's own NEAREST BY on 4.2, the
   * connector's `nearestByJoin` before it.
   *

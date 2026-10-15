@@ -972,7 +972,7 @@ object CorrectnessJob {
           val waited = spark
             .sql(
               s"CALL milvus.system.create_index(collection => '$collection', field => 'v', index_name => 'v_idx'," +
-                s""" index_type => 'HNSW', metric_type => 'COSINE', params => '{"M":8,"efConstruction":64}',""" +
+                " index_type => 'HNSW', metric_type => 'COSINE', params => '{\"M\":8,\"efConstruction\":64}'," +
                 s" wait => true, timeout_seconds => 180${callOptions})"
             )
             .collect()

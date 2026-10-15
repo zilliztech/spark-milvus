@@ -19,12 +19,13 @@ import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
   * reads, and reports the rows it must exclude.
   *
   * The batch is handed over as it lies when its layout already matches what
-  * Knowhere expects (docs/design/architecture/vector-search.html section 2.2);
-  * otherwise its rows are copied once into a buffer this object owns. A column
-  * Milvus wrote as a nullable vector field is variable-width binary, every
-  * value one row's bytes, and lies end to end when no row of the batch is null.
-  * Values are not inspected here. Without a ranking function a non-finite value
-  * reaches Knowhere and shows up as a non-finite score, which the caller
+  * Knowhere expects
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.2); otherwise its rows are copied once into a buffer this object owns. A
+  * column Milvus wrote as a nullable vector field is variable-width binary,
+  * every value one row's bytes, and lies end to end when no row of the batch is
+  * null. Values are not inspected here. Without a ranking function a non-finite
+  * value reaches Knowhere and shows up as a non-finite score, which the caller
   * rejects; with one, [[EngineRange]] reads the batch first and keeps such rows
   * away from Knowhere.
   */
@@ -50,9 +51,10 @@ object KnowhereBuffers {
     * smallest batch any column group offers, so a 1024-dimension float vector
     * arrives 256 rows at a time however many rows the reader was asked for. How
     * large the joined block should be is the executor's choice, from its L3 and
-    * its concurrency (docs/design/architecture/search-resources.html section
-    * 3.2); 32 MiB for every task was measured slower than no join at all, 2 to
-    * 8 MiB faster.
+    * its concurrency
+    * (docs/design/projects/spark-milvus/architecture/search-resources.html
+    * section 3.2); 32 MiB for every task was measured slower than no join at
+    * all, 2 to 8 MiB faster.
     *
     * The parts are borrowed; the caller retains ownership and closes them on
     * both success and failure. The returned base owns only its copied bytes.

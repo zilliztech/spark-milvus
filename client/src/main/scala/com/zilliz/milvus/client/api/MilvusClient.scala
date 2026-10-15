@@ -469,7 +469,7 @@ class MilvusClient(params: MilvusConnectionParams)
     * backfill branch): Milvus advances each segment's manifest to the version
     * given and broadcasts the change, so query nodes reload the segment. The
     * segments must exist and be flushed; Milvus does not open the manifest to
-    * check it (docs/design/README.md section 5).
+    * check it (docs/design/projects/spark-milvus/README.md section 5).
     */
   def batchUpdateManifest(
       dbName: String,

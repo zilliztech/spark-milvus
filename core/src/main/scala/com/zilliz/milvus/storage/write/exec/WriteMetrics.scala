@@ -1,7 +1,7 @@
 package com.zilliz.milvus.storage.write.exec
 
 /** What one segment write cost on the C/JVM crossing. Design:
-  * docs/design/architecture/storage-io.html section 5.
+  * docs/design/projects/spark-milvus/architecture/storage-io.html section 5.
   *
   * @param jniCalls
   *   calls into the upstream milvus-storage binding by this writer, the open

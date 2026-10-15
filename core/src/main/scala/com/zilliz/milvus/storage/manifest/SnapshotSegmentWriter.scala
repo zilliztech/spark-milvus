@@ -30,7 +30,8 @@ import org.apache.avro.Schema
   * checked against what Milvus writes or requires, because the only verified
   * reader of these objects is this connector, which does not use them. A
   * Milvus-side consumer has to settle them first
-  * (docs/design/architecture/vector-search.html section 2.7).
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.7).
   */
 object SnapshotSegmentWriter {
 

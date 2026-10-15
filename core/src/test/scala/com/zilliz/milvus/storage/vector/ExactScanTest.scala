@@ -18,8 +18,9 @@ import com.zilliz.milvus.storage.schema.{
 
 /** The compaction a batch with excluded rows goes through before the batched
   * distance entry, which takes no bitmap
-  * (docs/design/architecture/vector-search.html section 2.3), and the L2 the
-  * batched entry only nominates candidates for (decision 37).
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 2.3), and the L2 the batched entry only nominates candidates for (decision
+  * 37).
   */
 class ExactScanTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
 

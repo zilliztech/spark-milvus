@@ -19,14 +19,15 @@ package com.zilliz.spark.connector
   * `SearchLimits` parses the `milvus.search.*` limits, and `TaskResources`
   * reads the executors a job has and declares, for a stage of Knowhere calls (a
   * search or an index build), that its tasks take every core of their executor
-  * (docs/design/architecture/vector-search.html section 1.1). What one search
-  * task may keep is the search's to derive (`search`'s `SearchResources`,
-  * search-resources.html section 3.3).
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
+  * 1.1). What one search task may keep is the search's to derive (`search`'s
+  * `SearchResources`, search-resources.html section 3.3).
   *
   * Index building (W6) takes no write option; its parameters belong to the
   * `build_index` procedure. No index or GPU session option exists yet (G4 is
   * declared unplaced in section 11 of capabilities.md).
   *
-  * Capabilities: R16, G1, G2, G3 (see docs/design/capabilities.md).
+  * Capabilities: R16, G1, G2, G3 (see
+  * docs/design/projects/spark-milvus/capabilities.md).
   */
 package object options

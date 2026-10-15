@@ -37,8 +37,9 @@ package com.zilliz.milvus.storage.write
   * Main types: JobManifest, CommittedSegment, CommittedIndex, Committer,
   * CommitOutcome, Registration, StagingCleaner, SnapshotWriter, SnapshotTarget,
   * SnapshotRestorePaths. Capabilities: W3, A4, A7, W6, W8 (see
-  * docs/design/capabilities.md). A7 remains partial until native recursive
-  * directory deletion is available. Design: docs/design/README.md section 2.4
-  * and docs/design/architecture/procedure.html section 3.3.
+  * docs/design/projects/spark-milvus/capabilities.md). A7 remains partial until
+  * native recursive directory deletion is available. Design:
+  * docs/design/projects/spark-milvus/README.md section 2.4 and
+  * docs/design/projects/spark-milvus/architecture/procedure.html section 3.3.
   */
 package object commit

@@ -6,7 +6,7 @@ package com.zilliz.spark.connector
   * (`spark-base`); this directory holds the parser antlr generates at this
   * line's version and `MilvusSqlParser`, the `ParserInterface` adapter, which
   * on Spark 4.0 and later forwards `parseRoutineParam` too. Design:
-  * docs/design/architecture/procedure.html.
+  * docs/design/projects/spark-milvus/architecture/procedure.html.
   *
   * The shared directory also holds `MilvusSparkPlugin`: set through
   * `spark.plugins`, it loads the native bundle on every executor at start, so
@@ -26,9 +26,9 @@ package com.zilliz.spark.connector
   * rows Knowhere is not given; and `Datasets`, which makes the relation over
   * those query rows. The shared request node, general plan and vector functions
   * serve the lines before 4.2 and are not installed here. Design:
-  * docs/design/architecture/dataframe-api.html.
+  * docs/design/projects/spark-milvus/architecture/dataframe-api.html.
   *
   * Capabilities: A1, A2, A3, A4, A5, V5, V7, V9 (see
-  * docs/design/capabilities.md).
+  * docs/design/projects/spark-milvus/capabilities.md).
   */
 package object extensions

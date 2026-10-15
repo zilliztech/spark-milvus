@@ -1,5 +1,7 @@
 package com.zilliz.spark.connector.search
 
+import java.lang.{Long => JavaLong}
+import java.util.HashSet
 import scala.reflect.ClassTag
 
 import org.apache.spark.rdd.RDD
@@ -17,13 +19,14 @@ import com.zilliz.milvus.storage.vector.{CandidateBytes, CandidateRuns}
   * A first-stage task answers each query it found anything for with one packed
   * record of that query's best k; the merge combines a query's records, one per
   * task, into its global top k by query id over an RDD shuffle
-  * (docs/design/architecture/vector-search.html sections 2.1 and 2.6). A Milvus
-  * table input merges `CandidateBytes` into addresses of [[HitSchema]], which
-  * its take stage reads for the base columns; a DataFrame input's candidates
-  * carry their rows (`CarriedCandidates`), so its merge gives the hits whole. A
-  * query's answers are retained as a bounded batch of sorted runs and compacted
-  * into its top k by one k-way selection (`CandidateRuns`,
-  * docs/design/architecture/candidate-merge.html).
+  * (docs/design/projects/spark-milvus/architecture/vector-search.html sections
+  * 2.1 and 2.6). A Milvus table input merges `CandidateBytes` into addresses of
+  * [[HitSchema]], which its take stage reads for the base columns; a DataFrame
+  * input's candidates carry their rows (`CarriedCandidates`), so its merge
+  * gives the hits whole. A query's answers are retained as a bounded batch of
+  * sorted runs and compacted into its top k by one k-way selection
+  * (`CandidateRuns`,
+  * docs/design/projects/spark-milvus/architecture/candidate-merge.html).
   */
 private[search] object SearchMerge {
 
@@ -198,19 +201,104 @@ private[search] object SearchMerge {
       case Some(ids) =>
         // A required id that no task found anything for has no key here; the
         // partition its key would hash to says so after its own answers.
-        val wanted = spark.sparkContext.broadcast(ids)
+        val wanted = spark.sparkContext.broadcast(requiredIds(ids, partitioner))
         combined.mapPartitionsWithIndex { (index, merged) =>
-          val found = new java.util.HashSet[java.lang.Long]()
+          val found = new HashSet[JavaLong]()
           merged.flatMap { case (query, state) =>
             found.add(query)
             rowsOf(query, state.finish())
-          } ++ wanted.value.iterator
-            .filter(id =>
-              partitioner.getPartition(id) == index && !found.contains(id)
-            )
+          } ++ wanted.value
+            .missing(index, partitioner, found)
             .map(absent)
         }
     }
+  }
+
+  /** Required ids in their original order, or stably grouped by merge
+    * partition. Empty ends keep the original filtering path. The bucketed
+    * representation adds one Int per partition to the ids already broadcast.
+    */
+  private[search] final class RequiredIds(
+      val ids: Array[Long],
+      val ends: Array[Int]
+  ) extends Serializable {
+    def missing(
+        index: Int,
+        partitioner: HashPartitioner,
+        found: HashSet[JavaLong]
+    ): Iterator[Long] =
+      if (ends.isEmpty)
+        ids.iterator.filter(id =>
+          partitioner.getPartition(id) == index && !found.contains(id)
+        )
+      else {
+        val start = if (index == 0) 0 else ends(index - 1)
+        new RequiredIdCursor(ids, start, ends(index), found)
+      }
+  }
+
+  private final class RequiredIdCursor(
+      ids: Array[Long],
+      start: Int,
+      end: Int,
+      found: HashSet[JavaLong]
+  ) extends Iterator[Long] {
+    private var at = start
+    private var ready = false
+    private var value = 0L
+
+    override def hasNext: Boolean = {
+      while (!ready && at < end) {
+        val id = ids(at)
+        at += 1
+        if (!found.contains(id)) {
+          value = id
+          ready = true
+        }
+      }
+      ready
+    }
+
+    override def next(): Long = {
+      if (!hasNext) throw new NoSuchElementException("next on empty iterator")
+      ready = false
+      value
+    }
+  }
+
+  private[search] def requiredIds(
+      ids: Array[Long],
+      partitioner: HashPartitioner
+  ): RequiredIds = {
+    val partitions = partitioner.numPartitions
+    // Two passes over the ids prepare the buckets. Keep small partition counts
+    // on the original path, and bound the added offsets by the id count.
+    if (partitions <= 2 || ids.length < partitions)
+      return new RequiredIds(ids, Array.empty[Int])
+    val ends = new Array[Int](partitions)
+    var at = 0
+    while (at < ids.length) {
+      ends(partitioner.getPartition(ids(at))) += 1
+      at += 1
+    }
+    var partition = 0
+    var total = 0
+    while (partition < partitions) {
+      total += ends(partition)
+      ends(partition) = total
+      partition += 1
+    }
+    val positions = ends.clone()
+    val grouped = new Array[Long](ids.length)
+    at = ids.length - 1
+    while (at >= 0) {
+      val id = ids(at)
+      partition = partitioner.getPartition(id)
+      positions(partition) -= 1
+      grouped(positions(partition)) = id
+      at -= 1
+    }
+    new RequiredIds(grouped, ends)
   }
 
   /** Required ids with NULL base columns when no search ran. */
