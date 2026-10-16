@@ -30,6 +30,7 @@ jobs:
           PY
 
   consumer:
+    name: Consumer (Spark ${{ matrix.line }}, ${{ matrix.platform }}, ${{ matrix.os_version }})
     needs: matrix
     strategy:
       fail-fast: false

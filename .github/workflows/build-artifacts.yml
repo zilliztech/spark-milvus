@@ -50,6 +50,7 @@ jobs:
           retention-days: 14
 
   native:
+    name: Native (${{ matrix.platform }})
     needs: plan
     if: inputs.build_native
     strategy:
@@ -167,6 +168,7 @@ jobs:
           retention-days: 7
 
   jvm:
+    name: JVM (Spark ${{ matrix.line }})
     needs: plan
     strategy:
       fail-fast: false
