@@ -4,12 +4,10 @@ import com.zilliz.milvus.jni.runtime.NativeLibraries;
 import com.zilliz.milvus.jni.runtime.NativeLibraries.Bundle;
 import io.knowhere.Knowhere;
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Optional;
-import java.util.Properties;
 
 /**
  * Initializes the upstream Knowhere JNI binding when vector execution needs it.
@@ -35,7 +33,9 @@ public final class NativeVectorLibrary {
     public static synchronized RuntimeInfo load() {
         if (runtime == null) {
             Optional<Bundle> bundle = NativeLibraries.bundled();
-            runtime = bundle.isPresent() ? loadBundle(bundle.get()) : initialize(cardinalEnabled());
+            // An upstream or explicitly supplied library has no verified feature
+            // record. Only the actual unified bundle can advertise Cardinal.
+            runtime = bundle.isPresent() ? loadBundle(bundle.get()) : initialize(false);
         }
         return runtime;
     }
@@ -82,20 +82,6 @@ public final class NativeVectorLibrary {
                 if (explicit == null) System.clearProperty(NATIVE_PATH);
                 else System.setProperty(NATIVE_PATH, explicit);
             }
-        }
-    }
-
-    private static boolean cardinalEnabled() {
-        // An arbitrary externally supplied library has no verified build feature record.
-        if (System.getProperty(NATIVE_PATH) != null) return false;
-        try (InputStream input = NativeVectorLibrary.class.getResourceAsStream(
-                "/META-INF/milvus/knowhere-runtime.properties")) {
-            if (input == null) return false;
-            Properties features = new Properties();
-            features.load(input);
-            return "true".equals(features.getProperty("with_cardinal"));
-        } catch (IOException failure) {
-            throw new IllegalStateException("Cannot read Knowhere build features", failure);
         }
     }
 

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Prepare a public Linux runner for the checked-in native build profiles.
+set -euo pipefail
+
+platform="${1:?usage: prepare_native.sh linux-x86_64|linux-aarch64}"
+case "$(uname -s):$(uname -m):$platform" in
+  Linux:x86_64:linux-x86_64|Linux:aarch64:linux-aarch64) ;;
+  *) echo "Runner does not match native platform $platform" >&2; exit 1 ;;
+esac
+
+# These SDKs are unused by this job. Never remove local developer tooling or
+# caches, and never apply this cleanup to a self-hosted runner.
+if [[ "${GITHUB_ACTIONS:-}" == "true" && "${RUNNER_ENVIRONMENT:-}" == "github-hosted" ]]; then
+  sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc
+fi
+runner_directory="${RUNNER_TEMP:?RUNNER_TEMP must name the disposable runner directory}"
+available_kib="$(df -Pk "$runner_directory" | awk 'NR == 2 { print $4 }')"
+if [[ ! "$available_kib" =~ ^[0-9]+$ ]] || (( available_kib < 30 * 1024 * 1024 )); then
+  echo "Native builds need at least 30 GiB free before restoring dependency caches; available: ${available_kib:-unknown} KiB" >&2
+  df -h "$runner_directory" >&2
+  exit 1
+fi
+
+sudo apt-get update -qq
+sudo apt-get install -y --no-install-recommends \
+  gcc-12 g++-12 gfortran-12 libaio-dev libclang-dev patchelf binutils \
+  ccache pkg-config automake autoconf libtool ninja-build
+
+toolchain="$runner_directory/native-toolchain"
+python3 -m venv "$toolchain"
+"$toolchain/bin/python" -m pip install --disable-pip-version-check \
+  conan==2.25.1 cmake==3.27.5 ninja==1.13.0
+export PATH="$toolchain/bin:$PATH"
+printf '%s\n' "$toolchain/bin" >> "${GITHUB_PATH:?}"
+
+conan profile detect --force
+conan remote add --force default-conan-local2 \
+  https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2
+test -x "${JAVA_HOME:?}/bin/javac"
+rustc --version
+cargo --version
+cmake --version
+conan --version
+df -h "$RUNNER_TEMP"

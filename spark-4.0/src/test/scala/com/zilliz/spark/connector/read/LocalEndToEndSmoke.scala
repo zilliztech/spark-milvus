@@ -172,7 +172,7 @@ object LocalEndToEndSmoke {
       NativeVectorLibrary.load()
       spark = SparkSession
         .builder()
-        .master("local[4]")
+        .master(sys.props.getOrElse("milvus.smoke.master", "local[4]"))
         .appName("local-e2e-smoke")
         .config(
           "spark.sql.extensions",
@@ -186,6 +186,15 @@ object LocalEndToEndSmoke {
         .config("spark.sql.warehouse.dir", root.resolve("warehouse").toString)
         .getOrCreate()
       spark.sparkContext.setLogLevel("WARN")
+      if (spark.sparkContext.master.startsWith("local-cluster[")) {
+        val driverPid = ProcessHandle.current().pid()
+        val executorPids = spark.sparkContext
+          .parallelize(Seq(1, 2), 2)
+          .mapPartitions(_ => Iterator(ProcessHandle.current().pid()))
+          .collect()
+        assert(executorPids.nonEmpty && executorPids.forall(_ != driverPid))
+        step("PASS independent executor JVM")
+      }
       val session = spark
       import session.implicits._
 

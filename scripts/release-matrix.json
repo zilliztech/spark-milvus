@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "groupId": "com.zilliz",
+  "native": [
+    {
+      "platform": "linux-x86_64",
+      "runner": "ubuntu-22.04",
+      "build_jobs": 4,
+      "libc": "glibc",
+      "glibc": "2.35",
+      "glibcxx": "3.4.30",
+      "cxxabi": "1.3.13",
+      "consumers": [
+        {"os_version": "ubuntu-22.04", "runner": "ubuntu-22.04"},
+        {"os_version": "ubuntu-24.04", "runner": "ubuntu-24.04"}
+      ]
+    },
+    {
+      "platform": "linux-aarch64",
+      "runner": "ubuntu-22.04-arm",
+      "build_jobs": 4,
+      "libc": "glibc",
+      "glibc": "2.35",
+      "glibcxx": "3.4.30",
+      "cxxabi": "1.3.13",
+      "consumers": [
+        {"os_version": "ubuntu-22.04", "runner": "ubuntu-22.04-arm"},
+        {"os_version": "ubuntu-24.04", "runner": "ubuntu-24.04-arm"}
+      ]
+    }
+  ],
+  "jvm": [
+    {"line": "4.0", "project": "spark40", "spark": "4.0.1", "scala": "2.13.16", "java": "21"},
+    {"line": "4.2", "project": "spark42", "spark": "4.2.0", "scala": "2.13.16", "java": "21"}
+  ]
+}

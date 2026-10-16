@@ -1,0 +1,72 @@
+name: Consume release candidate
+
+on:
+  workflow_call:
+    inputs:
+      candidate_artifact:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    runs-on: ubuntu-22.04
+    outputs:
+      consumer: ${{ steps.matrix.outputs.consumer }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.candidate_artifact }}
+          path: candidate
+      - id: matrix
+        run: |
+          python3 - <<'PY'
+          import json, os
+          manifest = json.load(open('candidate/release-manifest.json'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              print('consumer=' + json.dumps({'include': manifest['plan']['consumer']}, separators=(',', ':')), file=out)
+          PY
+
+  consumer:
+    needs: matrix
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.consumer) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '${{ matrix.java }}'
+      - uses: sbt/setup-sbt@v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.candidate_artifact }}
+          path: candidate
+      - name: Verify exact candidate files
+        run: python3 scripts/release.py verify --candidate candidate
+      - name: Resolve both entries and run native Spark operations
+        env:
+          SPARK_LINE: ${{ matrix.line }}
+          NATIVE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          python3 scripts/ci/consumer_smoke.py --candidate candidate \
+            --line "$SPARK_LINE" --platform "$NATIVE_PLATFORM" --output consumer-results
+      - name: Preserve consumer evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: consumer-${{ matrix.platform }}-${{ matrix.os_version }}-${{ matrix.line }}
+          path: consumer-results/
+          if-no-files-found: warn
+          retention-days: 14

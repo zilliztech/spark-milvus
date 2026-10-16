@@ -7,6 +7,7 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
 import java.io.File;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -15,6 +16,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
@@ -100,6 +102,20 @@ public class NativeVectorLibraryTest {
     }
 
     @Test
+    public void cardinalCapabilityComesFromTheSelectedBundle() throws Exception {
+        String output = runProbe(unifiedJar(false, false, null), "unified-path");
+        assertTrue(output, output.contains("UNIFIED_PATH_OK"));
+        assertTrue(output, output.contains("CARDINAL_VERIFIED=false"));
+    }
+
+    @Test
+    public void incompatibleUnifiedBundleFailsBeforeKnowhereInitialization() throws Exception {
+        String output = runProbe(unifiedJar(false, true, "0".repeat(40)), "failure");
+        assertTrue(output, output.contains("knowhere.revision does not match JVM bindings"));
+        assertTrue(output, output.contains("PATH_RESTORED"));
+    }
+
+    @Test
     public void explicitPathToTheSameVerifiedEntryIsAcceptedAndPreserved() throws Exception {
         String output = runProbe(unifiedJar(false), "unified-same-path");
         assertTrue(output, output.contains("UNIFIED_PATH_OK"));
@@ -108,12 +124,23 @@ public class NativeVectorLibraryTest {
     }
 
     private Path unifiedJar(boolean corrupt) throws Exception {
+        return unifiedJar(corrupt, true, null);
+    }
+
+    private Path unifiedJar(boolean corrupt, boolean cardinal, String knowhereRevision) throws Exception {
         Path jar = temporary.newFile("unified-" + System.nanoTime() + ".jar").toPath();
         String prefix = "native/milvus/1/linux-x86_64/";
         String libraries = "libmilvus-storage-jni.so,libknowhere_jni.so";
+        Properties expected = new Properties();
+        try (InputStream input = NativeLibraries.class.getResourceAsStream(
+                "/META-INF/milvus-native/compatibility.properties")) {
+            expected.load(Objects.requireNonNull(input, "JVM native compatibility metadata"));
+        }
         StringBuilder manifest = new StringBuilder("format.version=1\nplatform=linux-x86_64\n"
-                + "storage.revision=" + "1".repeat(40) + "\nknowhere.revision=" + "2".repeat(40)
-                + "\nwith_cardinal=true\nlibraries=" + libraries
+                + "storage.revision=" + expected.getProperty("storage.revision")
+                + "\nknowhere.revision=" + (knowhereRevision == null
+                    ? expected.getProperty("knowhere.revision") : knowhereRevision)
+                + "\nwith_cardinal=" + cardinal + "\nlibraries=" + libraries
                 + "\nload.entries=libmilvus-storage-jni.so,libknowhere_jni.so\n");
         try (JarOutputStream output = new JarOutputStream(Files.newOutputStream(jar))) {
             for (String library : libraries.split(",")) {

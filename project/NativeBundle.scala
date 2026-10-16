@@ -66,6 +66,17 @@ object NativeBundle {
 
   val settings: Seq[Setting[_]] = Seq(
     nativeBundleJar := selected,
+    Compile / resourceGenerators += Def.task {
+      val root = (ThisBuild / baseDirectory).value
+      val content =
+        s"format.version=1\nstorage.revision=${storageRevision(root)}\nknowhere.revision=${KnowhereBuild
+            .knowhereRevision(root)}\n"
+      val output =
+        (Compile / resourceManaged).value / "META-INF" / "milvus-native" / "compatibility.properties"
+      if (!output.isFile || IO.read(output) != content)
+        IO.write(output, content)
+      Seq(output)
+    }.taskValue,
     validatedNativeBundle := {
       val root = (ThisBuild / baseDirectory).value
       val output = target.value
@@ -80,7 +91,9 @@ object NativeBundle {
         "Select a platform JAR with -Dmilvus.native.bundle=/absolute/path/to/bundle.jar"
       )
     ),
-    Compile / unmanagedJars ++= validatedNativeBundle.value.toSeq.map(
+    // Native resources belong to execution and local assemblies. Compiling
+    // the JVM API must not validate or load the build host's native libraries.
+    Runtime / unmanagedJars ++= validatedNativeBundle.value.toSeq.map(
       Attributed.blank
     )
   )

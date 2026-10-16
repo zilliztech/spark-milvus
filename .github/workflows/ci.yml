@@ -1,20 +1,50 @@
 name: CI
 
-# Builds every module, runs the unit tests and tests the native build's driver.
-# The native libraries themselves are not built here: that needs Conan 2 and
-# Rust and takes far longer than this job should (see the Dockerfile). Suites
-# that load them cancel themselves when they are absent.
+# Ordinary unit checks and the release candidate are independent jobs. Candidate
+# consumers exercise native operations; native-dependent unit cancellations do
+# not satisfy that release gate.
 on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: ''
+      full_validation:
+        type: boolean
+        default: true
+    outputs:
+      candidate_artifact:
+        description: Candidate that passed the build and consumer gates
+        value: ${{ jobs.artifacts.outputs.candidate_artifact }}
   pull_request:
     branches: [main, refactor/v2]
   push:
     branches: [main, refactor/v2]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.sha }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
+  artifacts:
+    uses: ./.github/workflows/build-artifacts.yml
+    with:
+      version: ${{ inputs.version || format('2.0.0-ci.{0}.{1}', github.run_id, github.run_attempt) }}
+      # Direct fork PRs have no workflow_call inputs. Reusable callers can
+      # request the full gate even when their originating event is a PR.
+      build_native: ${{ github.event_name != 'pull_request' || inputs.full_validation == true }}
+
+  consumer:
+    needs: artifacts
+    if: github.event_name != 'pull_request' || inputs.full_validation == true
+    uses: ./.github/workflows/integration.yml
+    with:
+      candidate_artifact: ${{ needs.artifacts.outputs.candidate_artifact }}
+
   integration-helm:
     name: Integration Helm tests
     runs-on: ubuntu-latest
@@ -130,6 +160,10 @@ jobs:
       - name: Initialize the native source submodules
         run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -145,3 +179,8 @@ jobs:
 
       - name: Packaging and Makefile tests
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+
+      - name: Release and consumer orchestration tests
+        run: |
+          python3 -m pip install PyYAML==6.0.3
+          python3 -m unittest discover -s scripts/ci -p 'test_*.py'

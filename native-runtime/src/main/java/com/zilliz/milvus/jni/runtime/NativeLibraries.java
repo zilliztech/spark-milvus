@@ -29,6 +29,7 @@ import java.util.stream.Stream;
 /** Verifies and extracts one complete native bundle without loading JNI. */
 public final class NativeLibraries {
     private static final String BUNDLE_MARKER = "META-INF/milvus-native/provenance.json";
+    private static final String COMPATIBILITY = "META-INF/milvus-native/compatibility.properties";
     private static final Loader LOADER = new Loader(
             NativeLibraries.class.getClassLoader(), Paths.get(System.getProperty("java.io.tmpdir")));
 
@@ -160,7 +161,26 @@ public final class NativeLibraries {
                         + " spark.executor.userClassPathFirst=true loads a second copy beside the driver's;"
                         + " leave it unset. Otherwise keep one jar that carries the native bundle on the classpath.");
             }
-            return Optional.of(extract(manifest, platform, temporaryRoot));
+            return Optional.of(extract(manifest, platform, temporaryRoot, compatibility()));
+        }
+
+        private Properties compatibility() throws IOException {
+            Enumeration<URL> entries = resources.getResources(COMPATIBILITY);
+            require(entries.hasMoreElements(), "Missing JVM native compatibility resource: " + COMPATIBILITY);
+            URL resource = entries.nextElement();
+            require(!entries.hasMoreElements(), "Multiple JVM native compatibility resources: " + COMPATIBILITY);
+            Properties expected = new UniqueProperties();
+            try (InputStream input = resource.openStream()) {
+                expected.load(input);
+            }
+            require("1".equals(expected.getProperty("format.version")),
+                    "Unsupported JVM native compatibility format.version");
+            for (String engine : new String[] {"storage", "knowhere"}) {
+                String key = engine + ".revision";
+                require(expected.getProperty(key, "").matches("[a-f0-9]{40}"),
+                        "Invalid JVM native compatibility " + key);
+            }
+            return expected;
         }
     }
 
@@ -192,7 +212,8 @@ public final class NativeLibraries {
         return "libz.so.1";
     }
 
-    private static Bundle extract(URL resource, String platform, Path temporaryRoot) throws IOException {
+    private static Bundle extract(URL resource, String platform, Path temporaryRoot, Properties expected)
+            throws IOException {
         validateResource(resource);
         Properties manifest = new UniqueProperties();
         try (InputStream input = resource.openStream()) {
@@ -202,6 +223,11 @@ public final class NativeLibraries {
         require(platform.equals(manifest.getProperty("platform")), "Native bundle platform does not match " + platform);
         require(required(manifest, "storage.revision").matches("[a-f0-9]{40}"), "Invalid storage.revision");
         require(required(manifest, "knowhere.revision").matches("[a-f0-9]{40}"), "Invalid knowhere.revision");
+        for (String key : new String[] {"format.version", "storage.revision", "knowhere.revision"}) {
+            require(expected.getProperty(key).equals(manifest.getProperty(key)),
+                    "Native bundle " + key + " does not match JVM bindings: expected "
+                            + expected.getProperty(key) + ", found " + manifest.getProperty(key));
+        }
         String cardinal = required(manifest, "with_cardinal");
         require(cardinal.equals("true") || cardinal.equals("false"), "Invalid with_cardinal");
         Set<String> libraries = names(required(manifest, "libraries"));

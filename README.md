@@ -95,6 +95,7 @@ git submodule update --init docs/design
 | [docs/reference-en.md](docs/reference-en.md) | Every option and entry point: vector search, the catalog, reads, writes, backup directories, SQL procedures, data types |
 | [docs/user-guide-snapshot-backfill.md](docs/user-guide-snapshot-backfill.md) | How to add a field to a collection and fill it offline with the backfill job |
 | [docs/contributing.md](docs/contributing.md) | Building, formatting, testing and the native bundle, beyond this README |
+| [docs/releasing.md](docs/releasing.md) | Maven coordinates, the supported release matrix, candidate validation and Central publication |
 | [native-build/README.md](native-build/README.md) | How the per-platform native bundle is built and published |
 
 [AGENTS.md](AGENTS.md) is the entry point for agents and people working on the
@@ -190,6 +191,11 @@ sbt spark42/assembly                     # the same for Spark 4.2
 sbt test                                 # unit tests, all modules
 sbt integration40/test                   # integration tests, needs Milvus and MinIO
 ```
+
+The Maven release workflow exports JVM and native artifacts independently and
+tests both universal and platform-specific entries. See the
+[release guide](docs/releasing.md) for coordinates, native prerequisites and the
+build, consumer and publication commands.
 
 The fat jar only loads Milvus segments when it carries the native
 `milvus-storage` libraries for the platform it runs on. `make package` builds

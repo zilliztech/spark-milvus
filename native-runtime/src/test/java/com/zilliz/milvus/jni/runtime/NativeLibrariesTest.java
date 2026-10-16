@@ -39,6 +39,7 @@ public class NativeLibrariesTest {
     private static final String STORAGE = libraryName("milvus-storage-jni");
     private static final String KNOWHERE = libraryName("knowhere_jni");
     private static final String PREFIX = "native/milvus/1/" + PLATFORM + "/";
+    private static final String COMPATIBILITY = "META-INF/milvus-native/compatibility.properties";
 
     @Rule
     public TemporaryFolder temporary = new TemporaryFolder();
@@ -88,6 +89,60 @@ public class NativeLibrariesTest {
         assertArrayEquals(libraries.get(STORAGE), Files.readAllBytes(bundle.library(STORAGE)));
         assertArrayEquals(libraries.get(KNOWHERE), Files.readAllBytes(bundle.library(KNOWHERE)));
         assertEquals(1, children(extraction));
+    }
+
+    @Test
+    public void otherPlatformsCanCoexistWithoutSupplyingCurrentPlatformResources() throws Exception {
+        String otherPlatform = PLATFORM.equals("linux-x86_64") ? "linux-aarch64" : "linux-x86_64";
+        Map<String, byte[]> libraries = libraries();
+        Path other = jar("native/milvus/1/" + otherPlatform + "/",
+                manifest(libraries).replace("platform=" + PLATFORM, "platform=" + otherPlatform),
+                Map.of(STORAGE, bytes("other platform")), true);
+        Path current = jar(PREFIX, manifest(libraries), libraries, true);
+        Path extraction = temporary.newFolder().toPath();
+        NativeLibraries.Bundle bundle = loader(extraction, other, current).get().get();
+        assertArrayEquals(libraries.get(STORAGE), Files.readAllBytes(bundle.library(STORAGE)));
+        assertEquals(1, children(extraction));
+    }
+
+    @Test
+    public void mismatchedEngineRevisionsAreRejectedBeforeExtraction() throws Exception {
+        Map<String, byte[]> libraries = libraries();
+        String good = manifest(libraries);
+        assertRejected(good.replace("storage.revision=" + "1".repeat(40),
+                "storage.revision=" + "3".repeat(40)), libraries,
+                "storage.revision does not match JVM bindings");
+        assertRejected(good.replace("knowhere.revision=" + "2".repeat(40),
+                "knowhere.revision=" + "3".repeat(40)), libraries,
+                "knowhere.revision does not match JVM bindings");
+    }
+
+    @Test
+    public void bundleRequiresOneValidJvmCompatibilityResource() throws Exception {
+        Map<String, byte[]> libraries = libraries();
+        Path bundle = jar(manifest(libraries), libraries);
+        Path extraction = temporary.newFolder().toPath();
+        assertTrue(failure(resourceLoader(extraction, bundle)).getMessage()
+                .contains("Missing JVM native compatibility resource"));
+        Path first = compatibilityJar(compatibility());
+        Path second = compatibilityJar(compatibility());
+        assertTrue(failure(resourceLoader(extraction, first, second, bundle)).getMessage()
+                .contains("Multiple JVM native compatibility resources"));
+        for (String invalid : List.of(
+                compatibility().replace("format.version=1", "format.version=2"),
+                compatibility().replace("storage.revision=", "unknown="),
+                compatibility().replace("knowhere.revision=" + "2".repeat(40), "knowhere.revision=short"))) {
+            String message = failure(resourceLoader(extraction, compatibilityJar(invalid), bundle)).getMessage();
+            assertTrue(message, message.contains("JVM native compatibility"));
+        }
+        assertEquals(0, children(extraction));
+    }
+
+    @Test
+    public void absentBundleDoesNotRequireJvmCompatibilityMetadata() throws Exception {
+        Path extraction = temporary.newFolder().toPath();
+        assertFalse(resourceLoader(extraction, compatibilityJar("invalid metadata")).get().isPresent());
+        assertEquals(0, children(extraction));
     }
 
     @Test
@@ -304,11 +359,31 @@ public class NativeLibrariesTest {
     }
 
     private NativeLibraries.Loader loader(Path extraction, Path... resources) throws Exception {
+        Path[] classpath = new Path[resources.length + 1];
+        classpath[0] = compatibilityJar(compatibility());
+        System.arraycopy(resources, 0, classpath, 1, resources.length);
+        return resourceLoader(extraction, classpath);
+    }
+
+    private NativeLibraries.Loader resourceLoader(Path extraction, Path... resources) throws Exception {
         URL[] urls = new URL[resources.length];
         for (int i = 0; i < resources.length; i++) urls[i] = resources[i].toUri().toURL();
         URLClassLoader loader = new URLClassLoader(urls, null);
         classLoaders.add(loader);
         return new NativeLibraries.Loader(loader, extraction);
+    }
+
+    private Path compatibilityJar(String content) throws Exception {
+        Path path = temporary.newFile().toPath();
+        try (JarOutputStream jar = new JarOutputStream(Files.newOutputStream(path))) {
+            entry(jar, COMPATIBILITY, bytes(content));
+        }
+        return path;
+    }
+
+    private static String compatibility() {
+        return "format.version=1\nstorage.revision=" + "1".repeat(40)
+                + "\nknowhere.revision=" + "2".repeat(40) + "\n";
     }
 
     private Path jar(String manifest, Map<String, byte[]> libraries) throws Exception {

@@ -1,0 +1,240 @@
+name: Build release candidate
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      build_native:
+        type: boolean
+        default: true
+    outputs:
+      candidate_artifact:
+        description: Maven candidate and its immutable release manifest
+        value: ${{ jobs.candidate.outputs.artifact }}
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-22.04
+    outputs:
+      native: ${{ steps.plan.outputs.native }}
+      jvm: ${{ steps.plan.outputs.jvm }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - id: plan
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          python3 scripts/release.py plan --version "$RELEASE_VERSION" --output plan.json
+          python3 - <<'PY'
+          import json, os
+          plan = json.load(open('plan.json'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              for key in ('native', 'jvm'):
+                  print(f'{key}={json.dumps({"include": plan[key]}, separators=(",", ":"))}', file=out)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-plan
+          path: plan.json
+          if-no-files-found: error
+          retention-days: 14
+
+  native:
+    needs: plan
+    if: inputs.build_native
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.native) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: false
+      - name: Initialize public engine sources
+        run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Initialize cache locations
+        run: |
+          printf 'CONAN_HOME=%s/native-cache/conan\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'CCACHE_DIR=%s/native-cache/ccache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'CCACHE_MAXSIZE=2G\n' >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s/native-cache/cargo\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Prepare native toolchain
+        env:
+          NATIVE_PLATFORM: ${{ matrix.platform }}
+        run: bash scripts/ci/prepare_native.sh "$NATIVE_PLATFORM"
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-plan
+          path: release-inputs
+      - name: Fingerprint native inputs and the prepared toolchain
+        id: fingerprint
+        env:
+          NATIVE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          python3 scripts/native-cache-key.py --plan release-inputs/plan.json \
+            --platform "$NATIVE_PLATFORM" --output "$RUNNER_TEMP/native-cache-inputs.json" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Restore the exact native bundle
+        id: bundle-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/native-${{ matrix.platform }}/milvus-native-${{ matrix.platform }}.jar
+            target/native-${{ matrix.platform }}/milvus-native-${{ matrix.platform }}.jar.properties
+          key: ${{ steps.fingerprint.outputs.key }}
+      - name: Restore compatible native dependencies
+        if: steps.bundle-cache.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          # Conan auth lives outside p/. Cargo credentials live outside these
+          # download directories. Neither is part of this cache.
+          path: |
+            ${{ env.CONAN_HOME }}/p
+            ${{ env.CCACHE_DIR }}
+            ${{ env.CARGO_HOME }}/registry
+            ${{ env.CARGO_HOME }}/git
+          key: ${{ steps.fingerprint.outputs.dependency_key_prefix }}${{ steps.fingerprint.outputs.key_digest }}
+          restore-keys: ${{ steps.fingerprint.outputs.dependency_key_prefix }}
+      - name: Build both native engines on a bundle cache miss
+        if: steps.bundle-cache.outputs.cache-hit != 'true'
+        env:
+          NATIVE_PLATFORM: ${{ matrix.platform }}
+          NATIVE_JOBS: ${{ matrix.build_jobs }}
+        run: |
+          make native-bundle \
+            NATIVE_WORK_DIR="$RUNNER_TEMP/native-build/$NATIVE_PLATFORM" \
+            NATIVE_BUNDLE_OUTPUT="$GITHUB_WORKSPACE/target/native-$NATIVE_PLATFORM/milvus-native-$NATIVE_PLATFORM.jar" \
+            NATIVE_JOBS="$NATIVE_JOBS"
+      - name: Audit the native ABI on every build and cache hit
+        env:
+          NATIVE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          python3 scripts/check-native-abi.py \
+            --bundle "target/native-$NATIVE_PLATFORM/milvus-native-$NATIVE_PLATFORM.jar" \
+            --platform "$NATIVE_PLATFORM" \
+            --output "target/native-$NATIVE_PLATFORM/abi.json"
+          cp "$RUNNER_TEMP/native-cache-inputs.json" "target/native-$NATIVE_PLATFORM/cache-inputs.json"
+      - name: Trim dependency caches before saving
+        if: steps.bundle-cache.outputs.cache-hit != 'true'
+        run: |
+          conan cache clean '*' --build --source --download --temp
+          ccache --cleanup
+          for cache_dir in "$CONAN_HOME/p" "$CARGO_HOME/registry" "$CARGO_HOME/git" "$CCACHE_DIR"; do
+            if [[ -d "$cache_dir" ]]; then
+              du -sh "$cache_dir"
+            else
+              printf 'Cache directory absent: %s\n' "$cache_dir"
+            fi
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.platform }}
+          path: target/native-${{ matrix.platform }}/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Preserve native diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-diagnostics-${{ matrix.platform }}
+          path: |
+            ${{ runner.temp }}/native-build/${{ matrix.platform }}/status.json
+            ${{ runner.temp }}/native-build/${{ matrix.platform }}/provenance/
+            ${{ runner.temp }}/native-build/${{ matrix.platform }}/bundle/audit/
+          if-no-files-found: warn
+          retention-days: 7
+
+  jvm:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.jvm) }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: false
+      - name: Initialize public API sources
+        run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '${{ matrix.java }}'
+          cache: sbt
+      - uses: sbt/setup-sbt@v1
+      - name: Build the JVM artifact without a native bundle
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          SBT_PROJECT: ${{ matrix.project }}
+        run: sbt "-Drelease.version=$RELEASE_VERSION" "$SBT_PROJECT/releaseJvmArtifacts"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jvm-${{ matrix.line }}
+          path: target/release-jvm/${{ matrix.line }}/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  candidate:
+    needs: [native, jvm]
+    if: inputs.build_native
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    outputs:
+      artifact: ${{ steps.identity.outputs.artifact }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-plan
+          path: release-inputs
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: jvm-*
+          path: release-inputs
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-linux-*
+          path: release-inputs
+      - name: Assemble and verify the Maven candidate
+        run: |
+          python3 scripts/release.py stage --plan release-inputs/plan.json --inputs release-inputs --output candidate
+          python3 scripts/release.py verify --candidate candidate
+      - id: identity
+        run: echo "artifact=release-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.identity.outputs.artifact }}
+          path: candidate/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
