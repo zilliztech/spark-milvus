@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -103,6 +104,45 @@ def run(command, *, cwd, env, log=None):
             raise RuntimeError(f"Consumer failed; see {log}")
 
 
+def collect_diagnostics(spark_home, work, output, previous_apps):
+    """Copy only this entry's logs before its temporary Spark installation is removed."""
+    # LocalSparkCluster bypasses WorkerArguments, so SPARK_WORKER_DIR does not
+    # apply. Both supported Spark lines use SPARK_HOME/work/<app>/<executor>.
+    worker_root = spark_home / "work"
+    copied = []
+    for app in sorted(worker_root.glob("*")):
+        if app in previous_apps or app.is_symlink() or not app.is_dir():
+            continue
+        for executor in sorted(app.iterdir()):
+            if executor.is_symlink() or not executor.is_dir():
+                continue
+            for source in sorted(executor.iterdir()):
+                name = source.name
+                is_log = (name in ("stdout", "stderr")
+                          or name.startswith(("stdout.", "stderr."))
+                          or (name.startswith("hs_err_pid") and name.endswith(".log")))
+                if is_log and source.is_file() and not source.is_symlink():
+                    target = output / "worker" / source.relative_to(worker_root)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(source, target)
+                    copied.append(str(target.relative_to(output)))
+    # Also retain a report written to the driver's working directory if the JVM
+    # could not use its explicit ErrorFile path. Do not copy JARs or core dumps.
+    for source in sorted(work.glob("hs_err_pid*.log")):
+        if source.is_file() and not source.is_symlink():
+            target = output / "driver" / source.name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+            copied.append(str(target.relative_to(output)))
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "diagnostics.json").write_text(json.dumps({
+        "worker_directory": str(worker_root), "copied_files": copied,
+        "jvm_error_files": [str(path.relative_to(output))
+                            for path in sorted((output / "jvm").glob("hs_err_pid*.log"))],
+    }, indent=2) + "\n")
+    print(f"Saved consumer diagnostics to {output}", flush=True)
+
+
 def compile_fixture(work, repository, version, row, entry_id, env):
     project = work / "fixture"
     (project / "project").mkdir(parents=True)
@@ -183,11 +223,16 @@ def smoke(candidate, line, platform, output, *, central=False):
             fixture = compile_fixture(work, repository, version, row, entry_id, env)
             ivy = work / "runtime-ivy"
             log = output / f"{entry}.log"
+            diagnostics = output / f"{entry}-diagnostics"
+            (diagnostics / "jvm").mkdir(parents=True, exist_ok=True)
+            error_file = shlex.quote(f"-XX:ErrorFile={diagnostics / 'jvm/hs_err_pid%p.log'}")
+            previous_apps = set((spark_home / "work").glob("*"))
             command = [
                 str(spark_home / "bin/spark-submit"),
                 "--master", "local-cluster[1,2,1536]",
                 "--driver-memory", "2g", "--executor-memory", "1g",
-                "--driver-java-options", "-Dmilvus.smoke.master=local-cluster[1,2,1536]",
+                "--driver-java-options", "-Dmilvus.smoke.master=local-cluster[1,2,1536] " + error_file,
+                "--conf", "spark.executor.extraJavaOptions=" + error_file,
                 "--conf", "spark.executor.cores=2",
                 "--conf", "spark.cores.max=2",
                 "--conf", "spark.ui.enabled=false",
@@ -202,7 +247,10 @@ def smoke(candidate, line, platform, output, *, central=False):
                 "--packages", f"{GROUP}:{entry_id}:{version}",
                 "--class", MAIN, str(fixture),
             ]
-            run(command, cwd=work, env={**env, "LD_PRELOAD": str(signal)}, log=log)
+            try:
+                run(command, cwd=work, env={**env, "LD_PRELOAD": str(signal)}, log=log)
+            finally:
+                collect_diagnostics(spark_home, work, diagnostics, previous_apps)
             text = log.read_text()
             if "ALL PASS" not in text or "PASS independent executor JVM" not in text:
                 raise RuntimeError("Smoke did not complete every gate: " + str(log))

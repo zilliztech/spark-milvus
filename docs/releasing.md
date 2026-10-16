@@ -157,6 +157,12 @@ exact vector search, index building, approximate search and output writes.
 is different from the driver's. Both processes preload their JRE's `libjsig`.
 Missing native libraries or canceled native tests cannot satisfy this gate.
 
+Each entry keeps its driver log and a `<entry>-diagnostics` directory under
+`--output`, including executor stdout/stderr and JVM fatal error reports.
+Diagnostics are collected before temporary files are removed, including when
+Spark fails, and CI uploads them with the consumer evidence. An executor exit
+code alone does not identify the native failure; inspect these reports.
+
 This is an **offline native end-to-end test on local files**, not a live Milvus
 service test. The separate `integration40/test` suites require live Milvus and
 MinIO; this release workflow does not run them. Registration and online service
