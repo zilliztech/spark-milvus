@@ -1,0 +1,128 @@
+name: Release to Maven Central
+
+on:
+  push:
+    tags: ['v2.*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  identity:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - id: identity
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          tag = os.environ['RELEASE_TAG']
+          if not re.fullmatch(r'v2\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?', tag):
+              raise SystemExit('Release requires a v2.x.y version tag')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              print('version=' + tag[1:], file=out)
+          PY
+
+  validate:
+    needs: identity
+    uses: ./.github/workflows/ci.yml
+    with:
+      version: ${{ needs.identity.outputs.version }}
+      full_validation: true
+
+  publish:
+    needs: [identity, validate]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    environment: maven-central
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Require the fully validated candidate
+        env:
+          CANDIDATE_ARTIFACT: ${{ needs.validate.outputs.candidate_artifact }}
+        run: test -n "$CANDIDATE_ARTIFACT"
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.validate.outputs.candidate_artifact }}
+          path: candidate
+      - name: Verify the tested candidate before accessing credentials
+        run: |
+          python3 scripts/release.py verify --candidate candidate
+          python3 - <<'PY'
+          import json, subprocess
+          manifest = json.load(open('candidate/release-manifest.json'))
+          source = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          if manifest['plan']['sourceSha'] != source:
+              raise SystemExit('Candidate source commit differs from the release tag')
+          PY
+      - name: Sign, validate and publish the tested files
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.PGP_SECRET }}
+          GPG_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
+          CENTRAL_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
+          CENTRAL_TOKEN: ${{ secrets.SONATYPE_PASSWORD }}
+        run: |
+          export GNUPGHOME="$RUNNER_TEMP/release-gnupg"
+          install -d -m 700 "$GNUPGHOME"
+          trap 'gpgconf --kill gpg-agent; rm -rf "$GNUPGHOME"' EXIT
+          python3 scripts/release.py import-key
+          unset GPG_PRIVATE_KEY
+          python3 scripts/release.py bundle --candidate candidate --output central.zip
+          python3 scripts/release.py publish --bundle central.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: central-bundle-${{ needs.identity.outputs.version }}
+          path: central.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  public-consumer:
+    needs: [validate, publish]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: sbt/setup-sbt@v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.validate.outputs.candidate_artifact }}
+          path: candidate
+      - name: Fetch and verify public Central files
+        run: python3 scripts/release.py download-public --candidate candidate --output public-candidate
+      - name: Consume public files with fresh caches
+        run: |
+          python3 scripts/ci/consumer_smoke.py --candidate public-candidate \
+            --line 4.0 --platform linux-x86_64 --central --output public-consumer-results
+      - name: Preserve public consumer evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-consumer
+          path: public-consumer-results/
+          if-no-files-found: warn
+          retention-days: 30

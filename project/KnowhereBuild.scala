@@ -23,19 +23,6 @@ object KnowhereBuild {
   )
 
   val settings: Seq[Setting[_]] = Seq(
-    // Knowhere's native libraries come only from the unified bundle, which
-    // records whether it was built with Cardinal.
-    Compile / resourceGenerators += Def.task {
-      val enabled = NativeBundle.validatedNativeBundle.value.exists { bundle =>
-        NativeBundle.metadata(bundle).getProperty("with_cardinal") == "true"
-      }
-      val content = s"with_cardinal=$enabled\n"
-      val output =
-        (Compile / resourceManaged).value / "META-INF" / "milvus" / "knowhere-runtime.properties"
-      if (!output.isFile || IO.read(output) != content)
-        IO.write(output, content)
-      Seq(output)
-    }.taskValue,
     knowhereApiJar := buildApi(
       readPin((ThisBuild / baseDirectory).value),
       target.value / "knowhere",

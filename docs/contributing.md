@@ -47,9 +47,13 @@ The root project has no sources of its own. It depends on `spark40` and
 `apps40` and exists to assemble the fat jar under the 1.x artifact name, so the
 Dockerfile and downstream consumers do not have to change.
 
-Only the root assembly is published during the migration. Its POM omits the
+The existing root assembly publication omits the
 embedded `spark40` and `apps40` module dependencies, which are not published
-separately yet; external dependencies remain in the POM.
+separately; external dependencies remain in its POM. The Maven release workflow
+uses `releaseJvmArtifacts` to export a JVM implementation for each released
+Spark line, then adds small entry JARs and separate native resources. See
+[Building and releasing Maven artifacts](releasing.md) for the exact coordinates
+and candidate validation process.
 
 Use root's `assembly` for the runnable fat jar on Spark 4.0 and
 `spark42/assembly` on Spark 4.2. The two share one set of merge and shading
@@ -96,8 +100,9 @@ are named settings in the same file.
 | `project/Versions.scala` | Library versions and the Spark line matrix |
 | `project/Dependencies.scala` | Dependency coordinates, scopes and dependency groups |
 | `project/Modules.scala` | Shared compile/test settings, checks and Scala cross-version settings |
-| `project/KnowhereBuild.scala` | Pinned upstream API compilation, the Cardinal flag taken from the bundle, and the packaged JNI smoke |
+| `project/KnowhereBuild.scala` | Pinned upstream API compilation and the packaged JNI smoke |
 | `project/NativeBundle.scala` | Unified native resource selection, source pins, manifest, provenance and JVM load validation |
+| `project/ReleaseArtifacts.scala` | JVM release classpath, sources, API documentation and artifact metadata |
 | `project/plugins.sbt` | Build plugins and their meta-build dependencies |
 
 ## Tests that need the native library
@@ -451,11 +456,12 @@ Cardinal comes from the same build: `make native-bundle
 NATIVE_BUILD_OPTIONS=--with-cardinal` compiles both pinned Cardinal revisions
 into the bundle, which records `with_cardinal=true`. The Cardinal sources use
 `-march=native`, so a Cardinal bundle needs a host with the build machine's
-instruction set. The connector derives
-`META-INF/milvus/knowhere-runtime.properties` from the selected bundle's
-`with_cardinal`; `NativeVectorLibrary.RuntimeInfo.cardinalSupported()` exposes
-that feature, and an arbitrary `knowhere.native.path` override does not
-establish Cardinal support.
+instruction set. `NativeVectorLibrary.RuntimeInfo.cardinalSupported()` reads
+that feature from the selected native platform manifest at runtime. The JVM's
+`META-INF/milvus-native/compatibility.properties` records the expected Storage
+and Knowhere source revisions; the loader rejects a mismatch before JNI
+initialization. An arbitrary `knowhere.native.path` override does not establish
+Cardinal support. Public release bundles disable Cardinal.
 
 The loader reads
 Milvus binlog/Parquet payloads and optional `SLICE_META`, or a Cardinal raw
@@ -477,6 +483,13 @@ sbt -java-home "$JAVA_HOME" -Dmilvus.native.bundle=/absolute/path/to/milvus-nati
   "set spark40 / Test / envVars += \"LD_PRELOAD\" -> \"$JAVA_HOME/lib/libjsig.so\"" \
   'spark40/Test/runMain com.zilliz.spark.connector.read.LocalEndToEndSmoke'
 ```
+
+The [release consumer](releasing.md#consumer-gates-and-ci-triggers) compiles only
+the smoke fixtures in an independent project and loads production classes from
+the candidate using real `spark-submit --packages`. The test-only
+`milvus.smoke.master` property selects `local-cluster` for an independent executor
+JVM; the default remains `local[4]`. This validates native operations on local
+files. It does not validate a live Milvus service or segment registration.
 
 `NativeVectorLibrary.load()` explicitly initializes the upstream binding and
 reports the native C ABI and index format versions. The upstream loader owns
@@ -612,18 +625,25 @@ so in the message and fix the document in the same commit.
 
 ## Documents
 
-The public documents are the three English Markdown files in `docs/`: this
+Public documents are English Markdown files in `docs/`, including this
 guide, [reference-en.md](reference-en.md) and
-[user-guide-snapshot-backfill.md](user-guide-snapshot-backfill.md). They
-describe what the connector is, how to use it and how to build it; design
-rationale, decision history and measurements do not belong in them.
+[user-guide-snapshot-backfill.md](user-guide-snapshot-backfill.md), and the
+[release guide](releasing.md). They describe the connector, its use, build and
+release process. Public contributions may include design proposals, decisions
+and the rationale needed to review a change in the same pull request. External
+contributors do not need private knowledge-repository access to propose or
+document a change.
 
 The design documents live under `projects/spark-milvus` in the private repository
 [zilliztech/vector-batch-knowledge](https://github.com/zilliztech/vector-batch-knowledge),
 mounted as the submodule `docs/design` and tracked on its `master`. The build
 and CI do not read it; `git submodule update --init docs/design` checks it out
 for those with access. `docs/design/projects/spark-milvus/AGENTS.md` is the full
-orientation for working on the connector. A document change there is two commits:
+orientation for maintainers with access. Maintainers reconcile accepted public
+proposals with the private design records and capability index, and run
+`sbt checkCapabilityIndex` when that index or a `package.scala` changes. Public
+CI does not fetch that repository or claim to perform the private index check.
+A document change there is two commits:
 
 ```bash
 cd docs/design

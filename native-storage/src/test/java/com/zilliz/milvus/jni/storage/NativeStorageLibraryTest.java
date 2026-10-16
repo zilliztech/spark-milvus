@@ -3,6 +3,7 @@ package com.zilliz.milvus.jni.storage;
 import com.zilliz.milvus.jni.runtime.NativeLibraries;
 import io.milvus.storage.NativeLibraryLoader;
 import java.io.File;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -10,6 +11,7 @@ import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
@@ -89,8 +91,14 @@ public class NativeStorageLibraryTest {
         Path jar = temporary.newFile("unified-" + System.nanoTime() + ".jar").toPath();
         String prefix = "native/milvus/1/linux-x86_64/";
         String libraries = "libmilvus-storage-jni.so,libknowhere_jni.so";
+        Properties expected = new Properties();
+        try (InputStream input = NativeLibraries.class.getResourceAsStream(
+                "/META-INF/milvus-native/compatibility.properties")) {
+            expected.load(Objects.requireNonNull(input, "JVM native compatibility metadata"));
+        }
         StringBuilder manifest = new StringBuilder("format.version=1\nplatform=linux-x86_64\n"
-                + "storage.revision=" + "1".repeat(40) + "\nknowhere.revision=" + "2".repeat(40)
+                + "storage.revision=" + expected.getProperty("storage.revision")
+                + "\nknowhere.revision=" + expected.getProperty("knowhere.revision")
                 + "\nwith_cardinal=false\nlibraries=" + libraries
                 + "\nload.entries=libmilvus-storage-jni.so,libknowhere_jni.so\n");
         try (JarOutputStream output = new JarOutputStream(Files.newOutputStream(jar))) {

@@ -3,10 +3,21 @@ import scala.sys.process.Process
 
 import xerial.sbt.Sonatype._
 import Dependencies._
+import ReleaseArtifacts.{
+  releaseJvmArtifacts,
+  releaseJvmClasspath,
+  releaseJvmDocumentation,
+  releaseJvmSourceMappings,
+  ReleaseJvm
+}
 
 // Shared defaults. Per-line Scala and Java settings live in Modules.
 ThisBuild / scalaVersion := Versions.scala213
 ThisBuild / versionScheme := Some("early-semver")
+
+// Runtime resources must follow every production dependency edge without
+// making Compile resolve or validate the host's native bundle.
+lazy val compileAndRuntime = "compile->compile;runtime->runtime"
 
 // Root keeps the existing cloud artifact while sources live in the modules.
 lazy val root = project
@@ -25,7 +36,7 @@ lazy val root = project
     spark42,
     apps40
   )
-  .dependsOn(spark40, apps40)
+  .dependsOn(spark40 % compileAndRuntime, apps40 % compileAndRuntime)
   .settings(
     name := "spark-milvus",
     moduleName := "spark-connector",
@@ -39,6 +50,9 @@ lazy val root = project
     publishLocal / aggregate := false,
     assembly / aggregate := false,
     Compile / packageBin := assembly.value,
+    releaseJvmArtifacts / aggregate := false,
+    releaseJvmArtifacts :=
+      (spark40 / releaseJvmArtifacts).value ++ (spark42 / releaseJvmArtifacts).value,
     rootRunSettings,
     rootAssemblySettings,
     rootPublishingSettings
@@ -61,7 +75,7 @@ lazy val nativeRuntime = Project("native-runtime", file("native-runtime"))
   )
 
 lazy val nativeStorage = Project("native-storage", file("native-storage"))
-  .dependsOn(nativeRuntime)
+  .dependsOn(nativeRuntime % compileAndRuntime)
   .settings(
     name := "native-storage",
     moduleName := "spark-milvus-native-storage",
@@ -115,7 +129,7 @@ lazy val nativeStorage = Project("native-storage", file("native-storage"))
   )
 
 lazy val nativeVector = Project("native-vector", file("native-vector"))
-  .dependsOn(nativeRuntime)
+  .dependsOn(nativeRuntime % compileAndRuntime)
   .settings(
     name := "native-vector",
     moduleName := "spark-milvus-native-vector",
@@ -138,7 +152,10 @@ lazy val milvusProtoDir =
 // mentions org.apache.spark.
 lazy val core = project
   .in(file("core"))
-  .dependsOn(nativeStorage, nativeVector)
+  .dependsOn(
+    nativeStorage % compileAndRuntime,
+    nativeVector % compileAndRuntime
+  )
   .settings(
     name := "core",
     moduleName := "spark-milvus-core",
@@ -202,7 +219,7 @@ lazy val compat = project
   .in(file("compat"))
   // test->test as well: the format suites here share core's LocalObjectStore
   // fixture, which stands in for the native store so parser tests need no .so.
-  .dependsOn(core % "compile->compile;test->test")
+  .dependsOn(core % s"$compileAndRuntime;test->test")
   .settings(
     name := "compat",
     moduleName := "spark-milvus-compat",
@@ -227,7 +244,7 @@ lazy val compat = project
 // the procedures.
 lazy val client = project
   .in(file("client"))
-  .dependsOn(core)
+  .dependsOn(core % compileAndRuntime)
   .settings(
     name := "client",
     moduleName := "spark-milvus-client",
@@ -253,7 +270,11 @@ lazy val client = project
 // Layer 3: each Spark line compiles spark-base against its own dependencies.
 def sparkProject(l: Versions.SparkLine): Project =
   Project(l.projectId, file(s"spark-${l.id}"))
-    .dependsOn(core, compat, client)
+    .dependsOn(
+      core % compileAndRuntime,
+      compat % compileAndRuntime,
+      client % compileAndRuntime
+    )
     .enablePlugins(Antlr4Plugin)
     .settings(
       name := s"spark-${l.id}",
@@ -328,6 +349,8 @@ lazy val spark35 = sparkProject(Versions.line("3.5"))
     Test / javaHome := sys.env.get("SPARK35_TEST_JAVA_HOME").map(file)
   )
 lazy val spark40 = sparkProject(Versions.line("4.0"))
+  .configs(ReleaseJvm)
+  .settings(jvmReleaseSettings(Versions.line("4.0")))
   .settings(connectClient(Versions.line("4.0")))
   // Reuse core's ObjectStore fixtures for source tests without loading JNI.
   .dependsOn(core % "test->test")
@@ -336,6 +359,8 @@ lazy val spark41 = sparkProject(Versions.line("4.1"))
   .settings(connectClient(Versions.line("4.1")))
   .dependsOn(core % "test->test")
 lazy val spark42 = sparkProject(Versions.line("4.2"))
+  .configs(ReleaseJvm)
+  .settings(jvmReleaseSettings(Versions.line("4.2")))
   .settings(uatScenarios, localCollectionSuites, connectSuite, searchMergeSuite)
   .settings(connectClient(Versions.line("4.2")))
   // The fat jar for Spark 4.2; on 4.0 it is root's.
@@ -403,6 +428,69 @@ lazy val searchMergeSuite: Seq[Setting[_]] = Seq(
     (ThisBuild / baseDirectory).value / "spark-4.0" / "src" / "test" / "scala" / "com" / "zilliz" / "spark" / "connector" / "search" / "SearchMergeTest.scala"
 )
 
+// Maven's JVM implementation excludes the Milvus platform bundle. It uses
+// Compile products and the managed Runtime dependency selection, never the
+// native Runtime/unmanagedJars path. Existing local assemblies keep that path.
+def jvmReleaseSettings(l: Versions.SparkLine): Seq[Setting[_]] =
+  inConfig(ReleaseJvm)(baseAssemblySettings ++ fatJarRules) ++ Seq(
+    releaseJvmArtifacts / aggregate := false,
+    ReleaseArtifacts.prepareReleaseJvm := {
+      ReleaseArtifacts.requireVersion()
+      IO.createDirectory(
+        ReleaseArtifacts.outputDirectory((ThisBuild / baseDirectory).value, l)
+      )
+    },
+    ReleaseJvm / assembly := (ReleaseJvm / assembly)
+      .dependsOn(ReleaseArtifacts.prepareReleaseJvm)
+      .value,
+    releaseJvmClasspath := ReleaseArtifacts.classpath(
+      (Compile / fullClasspath).value,
+      (Runtime / managedClasspath).value
+    ),
+    ReleaseJvm / assembly / fullClasspath := releaseJvmClasspath.value,
+    ReleaseJvm / assembly / externalDependencyClasspath :=
+      releaseJvmClasspath.value.filter(_.data.isFile),
+    ReleaseJvm / assembly / mainClass := None,
+    ReleaseJvm / assembly / packageOptions := Seq.empty,
+    ReleaseJvm / assembly / assemblyOutputPath := {
+      val output =
+        ReleaseArtifacts.outputDirectory((ThisBuild / baseDirectory).value, l)
+      val artifact = ReleaseArtifacts.artifactId(l, scalaBinaryVersion.value)
+      output / s"$artifact-$connectorVersion.jar"
+    },
+    releaseJvmSourceMappings :=
+      (nativeRuntime / Compile / packageSrc / mappings).value ++
+        (nativeStorage / Compile / packageSrc / mappings).value ++
+        (nativeVector / Compile / packageSrc / mappings).value ++
+        (core / Compile / packageSrc / mappings).value ++
+        (compat / Compile / packageSrc / mappings).value ++
+        (client / Compile / packageSrc / mappings).value ++
+        (Compile / packageSrc / mappings).value ++
+        ReleaseArtifacts.upstreamSources((ThisBuild / baseDirectory).value),
+    releaseJvmDocumentation := Seq(
+      "native-runtime" -> (nativeRuntime / Compile / doc).value,
+      "native-storage" -> (nativeStorage / Compile / doc).value,
+      "native-vector" -> (nativeVector / Compile / doc).value,
+      "core" -> (core / Compile / doc).value,
+      "compat" -> (compat / Compile / doc).value,
+      "client" -> (client / Compile / doc).value,
+      s"spark-${l.id}" -> (Compile / doc).value
+    ),
+    releaseJvmArtifacts := ReleaseArtifacts.export(
+      (ThisBuild / baseDirectory).value,
+      l,
+      scalaVersion.value,
+      scalaBinaryVersion.value,
+      (ReleaseJvm / assembly).value,
+      releaseJvmSourceMappings.value,
+      releaseJvmDocumentation.value,
+      (Compile / fullClasspath).value ++ (Runtime / managedClasspath).value,
+      releaseJvmClasspath.value,
+      javaHome.value.getOrElse(file(sys.props("java.home"))),
+      streams.value.log
+    )
+  )
+
 // A Spark line's bundle that runs: packed by root's rules and versioned as
 // root's artifact (docs/design/projects/spark-milvus/architecture/modules.md section 4, constraints
 // 6 and 17).
@@ -445,7 +533,7 @@ def lineBundle(l: Versions.SparkLine): Seq[Setting[_]] =
 lazy val apps40 = project
   .in(file("apps-4.0"))
   // Reuse core's ObjectStore fixtures, as spark40 does.
-  .dependsOn(spark40, core % "test->test")
+  .dependsOn(spark40 % compileAndRuntime, core % "test->test")
   .settings(
     name := "apps-4.0",
     moduleName := "spark-milvus-apps-4.0",
@@ -466,7 +554,7 @@ lazy val apps40 = project
 // Integration tests use a separate project because they need live services.
 lazy val integration40 = project
   .in(file("integration-4.0"))
-  .dependsOn(spark40, apps40)
+  .dependsOn(spark40 % compileAndRuntime, apps40 % compileAndRuntime)
   .settings(
     name := "integration-4.0",
     moduleName := "spark-milvus-integration-4.0",
@@ -652,7 +740,9 @@ lazy val gitBranch = {
 }
 
 // The 2.0 version, which root's artifact and a Spark line's bundle carry.
-lazy val connectorVersion = s"2.0.0-$gitBranch-$arch-SNAPSHOT"
+lazy val connectorVersion = ReleaseArtifacts.requestedVersion.getOrElse(
+  s"2.0.0-$gitBranch-$arch-SNAPSHOT"
+)
 
 lazy val mavenCredentialsFile = file(
   sys.env.getOrElse(
