@@ -1,9 +1,13 @@
 """Consumer gates reject missing, substituted and excess native artifacts."""
 
 import importlib.util
+import json
+import os
 from pathlib import Path
+import shlex
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 
@@ -95,6 +99,104 @@ class ConsumerTest(unittest.TestCase):
             archive.writestr("native/milvus/1/linux-aarch64/manifest.properties", "format.version=1")
         with self.assertRaisesRegex(RuntimeError, "Resolved native platforms"):
             consumer.check_resolved(self.ivy, expected)
+
+
+class ConsumerDiagnosticsTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.output = self.root / "persistent results"
+        self.candidate = self.root / "candidate"
+        self.candidate.mkdir()
+        (self.candidate / "release-manifest.json").write_text(json.dumps({
+            "version": "2.0.0", "plan": {"jvm": [{"line": "4.0", "spark": "4.0.1"}]},
+        }))
+        java_home = self.root / "java"
+        (java_home / "lib").mkdir(parents=True)
+        (java_home / "lib/libjsig.so").touch()
+        self.environment = mock.patch.dict(os.environ, {"JAVA_HOME": str(java_home)})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+
+    def simulate(self, *, fail=False):
+        commands = []
+        spark_home = None
+
+        def spark_installation(*args, **kwargs):
+            nonlocal spark_home
+            # This is inside smoke's actual TemporaryDirectory, so assertions
+            # after smoke returns also prove diagnostics survive its cleanup.
+            spark_home = Path(args[0][0]).parents[2] / "spark"
+            spark_home.mkdir()
+            return str(spark_home) + "\n"
+
+        def run(command, *, cwd, env, log=None):
+            if log is None:
+                return
+            commands.append(command)
+            entry = cwd.name
+            executor = spark_home / "work" / f"app-{entry}" / "0"
+            executor.mkdir(parents=True)
+            (executor / "stdout").write_text(entry + " stdout\n")
+            (executor / "stderr").write_text(entry + " stderr\n")
+            (executor / "core.123").write_bytes(b"do not collect a core dump")
+            (executor / "dependency.jar").write_bytes(b"do not collect dependencies")
+            (executor / "stdout.1").symlink_to(executor / "core.123")
+            (executor / "hs_err_pid123.log").write_text("executor fallback report\n")
+            driver_options = shlex.split(command[command.index("--driver-java-options") + 1])
+            error_option = next(value for value in driver_options if value.startswith("-XX:ErrorFile="))
+            error_path = Path(error_option.removeprefix("-XX:ErrorFile=").replace("%p", "124"))
+            error_path.write_text("explicit JVM error report\n")
+            (cwd / "hs_err_pid125.log").write_text("driver fallback report\n")
+            Path(log).write_text("driver log\n" if fail else "ALL PASS\nPASS independent executor JVM\n")
+            if fail:
+                raise RuntimeError("original consumer failure")
+
+        with mock.patch.object(consumer, "run", side_effect=run), \
+             mock.patch.object(consumer.subprocess, "check_output", side_effect=spark_installation), \
+             mock.patch.object(consumer, "compile_fixture", return_value=self.root / "smoke.jar"), \
+             mock.patch.object(consumer, "expected_artifacts", side_effect=lambda *args: (args[-1], {})), \
+             mock.patch.object(consumer, "check_resolved", return_value={}), \
+             mock.patch.object(consumer.sys, "platform", "linux"), \
+             mock.patch.object(consumer.os, "uname", return_value=mock.Mock(machine="x86_64")):
+            if fail:
+                with self.assertRaisesRegex(RuntimeError, "^original consumer failure$"):
+                    consumer.smoke(self.candidate, "4.0", "linux-x86_64", self.output)
+            else:
+                consumer.smoke(self.candidate, "4.0", "linux-x86_64", self.output)
+        self.assertFalse(spark_home.exists(), "temporary Spark installation must be removed")
+        return commands
+
+    def assert_diagnostics(self, entry):
+        directory = self.output / f"{entry}-diagnostics"
+        files = {str(path.relative_to(directory)) for path in directory.rglob("*") if path.is_file()}
+        self.assertEqual(files, {
+            f"worker/app-{entry}/0/stdout", f"worker/app-{entry}/0/stderr",
+            f"worker/app-{entry}/0/hs_err_pid123.log", "jvm/hs_err_pid124.log",
+            "driver/hs_err_pid125.log", "diagnostics.json",
+        })
+        self.assertEqual((directory / f"worker/app-{entry}/0/stderr").read_text(), entry + " stderr\n")
+
+    def test_failure_retains_diagnostics_before_temporary_cleanup_and_still_fails(self):
+        commands = self.simulate(fail=True)
+        self.assertEqual(len(commands), 1, "failed universal entry must not continue to platform")
+        self.assert_diagnostics("universal")
+        self.assertEqual((self.output / "universal.log").read_text(), "driver log\n")
+        self.assertFalse((self.output / "consumer-result.json").exists())
+
+    def test_both_entries_keep_separate_diagnostics_and_worker_jvm_options(self):
+        commands = self.simulate()
+        self.assertEqual(len(commands), 2)
+        for entry, command in zip(("universal", "platform"), commands):
+            self.assert_diagnostics(entry)
+            self.assertEqual(command[command.index("--master") + 1], "local-cluster[1,2,1536]")
+            driver = shlex.split(command[command.index("--driver-java-options") + 1])
+            self.assertIn("-Dmilvus.smoke.master=local-cluster[1,2,1536]", driver)
+            executor = next(value for value in command if value.startswith("spark.executor.extraJavaOptions="))
+            self.assertEqual(shlex.split(executor.split("=", 1)[1]), driver[1:])
+        report = json.loads((self.output / "consumer-result.json").read_text())
+        self.assertEqual([entry["entry"] for entry in report["entries"]], ["universal", "platform"])
 
 
 if __name__ == "__main__":
