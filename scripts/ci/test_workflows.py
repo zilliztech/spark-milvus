@@ -57,12 +57,31 @@ class WorkflowGateTest(unittest.TestCase):
             "type": "boolean", "default": "true",
         })
         self.assertNotIn("if", build["jobs"]["jvm"])
-        for name in ("native", "candidate"):
+        for name in ("native", "native-cpu", "candidate"):
             self.assertEqual(build["jobs"][name]["if"], "inputs.build_native")
-        self.assertEqual(set(build["jobs"]["candidate"]["needs"]), {"native", "jvm"})
+        self.assertEqual(set(build["jobs"]["candidate"]["needs"]), {"native", "native-cpu", "jvm"})
         self.assertNotIn("secrets", build["on"]["workflow_call"])
         self.assertNotIn("environment", build["jobs"]["native"])
         self.assertNotIn("environment", build["jobs"]["jvm"])
+
+    def test_native_cpu_gate_cannot_be_bypassed_by_a_bundle_cache_hit(self):
+        build = workflow("build-artifacts.yml")
+        cpu = build["jobs"]["native-cpu"]
+        self.assertEqual(cpu["needs"], "native")
+        self.assertEqual(cpu["runs-on"], "ubuntu-24.04")
+        self.assertEqual(cpu["if"], "inputs.build_native")
+        self.assertNotIn("continue-on-error", cpu)
+        steps = cpu["steps"]
+        download = next(step for step in steps if step.get("uses", "").startswith("actions/download-artifact@"))
+        self.assertEqual(download["with"]["name"], "native-linux-x86_64")
+        check = next(step for step in steps if "scripts/check-native-cpu.py" in step.get("run", ""))
+        self.assertNotIn("if", check)
+        self.assertNotIn("continue-on-error", check)
+        self.assertIn("--bundle native-input/milvus-native-linux-x86_64.jar", check["run"])
+        self.assertLess(steps.index(download), steps.index(check))
+        upload = next(step for step in steps if step.get("uses", "").startswith("actions/upload-artifact@"))
+        self.assertEqual(upload["if"], "always()")
+        self.assertFalse(upload["with"]["name"].startswith("native-linux-"))
 
     def test_native_cache_hit_still_requires_current_audit(self):
         native = workflow("build-artifacts.yml")["jobs"]["native"]
