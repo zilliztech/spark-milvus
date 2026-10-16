@@ -30,7 +30,12 @@ against the macOS 14.5 SDK, because its CMake compiles
 `crypto/detail/MathOperation_Simple.cpp` with `-mno-sse2` on x86_64 and clang
 then rejects the `_Float16` functions the macOS 15 SDK's `math.h` declares. The
 Command Line Tools install that SDK; Xcode alone does not.
-OpenBLAS uses `dynamic_arch=True`. Header-only dependencies and the internal
+OpenBLAS uses `dynamic_arch=True` with an explicit common-code target:
+`NEHALEM` on x86 and `ARMV8` on ARM. An automatic target can let the build host's
+AVX512 flags leak into the ZEN kernel. Its compiled thread capacity is fixed at
+64; the package-scoped CMake configuration participates in Conan's package ID
+so caches cannot reuse a package with different capacity. Runtime thread
+settings still control concurrency. Header-only dependencies and the internal
 Rust bridge do not expose a shared-library option.
 
 A platform is built when `native-build/profiles/` holds its Conan profile and

@@ -34,6 +34,21 @@ native provenance and validate on deployment CPUs, especially when using custom
 compiler flags or Cardinal's `-march=native` build. System libraries and the
 running JRE's signal-chaining library remain runtime prerequisites.
 
+Linux profiles keep OpenBLAS runtime dispatch and fix its common compilation
+target to `NEHALEM` on x86 and `ARMV8` on ARM. Its compiled thread capacity is
+64, independent of the build host's core count; runtime thread settings still
+control concurrency. This CMake setting participates in the Conan package ID.
+Leaving the target to host detection can put AVX512 instructions in the ZEN
+kernel even though it is selected for AMD CPUs without AVX512.
+
+Every x86 native build and bundle cache hit also runs batched Knowhere L2
+search in a separate Ubuntu 24.04 job under QEMU 8 or newer, using Nehalem,
+Haswell and EPYC CPU models and comparing with per-query results. The probe
+asserts the guest vendor and instruction sets so an emulator cannot silently
+fall back to a weaker CPU. Candidate staging requires this job to pass. This catches CPU dispatch regressions without overriding
+OpenBLAS or Faiss kernel selection. The real Spark consumer matrix remains
+required.
+
 ## Maven coordinates and runtime requirements
 
 All artifacts use group `com.zilliz` and the same final version. `<line>` is
@@ -161,7 +176,8 @@ Each entry keeps its driver log and a `<entry>-diagnostics` directory under
 `--output`, including executor stdout/stderr and JVM fatal error reports.
 Diagnostics are collected before temporary files are removed, including when
 Spark fails, and CI uploads them with the consumer evidence. An executor exit
-code alone does not identify the native failure; inspect these reports.
+code alone does not identify the native failure; inspect these reports. CI also
+records the consumer CPU, operating system and exact JDK version.
 
 This is an **offline native end-to-end test on local files**, not a live Milvus
 service test. The separate `integration40/test` suites require live Milvus and
@@ -214,6 +230,10 @@ quota.
 A complete bundle hit skips native compilation, but always reruns the ELF ABI
 audit. Staging still verifies pins and checksums, and the full consumer matrix
 still runs. Caches accelerate a gate; they do not replace it.
+
+The small `cache-inputs-<platform>` artifact is uploaded before cache restoration.
+Compare its `native-cache-inputs.json` with an earlier run to explain a miss
+while a rebuild is still running.
 
 ## Configure and publish a release
 

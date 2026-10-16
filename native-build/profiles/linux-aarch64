@@ -9,6 +9,9 @@ build_type=Release
 
 [conf]
 tools.build:compiler_executables={"c": "gcc-12", "cpp": "g++-12"}
+# Build capacity is independent of the runner's core count and identifies the package.
+openblas/*:tools.cmake.cmaketoolchain:extra_variables={"NUM_THREADS": 64}
+openblas/*:tools.info.package_id:confs=["tools.cmake.cmaketoolchain:extra_variables"]
 
 [platform_tool_requires]
 cmake/3.27.5
@@ -45,6 +48,7 @@ lz4/*:shared=True
 libsodium/*:shared=True
 openblas/*:shared=True
 openblas/*:dynamic_arch=True
+openblas/*:target=ARMV8
 openssl/*:shared=True
 opentelemetry-cpp/*:shared=True
 prometheus-cpp/*:shared=True
