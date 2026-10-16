@@ -1,6 +1,6 @@
 package com.zilliz.milvus.storage.vector
 
-import java.lang.{Double => JavaDouble, Long => JavaLong}
+import java.lang.{Float => JavaFloat, Long => JavaLong}
 import java.nio.ByteBuffer
 
 import com.zilliz.milvus.storage.schema.MetricType
@@ -95,17 +95,23 @@ private[vector] object CandidateHeads {
       right: ByteBuffer,
       rightAt: Int
   ): Int = {
-    val score = JavaDouble.compare(
-      left.getDouble(leftAt + 16),
-      right.getDouble(rightAt + 16)
+    val score = JavaFloat.compare(
+      left.getFloat(leftAt + 8),
+      right.getFloat(rightAt + 8)
     ) * sign
     if (score != 0) score
     else {
       val segment =
-        JavaLong.compare(left.getLong(leftAt), right.getLong(rightAt))
+        JavaLong.compare(
+          left.getInt(leftAt).toLong & 0xffffffffL,
+          right.getInt(rightAt).toLong & 0xffffffffL
+        )
       if (segment != 0) segment
       else
-        JavaLong.compare(left.getLong(leftAt + 8), right.getLong(rightAt + 8))
+        JavaLong.compare(
+          left.getInt(leftAt + 4).toLong & 0xffffffffL,
+          right.getInt(rightAt + 4).toLong & 0xffffffffL
+        )
     }
   }
 }

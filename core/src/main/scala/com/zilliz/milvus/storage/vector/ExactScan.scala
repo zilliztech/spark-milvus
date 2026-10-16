@@ -180,7 +180,7 @@ object ExactScan {
       math.min(4096L, queries.queries.toLong * ranked.rankedRows.length).toInt
     val queryIds = new Array[Int](capacity)
     val rowIds = new Array[Long](capacity)
-    val scores = new Array[Double](capacity)
+    val scores = new Array[Float](capacity)
     var used = 0
     def flush(): Unit = if (used > 0) {
       val count = used
@@ -221,7 +221,7 @@ object ExactScan {
         if (score != null) {
           queryIds(used) = at
           rowIds(used) = current.firstRow + ranked.rankedRows(row)
-          scores(used) = score.doubleValue()
+          scores(used) = score.floatValue()
           used += 1
           if (used == capacity) flush()
         }
@@ -559,7 +559,11 @@ object ExactScan {
                   ranked.engineExcluded
                 )
               )
-              if (!merger.rejectsScore(at, (last - errors(at)) * shrink)) {
+              // Keep the lower-bound arithmetic in Double, then compare on the
+              // merger's Float scale. Rounding is monotone; an equal score
+              // remains eligible for the address tie-break.
+              val lowerBound = ((last.toDouble - errors(at)) * shrink).toFloat
+              if (!merger.rejectsScore(at, lowerBound)) {
                 again += at
                 val sorted = Arrays.copyOf(offered, computed)
                 Arrays.sort(sorted)
@@ -720,12 +724,12 @@ object ExactScan {
     row
   }
 
-  private def finite(score: Float, row: Int): Double = {
+  private def finite(score: Float, row: Int): Float = {
     require(
       JavaFloat.isFinite(score),
       s"The engine returned a score that is not finite for row $row"
     )
-    score.toDouble
+    score
   }
 
   private def perQuery(

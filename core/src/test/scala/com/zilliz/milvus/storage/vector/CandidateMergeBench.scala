@@ -27,6 +27,10 @@ import com.zilliz.milvus.storage.schema.MetricType
   * measurements are shared by the eight configurations of the same fixture;
   * their execution order rotates each round. Repeated reads of the same input
   * arrays measure a warm JVM, not shuffle, spill, peak live memory or cold IO.
+  * The historical baseline retains Double scores and 24/28-byte headers;
+  * current inputs use Float scores and 12/16-byte headers. Their separately
+  * encoded oracles contain the same candidate values. Measurements include this
+  * representation change and do not isolate the merge algorithm alone.
   */
 object CandidateMergeBench {
   @volatile private var sink: AnyRef = _
@@ -37,9 +41,12 @@ object CandidateMergeBench {
       rowBytes: Int,
       metric: MetricType,
       inputs: Array[Array[Byte]],
-      expected: Array[Byte]
+      expected: Array[Byte],
+      currentInputs: Array[Array[Byte]],
+      currentExpected: Array[Byte]
   ) {
-    val runBytes: Long = inputs(0).length.toLong
+    val runBytes: Long = currentInputs(0).length.toLong
+    val baselineRunBytes: Long = inputs(0).length.toLong
     val layout: String = if (rowBytes == 0) "plain" else "carried"
   }
 
@@ -72,6 +79,32 @@ object CandidateMergeBench {
     buffer.array()
   }
 
+  // Independent of the production encoders, with the current Float protocol.
+  // Fixtures use contiguous segment ids from zero, equal to their ordinals
+  // in the one global dictionary shared by all runs.
+  private def encodeCurrent(
+      rows: Seq[Candidate],
+      rowBytes: Int
+  ): Array[Byte] = {
+    val width = if (rowBytes == 0) 12 else 16 + rowBytes
+    val buffer = ByteBuffer.allocate(rows.size * width)
+    rows.foreach { row =>
+      buffer
+        .putInt(row.segmentId.toInt)
+        .putInt(row.rowOffset.toInt)
+        .putFloat(row.score)
+      if (rowBytes > 0) {
+        buffer.putInt(rowBytes)
+        var at = 0
+        while (at < rowBytes) {
+          buffer.put((row.segmentId * 31 + row.rowOffset * 7 + at).toByte)
+          at += 1
+        }
+      }
+    }
+    buffer.array()
+  }
+
   private def fixture(
       k: Int,
       runs: Int,
@@ -79,21 +112,27 @@ object CandidateMergeBench {
       metric: MetricType
   ): Fixture = {
     val random = new SplittableRandom(4271023L + k * 37L + runs)
-    val all = Vector.newBuilder[Candidate]
-    val inputs = Array.tabulate(runs) { run =>
-      val candidates = Vector
+    val candidates = Array.tabulate(runs) { run =>
+      Vector
         .tabulate(k) { offset =>
           // All positions are unique; rounded scores also exercise tie-breakers.
-          val score = random.nextInt(k * runs * 2).toDouble
+          val score = random.nextInt(k * runs * 2).toFloat
           Candidate(0, run.toLong, offset.toLong, score)
         }
         .sorted(Candidate.ranking(metric))
-      all ++= candidates
-      encode(candidates, rowBytes)
     }
     val expected =
-      encode(all.result().sorted(Candidate.ranking(metric)).take(k), rowBytes)
-    Fixture(k, runs, rowBytes, metric, inputs, expected)
+      candidates.flatten.toVector.sorted(Candidate.ranking(metric)).take(k)
+    Fixture(
+      k,
+      runs,
+      rowBytes,
+      metric,
+      candidates.map(encode(_, rowBytes)),
+      encode(expected, rowBytes),
+      candidates.map(encodeCurrent(_, rowBytes)),
+      encodeCurrent(expected, rowBytes)
+    )
   }
 
   private def baseline(data: Fixture): Array[Byte] = {
@@ -111,7 +150,8 @@ object CandidateMergeBench {
 
   private def bounded(data: Fixture, variant: Variant): Array[Byte] = {
     val layout =
-      if (data.rowBytes == 0) CandidateRuns.Plain else CandidateRuns.Carried
+      if (data.rowBytes == 0) CandidateRuns.Plain
+      else CandidateRuns.Carried
     val state = new CandidateRuns(
       data.k,
       data.metric,
@@ -120,8 +160,8 @@ object CandidateMergeBench {
       variant.target
     )
     var at = 0
-    while (at < data.inputs.length) {
-      state.append(data.inputs(at))
+    while (at < data.currentInputs.length) {
+      state.append(data.currentInputs(at))
       at += 1
     }
     state.finish()
@@ -197,7 +237,8 @@ object CandidateMergeBench {
     require(cells.nonEmpty, "The benchmark filters selected no fixtures")
     System.err.println(
       s"baseline=d1536627 fork=$fork java=${System.getProperty("java.version")} " +
-        s"metric=$metric fixtures=${cells.size} warmups=$warmups rounds=$rounds"
+        s"metric=$metric fixtures=${cells.size} warmups=$warmups rounds=$rounds " +
+        "baseline_headers=24/28_double current_headers=12/16_float"
     )
     println(
       "fork,metric,layout,row_bytes,k,input_runs,max_runs,pressure,target_bytes,repetitions,round,baseline_ns,bounded_ns,baseline_allocated_bytes,bounded_allocated_bytes"
@@ -212,7 +253,7 @@ object CandidateMergeBench {
         pressure,
         if (pressure == "none") b * data.runBytes else data.runBytes * 3 / 2
       )
-      val baselineBytes = math.max(1L, (runs - 1L) * data.runBytes)
+      val baselineBytes = math.max(1L, (runs - 1L) * data.baselineRunBytes)
       val repetitions =
         math.min(2048L, math.max(1L, batchBytes / baselineBytes)).toInt
       System.err.println(
@@ -226,8 +267,9 @@ object CandidateMergeBench {
         var at = 0
         while (at < operations.size) {
           val index = (at + round + warmups + fork) % operations.size
+          val expected = if (index == 0) data.expected else data.currentExpected
           samples(index) =
-            measure(bean, thread, repetitions, data.expected)(operations(index))
+            measure(bean, thread, repetitions, expected)(operations(index))
           at += 1
         }
         if (round >= 0) {

@@ -15,6 +15,9 @@ import com.zilliz.milvus.storage.schema.{
   VectorLayout
 }
 import com.zilliz.milvus.storage.vector.{
+  CandidateBytes,
+  CandidateDictionary,
+  CandidateEncoding,
   IndexSearch,
   QueryMatrix,
   SearchThreads,
@@ -34,7 +37,10 @@ class SearchGroupPipelineHeldTest extends AnyFunSuite with Matchers {
     val k = 3
     val groups = Vector(Vector(10f, 11f), Vector(20f, 21f, 22f), Vector(30f))
 
-    def run(pipelined: Boolean): Vector[Vector[Vector[Byte]]] = {
+    def run(
+        pipelined: Boolean,
+        encoding: CandidateEncoding
+    ): Vector[Vector[Vector[Byte]]] = {
       val allocator = new RootAllocator()
       val closes = new AtomicInteger
       val searches = new AtomicInteger
@@ -137,7 +143,7 @@ class SearchGroupPipelineHeldTest extends AnyFunSuite with Matchers {
               .shards(merger.queries, 2) { (_, from, until) =>
                 (from until until).map { query =>
                   merger.sort(query)
-                  merger.takePacked(query).toVector
+                  merger.takePacked(query, encoding).toVector
                 }
               }
               .flatten
@@ -156,9 +162,11 @@ class SearchGroupPipelineHeldTest extends AnyFunSuite with Matchers {
       result
     }
 
-    val serial = run(pipelined = false)
+    val dictionary = CandidateDictionary(Seq(7L, 9L))
+    val encoding = CandidateEncoding(dictionary, Seq(7L, 9L))
+    val serial = run(pipelined = false, encoding = encoding)
     serial.map(_.size) shouldBe Vector(2, 3, 1)
-    serial.flatten.foreach(_.size shouldBe k * 24)
-    run(pipelined = true) shouldBe serial
+    serial.flatten.foreach(_.size shouldBe k * CandidateBytes.Width)
+    run(pipelined = true, encoding = encoding) shouldBe serial
   }
 }

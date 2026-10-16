@@ -1,7 +1,7 @@
 package com.zilliz.milvus.storage.vector
 
 import java.io.{ByteArrayOutputStream, DataOutputStream}
-import java.lang.{Double => JavaDouble, Long => JavaLong}
+import java.lang.{Float => JavaFloat, Long => JavaLong}
 import scala.util.Random
 
 import org.scalatest.funsuite.AnyFunSuite
@@ -18,20 +18,20 @@ class CarriedCandidatesMergeTest extends AnyFunSuite with Matchers {
   private def entry(
       unit: Long,
       offset: Long,
-      score: Double,
+      score: Float,
       width: Int
   ): Entry =
     Entry(
       unit,
       offset,
-      JavaDouble.doubleToRawLongBits(score),
+      JavaFloat.floatToRawIntBits(score),
       Vector.tabulate(width)(at => (offset + at * 13L).toByte)
     )
 
   private def before(left: Entry, right: Entry, metric: MetricType): Boolean = {
-    val score = JavaDouble.compare(
-      JavaDouble.longBitsToDouble(left.scoreBits),
-      JavaDouble.longBitsToDouble(right.scoreBits)
+    val score = JavaFloat.compare(
+      JavaFloat.intBitsToFloat(left.scoreBits),
+      JavaFloat.intBitsToFloat(right.scoreBits)
     )
     if (score != 0) {
       if (metric == MetricType.L2) score < 0 else score > 0
@@ -46,9 +46,9 @@ class CarriedCandidatesMergeTest extends AnyFunSuite with Matchers {
     val bytes = new ByteArrayOutputStream()
     val out = new DataOutputStream(bytes)
     entries.foreach { value =>
-      out.writeLong(value.unit)
-      out.writeLong(value.offset)
-      out.writeLong(value.scoreBits)
+      out.writeInt(value.unit.toInt)
+      out.writeInt(value.offset.toInt)
+      out.writeInt(value.scoreBits)
       out.writeInt(value.row.size)
       out.write(value.row.toArray)
     }
@@ -80,8 +80,8 @@ class CarriedCandidatesMergeTest extends AnyFunSuite with Matchers {
   test(
     "a sparse answer fits an arbitrarily large positive k without k-sized scratch"
   ) {
-    val left = Seq(entry(0L, 0L, 3.0, 0), entry(0L, 1L, 1.0, 16))
-    val right = Seq(entry(1L, 0L, 2.0, 4096))
+    val left = Seq(entry(0L, 0L, 3.0f, 0), entry(0L, 1L, 1.0f, 16))
+    val right = Seq(entry(1L, 0L, 2.0f, 4096))
     metrics.foreach { metric =>
       Seq(1, 2, 100000, Int.MaxValue).foreach { k =>
         check(left, right, k, metric)
@@ -96,14 +96,14 @@ class CarriedCandidatesMergeTest extends AnyFunSuite with Matchers {
     "zero-length rows, signed zero, infinities and NaN payloads retain exact bytes"
   ) {
     val entries = Seq(
-      entry(3L, 0L, -0.0, 0),
-      entry(1L, 0L, 0.0, 0),
-      entry(2L, 0L, Double.NegativeInfinity, 1),
-      entry(2L, 1L, Double.PositiveInfinity, 16),
-      entry(0L, 1L, 7.0, 127),
-      entry(0L, 0L, 7.0, 0),
-      Entry(1L, 2L, 0x7ff8000000000042L, Vector(42.toByte)),
-      Entry(0L, 2L, 0xfff8000000000017L, Vector.empty)
+      entry(3L, 0L, -0.0f, 0),
+      entry(1L, 0L, 0.0f, 0),
+      entry(2L, 0L, Float.NegativeInfinity, 1),
+      entry(2L, 1L, Float.PositiveInfinity, 16),
+      entry(0L, 1L, 7.0f, 127),
+      entry(0L, 0L, 7.0f, 0),
+      Entry(1L, 2L, 0x7fc00042, Vector(42.toByte)),
+      Entry(0L, 2L, 0xffc00017, Vector.empty)
     )
     metrics.foreach { metric =>
       Seq(1, 4, 8, 100000).foreach { k =>
@@ -117,21 +117,21 @@ class CarriedCandidatesMergeTest extends AnyFunSuite with Matchers {
   ) {
     val random = new Random(0x4652414d45L)
     val scores = Vector(
-      Double.NaN,
-      Double.NegativeInfinity,
-      Double.PositiveInfinity,
-      -0.0,
-      0.0,
-      1.0
+      Float.NaN,
+      Float.NegativeInfinity,
+      Float.PositiveInfinity,
+      -0.0f,
+      0.0f,
+      1.0f
     )
     val widths = Vector(0, 1, 16, 127, 1024)
     (0 until 300).foreach { iteration =>
       val entries = Vector.tabulate(random.nextInt(80)) { at =>
         val score =
           if (random.nextBoolean()) scores(random.nextInt(scores.size))
-          else random.nextInt(41).toDouble / 3.0 - 7.0
+          else random.nextInt(41).toFloat / 3.0f - 7.0f
         entry(
-          (at % 7).toLong - 3L,
+          0x7ffffffdL + (at % 7).toLong,
           at.toLong,
           score,
           widths(random.nextInt(widths.size))
@@ -149,6 +149,25 @@ class CarriedCandidatesMergeTest extends AnyFunSuite with Matchers {
     }
   }
 
+  test(
+    "ties compare both address fields as unsigned across the signed Int boundary"
+  ) {
+    val entries = Vector(
+      entry(0x7fffffffL, 0xffffffffL, 1.0f, 1),
+      entry(0x80000000L, 0L, 1.0f, 2),
+      entry(0xffffffffL, 0x7fffffffL, 1.0f, 3),
+      entry(0xffffffffL, 0x80000000L, 1.0f, 4),
+      entry(0xffffffffL, 0xffffffffL, 1.0f, 5)
+    )
+    metrics.foreach { metric =>
+      check(entries.take(2), entries.drop(2), 5, metric)
+      val runs = entries.reverse.map(value => encoded(Seq(value)))
+      CarriedCandidates.merge(runs, 5, metric).toVector shouldBe encoded(
+        entries
+      ).toVector
+    }
+  }
+
   test("invalid k and truncated encoded records still fail visibly") {
     Seq(0, -1, Int.MinValue).foreach { k =>
       intercept[IllegalArgumentException] {
@@ -160,7 +179,7 @@ class CarriedCandidatesMergeTest extends AnyFunSuite with Matchers {
         )
       }.getMessage should include("topK must be positive")
     }
-    Seq(Array[Byte](1), new Array[Byte](27)).foreach { truncated =>
+    Seq(Array[Byte](1), new Array[Byte](15)).foreach { truncated =>
       intercept[IllegalArgumentException] {
         CarriedCandidates.merge(
           truncated,
@@ -177,7 +196,7 @@ private object CarriedCandidatesMergeTest {
   final case class Entry(
       unit: Long,
       offset: Long,
-      scoreBits: Long,
+      scoreBits: Int,
       row: Vector[Byte]
   )
 }

@@ -1,5 +1,6 @@
 package com.zilliz.milvus.storage.vector
 
+import java.lang.{Float => JavaFloat}
 import java.nio.ByteBuffer
 import java.util.concurrent.{
   CountDownLatch,
@@ -100,10 +101,10 @@ class ExactCollectionTest extends AnyFunSuite with Matchers {
             def score(
                 query: Array[Float],
                 row: Array[Float]
-            ): java.lang.Double = {
+            ): JavaFloat = {
               Thread.currentThread() shouldBe scoringThread
               scored.countDown()
-              java.lang.Double.valueOf(1.0)
+              JavaFloat.valueOf(1.0f)
             }
           }
           ExactScan.batch(
@@ -137,7 +138,7 @@ class ExactCollectionTest extends AnyFunSuite with Matchers {
             .sort(query)
             .results(query)
             .map(c => (c.segmentId, c.rowOffset, c.score)) shouldBe
-            Seq((2L, 20L, 1.0))
+            Seq((2L, 20L, 1.0f))
         }
         merger.scannedRows shouldBe 1L
       } finally {
@@ -166,10 +167,10 @@ class ExactCollectionTest extends AnyFunSuite with Matchers {
     val matrix =
       QueryMatrix.ofFloats(queries.map(q => Array(q, 0f)), layout, allocator)
     val function = new RankingFunction {
-      def score(query: Array[Float], row: Array[Float]): java.lang.Double =
+      def score(query: Array[Float], row: Array[Float]): JavaFloat =
         if (query(0) < 0 || row(1).toInt % 13 == 0) null
-        else if (row(1).toInt % 17 == 0) java.lang.Double.valueOf(Double.NaN)
-        else java.lang.Double.valueOf(math.abs(query(0).toDouble - row(1)))
+        else if (row(1).toInt % 17 == 0) JavaFloat.valueOf(Float.NaN)
+        else JavaFloat.valueOf(math.abs(query(0).toDouble - row(1)).toFloat)
     }
     val ranked = EngineRange.Batch.of(batch, layout, MetricType.L2, function)
     try {
@@ -192,13 +193,15 @@ class ExactCollectionTest extends AnyFunSuite with Matchers {
         )
         queries.zipWithIndex.foreach { case (query, at) =>
           val expected =
-            if (query < 0) Seq.empty[(Double, Long)]
+            if (query < 0) Seq.empty[(Float, Long)]
             else
               vectors.indices
                 .filter { row =>
                   vectors(row) != null && row % 13 != 0 && row % 17 != 0
                 }
-                .map { row => (math.abs(query.toDouble - row), 100L + row) }
+                .map { row =>
+                  (math.abs(query.toDouble - row).toFloat, 100L + row)
+                }
                 .sorted
                 .take(10)
           merger

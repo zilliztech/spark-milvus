@@ -9,7 +9,8 @@ package com.zilliz.milvus.storage.read
   * cannot survive serialization can be a field, and the reader opens what it
   * needs on the executor. `ReadLimits` carries the validated batch row/byte
   * bounds and per-task Arrow allocation bound; raw user strings never cross
-  * this boundary.
+  * this boundary. `SegmentReadTask.provenPhysicalRows` separates a complete
+  * physical row-address bound from the estimates used for search sizing.
   *
   * `ReadPlan.of` is the planning itself: one fixed `Snapshot` becomes one task
   * per data segment, V3 first, each with its `fs.*` map, pinned manifest

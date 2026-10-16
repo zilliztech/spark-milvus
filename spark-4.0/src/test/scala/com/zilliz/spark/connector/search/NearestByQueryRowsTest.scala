@@ -1,5 +1,6 @@
 package com.zilliz.spark.connector.search
 
+import java.lang.{Float => JavaFloat}
 import scala.collection.mutable
 
 import org.apache.spark.sql.catalyst.expressions.{
@@ -325,7 +326,7 @@ object NearestByQueryRowsTest {
     override def score(
         query: Array[Float],
         row: Array[Float]
-    ): java.lang.Double =
+    ): JavaFloat =
       throw new AssertionError("preparing query rows must not score a pair")
   }
 }

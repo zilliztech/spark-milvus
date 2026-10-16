@@ -1,6 +1,6 @@
 package com.zilliz.milvus.storage.vector
 
-import java.lang.{Double => JavaDouble}
+import java.lang.{Float => JavaFloat}
 import scala.collection.mutable.ArrayBuffer
 import scala.util.Random
 
@@ -13,54 +13,80 @@ import com.zilliz.milvus.storage.schema.MetricType
   * packed answers gives what merging candidates would have given.
   */
 class CandidateBytesTest extends AnyFunSuite with Matchers {
+  private val segmentIds = (0L to 104L)
+  private val dictionary = CandidateDictionary(segmentIds)
+  private val encoding = CandidateEncoding(dictionary, segmentIds)
 
-  private def places(packed: Array[Byte]): Vector[(Long, Long, Double)] = {
-    val read = Vector.newBuilder[(Long, Long, Double)]
-    CandidateBytes.foreach(packed)((segment, offset, score) =>
+  private def places(packed: Array[Byte]): Vector[(Long, Long, Float)] = {
+    val read = Vector.newBuilder[(Long, Long, Float)]
+    CandidateBytes.foreach(packed, dictionary)((segment, offset, score) =>
       read += ((segment, offset, score))
     )
     read.result()
   }
 
-  private def candidate(segment: Long, offset: Long, score: Double) =
+  private def candidate(segment: Long, offset: Long, score: Float) =
     Candidate(0, segment, offset, score)
 
   test("a candidate takes three fields and nothing else") {
-    CandidateBytes.Width shouldBe 24
+    CandidateBytes.Width shouldBe 12
     val packed =
-      CandidateBytesFixture.pack(Seq(candidate(101L, 5L, 1.5)), MetricType.L2)
-    packed.length shouldBe 24
+      CandidateBytesFixture.pack(
+        Seq(candidate(101L, 5L, 1.5f)),
+        MetricType.L2,
+        encoding
+      )
+    packed.length shouldBe 12
     CandidateBytes.count(packed) shouldBe 1
-    CandidateBytes.segmentId(packed, 0) shouldBe 101L
+    CandidateBytes.segmentId(
+      packed,
+      0,
+      dictionary
+    ) shouldBe 101L
     CandidateBytes.rowOffset(packed, 0) shouldBe 5L
-    CandidateBytes.score(packed, 0) shouldBe 1.5
+    CandidateBytes.score(packed, 0) shouldBe 1.5f
   }
 
   test("column packing preserves the supplied order and range") {
     val packed = CandidateBytes.writeColumns(
       Array(100L, 101L, 102L, 103L),
       Array(0L, 1L, 2L, 3L),
-      Array(0.0, 3.0, 1.0, 2.0),
+      Array(0.0f, 3.0f, 1.0f, 2.0f),
       base = 1,
-      size = 3
+      size = 3,
+      encoding = encoding
     )
     places(packed) shouldBe Vector(
-      (101L, 1L, 3.0),
-      (102L, 2L, 1.0),
-      (103L, 3L, 2.0)
+      (101L, 1L, 3.0f),
+      (102L, 2L, 1.0f),
+      (103L, 3L, 2.0f)
     )
   }
 
   test("an empty answer packs to no bytes and merges away") {
     CandidateBytes.count(CandidateBytes.Empty) shouldBe 0
     val one =
-      CandidateBytesFixture.pack(Seq(candidate(101L, 5L, 1.5)), MetricType.L2)
+      CandidateBytesFixture.pack(
+        Seq(candidate(101L, 5L, 1.5f)),
+        MetricType.L2,
+        encoding
+      )
     places(
-      CandidateBytes.merge(one, CandidateBytes.Empty, 10, MetricType.L2)
+      CandidateBytes.merge(
+        one,
+        CandidateBytes.Empty,
+        10,
+        MetricType.L2
+      )
     ) shouldBe
       places(one)
     places(
-      CandidateBytes.merge(CandidateBytes.Empty, one, 10, MetricType.L2)
+      CandidateBytes.merge(
+        CandidateBytes.Empty,
+        one,
+        10,
+        MetricType.L2
+      )
     ) shouldBe
       places(one)
   }
@@ -68,61 +94,92 @@ class CandidateBytesTest extends AnyFunSuite with Matchers {
   test("a merge keeps the best k and drops the rest") {
     val left =
       CandidateBytesFixture.pack(
-        Seq(candidate(101L, 1L, 1.0), candidate(101L, 2L, 4.0)),
-        MetricType.L2
+        Seq(candidate(101L, 1L, 1.0f), candidate(101L, 2L, 4.0f)),
+        MetricType.L2,
+        encoding
       )
     val right =
       CandidateBytesFixture.pack(
-        Seq(candidate(102L, 3L, 2.0), candidate(102L, 4L, 5.0)),
-        MetricType.L2
+        Seq(candidate(102L, 3L, 2.0f), candidate(102L, 4L, 5.0f)),
+        MetricType.L2,
+        encoding
       )
-    places(CandidateBytes.merge(left, right, 3, MetricType.L2)) shouldBe Vector(
-      (101L, 1L, 1.0),
-      (102L, 3L, 2.0),
-      (101L, 2L, 4.0)
+    places(
+      CandidateBytes.merge(left, right, 3, MetricType.L2)
+    ) shouldBe Vector(
+      (101L, 1L, 1.0f),
+      (102L, 3L, 2.0f),
+      (101L, 2L, 4.0f)
     )
   }
 
   test("a side longer than k is cut to k") {
     val long = CandidateBytesFixture.pack(
-      (1 to 5).map(index => candidate(101L, index.toLong, index.toDouble)),
-      MetricType.L2
+      (1 to 5).map(index => candidate(101L, index.toLong, index.toFloat)),
+      MetricType.L2,
+      encoding
     )
-    places(CandidateBytes.merge(long, CandidateBytes.Empty, 2, MetricType.L2))
+    places(
+      CandidateBytes.merge(
+        long,
+        CandidateBytes.Empty,
+        2,
+        MetricType.L2
+      )
+    )
       .map(_._2) shouldBe Vector(1L, 2L)
   }
 
   test("ties break on segment then row, so a merge is order-independent") {
     val left =
-      CandidateBytesFixture.pack(Seq(candidate(102L, 9L, 1.0)), MetricType.L2)
+      CandidateBytesFixture.pack(
+        Seq(candidate(102L, 9L, 1.0f)),
+        MetricType.L2,
+        encoding
+      )
     val right = CandidateBytesFixture.pack(
-      Seq(candidate(101L, 9L, 1.0), candidate(102L, 8L, 1.0)),
-      MetricType.L2
+      Seq(candidate(101L, 9L, 1.0f), candidate(102L, 8L, 1.0f)),
+      MetricType.L2,
+      encoding
     )
-    val forward = places(CandidateBytes.merge(left, right, 3, MetricType.L2))
-    forward shouldBe Vector((101L, 9L, 1.0), (102L, 8L, 1.0), (102L, 9L, 1.0))
-    places(CandidateBytes.merge(right, left, 3, MetricType.L2)) shouldBe forward
+    val forward = places(
+      CandidateBytes.merge(left, right, 3, MetricType.L2)
+    )
+    forward shouldBe Vector(
+      (101L, 9L, 1.0f),
+      (102L, 8L, 1.0f),
+      (102L, 9L, 1.0f)
+    )
+    places(
+      CandidateBytes.merge(right, left, 3, MetricType.L2)
+    ) shouldBe forward
   }
 
   test("merging packed answers agrees with merging candidates, in any order") {
     val random = new Random(7)
     val sides = (0 until 5).map(segment =>
       (0 until 8).map(row =>
-        candidate(100L + segment, row.toLong, random.nextInt(50).toDouble)
+        candidate(100L + segment, row.toLong, random.nextInt(50).toFloat)
       )
     )
     Seq(MetricType.L2, MetricType.Cosine).foreach { metric =>
       val expected = {
         val merger = new TopKMerger(1, 6, metric)
         sides.flatten.foreach(merger.add)
-        places(merger.sort(0).takePacked(0))
+        places(merger.sort(0).takePacked(0, encoding))
       }
-      val packed = sides.map(CandidateBytesFixture.pack(_, metric))
+      val packed = sides.map(CandidateBytesFixture.pack(_, metric, encoding))
       val straight =
-        places(packed.reduce(CandidateBytes.merge(_, _, 6, metric)))
+        places(
+          packed.reduce(
+            CandidateBytes.merge(_, _, 6, metric)
+          )
+        )
       straight shouldBe expected
       val shuffled = places(
-        random.shuffle(packed).reduce(CandidateBytes.merge(_, _, 6, metric))
+        random
+          .shuffle(packed)
+          .reduce(CandidateBytes.merge(_, _, 6, metric))
       )
       shuffled shouldBe straight
     }
@@ -148,14 +205,14 @@ class CandidateBytesTest extends AnyFunSuite with Matchers {
   ) {
     val random = new Random(811)
     val scores = Vector(
-      Double.NaN,
-      JavaDouble.longBitsToDouble(0x7ff8000000000042L),
-      Double.NegativeInfinity,
-      -0.0,
-      0.0,
-      Double.PositiveInfinity,
-      1.0,
-      -1.0
+      Float.NaN,
+      JavaFloat.intBitsToFloat(0x7fc00042),
+      Float.NegativeInfinity,
+      -0.0f,
+      0.0f,
+      Float.PositiveInfinity,
+      1.0f,
+      -1.0f
     )
     MetricType.values.foreach { metric =>
       (0 until 20).foreach { trial =>
@@ -168,18 +225,26 @@ class CandidateBytesTest extends AnyFunSuite with Matchers {
             )
           }
         }
-        val runs = entries.map(CandidateBytesFixture.pack(_, metric))
+        val runs = entries.map(CandidateBytesFixture.pack(_, metric, encoding))
         val originals = runs.map(_.clone())
         Seq(1, 7, 37, Int.MaxValue).foreach { k =>
           val expected = CandidateBytesFixture.pack(
             entries.flatten.sorted(Candidate.ranking(metric)).take(k),
-            metric
+            metric,
+            encoding
           )
-          CandidateBytes.merge(runs, k, metric).toSeq shouldBe expected.toSeq
-          CandidateBytes.merge(random.shuffle(runs), k, metric).toSeq shouldBe
+          CandidateBytes
+            .merge(runs, k, metric)
+            .toSeq shouldBe expected.toSeq
+          CandidateBytes
+            .merge(random.shuffle(runs), k, metric)
+            .toSeq shouldBe
             expected.toSeq
           val partials =
-            runs.grouped(3).map(CandidateBytes.merge(_, k, metric)).toVector
+            runs
+              .grouped(3)
+              .map(CandidateBytes.merge(_, k, metric))
+              .toVector
           CandidateBytes
             .merge(partials, k, metric)
             .toSeq shouldBe expected.toSeq
@@ -195,8 +260,9 @@ class CandidateBytesTest extends AnyFunSuite with Matchers {
     "multiway shortcuts accept mutable runs and reuse a complete single run"
   ) {
     val packed = CandidateBytesFixture.pack(
-      (0 until 3).map(row => candidate(1L, row, row.toDouble)),
-      MetricType.L2
+      (0 until 3).map(row => candidate(1L, row, row.toFloat)),
+      MetricType.L2,
+      encoding
     )
     val inputs = ArrayBuffer(CandidateBytes.Empty, packed)
     (CandidateBytes.merge(
@@ -207,7 +273,9 @@ class CandidateBytesTest extends AnyFunSuite with Matchers {
     CandidateBytes.count(
       CandidateBytes.merge(inputs, 2, MetricType.L2)
     ) shouldBe 2
-    CandidateBytes.merge(Vector.empty, 1, MetricType.L2).length shouldBe 0
+    CandidateBytes
+      .merge(Vector.empty, 1, MetricType.L2)
+      .length shouldBe 0
     the[IllegalArgumentException] thrownBy
       CandidateBytes.merge(Vector.empty, 0, MetricType.L2)
     Seq(
@@ -216,7 +284,11 @@ class CandidateBytesTest extends AnyFunSuite with Matchers {
     )
       .foreach { malformed =>
         the[IllegalArgumentException] thrownBy
-          CandidateBytes.merge(malformed, 1, MetricType.L2)
+          CandidateBytes.merge(
+            malformed,
+            1,
+            MetricType.L2
+          )
       }
   }
 
@@ -230,9 +302,10 @@ class CandidateBytesTest extends AnyFunSuite with Matchers {
     the[IllegalArgumentException] thrownBy CandidateBytes.writeColumns(
       Array.emptyLongArray,
       Array.emptyLongArray,
-      Array.emptyDoubleArray,
+      Array.emptyFloatArray,
       0,
-      Int.MaxValue
+      Int.MaxValue,
+      encoding = encoding
     )
   }
 }

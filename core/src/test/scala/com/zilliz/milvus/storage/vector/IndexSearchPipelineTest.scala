@@ -137,14 +137,14 @@ class IndexSearchPipelineTest
     val collector = java.util.concurrent.Executors.newSingleThreadExecutor()
     try {
       val segments = Seq(11L, 22L, 33L)
-      def expected(group: Int): Seq[Seq[(Double, Long, Long)]] =
+      def expected(group: Int): Seq[Seq[(Float, Long, Long)]] =
         (0 until groups(group)).map { query =>
           segments
             .flatMap { segment =>
               val fake = new Fake(segment)
               (0 until k).map(slot =>
                 (
-                  fake.scoreOf(query, slot, starts(group)).toDouble,
+                  fake.scoreOf(query, slot, starts(group)).toFloat,
                   segment,
                   fake.rowOf(query, slot, starts(group))
                 )
@@ -206,14 +206,14 @@ class IndexSearchPipelineTest
     try {
       // Expected: top-k across three segments, computed from the fake alone.
       val segments = Seq(11L, 22L, 33L)
-      def expected(group: Int): Seq[Seq[(Double, Long, Long)]] =
+      def expected(group: Int): Seq[Seq[(Float, Long, Long)]] =
         (0 until groups(group)).map { query =>
           segments
             .flatMap { segment =>
               val fake = new Fake(segment)
               (0 until k).map(slot =>
                 (
-                  fake.scoreOf(query, slot, starts(group)).toDouble,
+                  fake.scoreOf(query, slot, starts(group)).toFloat,
                   segment,
                   fake.rowOf(query, slot, starts(group))
                 )
@@ -265,7 +265,7 @@ class IndexSearchPipelineTest
       groups.zip(starts).map { case (n, first) => matrix(n, first) }
     try {
       val segments = Seq(11L, 22L, 33L)
-      def collected(threads: Int): Seq[Seq[Seq[(Double, Long, Long)]]] = {
+      def collected(threads: Int): Seq[Seq[Seq[(Float, Long, Long)]]] = {
         val (onProgress, _) = progress()
         val mergers = groups.map(n => new TopKMerger(n, k, MetricType.L2))
         segments.foreach { segment =>
@@ -559,7 +559,7 @@ class IndexSearchPipelineTest
         ranking.run(m, merger, _ => ())
         ranking.finish(_ => ())
       } finally ranking.close()
-      // Double.compare puts NaN above every number: the worst L2 distance.
+      // Float.compare puts NaN above every number: the worst L2 distance.
       val ranked = merger.sort(1).results(1).map(_.score)
       ranked.size shouldBe k
       ranked.last.isNaN shouldBe true

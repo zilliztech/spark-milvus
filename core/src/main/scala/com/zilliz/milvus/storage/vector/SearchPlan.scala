@@ -46,17 +46,21 @@ object SearchPlan {
     * compressed ordinary object pointers a 12-byte header over an `Int`, two
     * `Long`s and a `Double`, 40 bytes once aligned, plus the queue's reference
     * to it. [[TopKMerger]] now lays each query's k slots out in three primitive
-    * arrays (score, segment, row offset), 24 bytes per candidate and no object;
+    * arrays (score, segment, row offset), 20 bytes per candidate and no object;
     * the constant keeps the old figure as headroom, so a task planned against a
     * budget stays under it. Counting the fields alone once said 28 and a task
     * planned against a budget it then overran.
     *
-    * Packing a query's answer for the shuffle adds up to 24 bytes per kept
-    * candidate. The primitive columns remain allocated for repeatable output,
-    * so this 48-byte figure covers both payloads while they coexist; array
-    * headers and per-query state are counted by [[TopKQueueBytes]].
+    * Packing a query's answer for the shuffle uses 12 bytes per kept candidate
+    * and keeps the historical 24-byte planning reserve. The primitive columns
+    * remain allocated for repeatable output, so this 48-byte figure covers both
+    * payloads while they coexist; array headers and per-query state are counted
+    * by [[TopKQueueBytes]].
     */
   val CandidateBytes: Int = 40 + 8
+
+  /** Historical packed-candidate reserve; independent of the wire format. */
+  val PackedCandidateReserveBytes: Int = 24
 
   /** What a query's top-k is planned to keep besides its candidates. The figure
     * dates from the priority queue and the backing array of sixteen references

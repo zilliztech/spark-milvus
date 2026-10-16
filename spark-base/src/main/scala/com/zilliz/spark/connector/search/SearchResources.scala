@@ -6,11 +6,7 @@ import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.sql.SparkSession
 
 import com.zilliz.milvus.storage.schema.VectorLayout
-import com.zilliz.milvus.storage.vector.{
-  CandidateBytes,
-  MachineResources,
-  SearchPlan
-}
+import com.zilliz.milvus.storage.vector.{MachineResources, SearchPlan}
 import com.zilliz.spark.connector.options.{MilvusOption, SearchLimits}
 
 /** The sizes of a search that are not the user's to know: the exact scan's base
@@ -256,7 +252,7 @@ private[search] object SearchResources {
   ): Long =
     if (pipelineGroups)
       2L * (layout.rowBytes.toLong + SearchPlan.QueryIdBytes + SearchPlan.TopKQueueBytes) +
-        3L * k * CandidateBytes.Width
+        3L * k * SearchPlan.PackedCandidateReserveBytes
     else SearchPlan.bytesPerQuery(layout, k)
 
   /** Convert the execution budget into the equivalent limit for core's

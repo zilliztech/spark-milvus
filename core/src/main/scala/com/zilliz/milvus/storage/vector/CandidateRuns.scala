@@ -83,7 +83,8 @@ final class CandidateRuns(
   private def compact(): Unit = {
     if (runs.size < 2) return
     val result = layout match {
-      case CandidateRuns.Plain   => CandidateBytes.merge(runs, k, metric)
+      case CandidateRuns.Plain =>
+        CandidateBytes.merge(runs, k, metric)
       case CandidateRuns.Carried => CarriedCandidates.merge(runs, k, metric)
     }
     // Keep the previous inputs intact until the complete output exists.

@@ -1,13 +1,13 @@
 package com.zilliz.milvus.storage.vector
 
-import java.lang.{Double => JavaDouble, Long => JavaLong}
+import java.lang.{Float => JavaFloat, Long => JavaLong}
 
 import com.zilliz.milvus.storage.schema.MetricType
 
 /** One candidate row for one query: where it is and what it scored.
   *
-  * `score` is the metric score Knowhere returned, widened to a Double and
-  * otherwise unchanged
+  * `score` is the metric score rounded to Float32 before local selection,
+  * shared by local and global ranking
   * (docs/design/projects/spark-milvus/architecture/vector-search.html section
   * 2.6). [[TopKMerger]] does not hold these: it holds the three numbers in
   * primitive arrays, and builds a `Candidate` only where a caller asks for one.
@@ -16,7 +16,7 @@ final case class Candidate(
     query: Int,
     segmentId: Long,
     rowOffset: Long,
-    score: Double
+    score: Float
 )
 
 object Candidate {
@@ -28,7 +28,7 @@ object Candidate {
   def ranking(metric: MetricType): Ordering[Candidate] = {
     val better = if (metric.smallerIsBetter) 1 else -1
     (left: Candidate, right: Candidate) => {
-      val score = JavaDouble.compare(left.score, right.score) * better
+      val score = JavaFloat.compare(left.score, right.score) * better
       if (score != 0) score
       else {
         val segment = JavaLong.compare(left.segmentId, right.segmentId)
@@ -78,7 +78,7 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
 
   // Query q owns slots [q * k, q * k + sizes(q)). While collecting, its root
   // is the worst; after sort finalizes the query, its slots are best first.
-  private val scores = new Array[Double](queries * k)
+  private val scores = new Array[Float](queries * k)
   private val segments = new Array[Long](queries * k)
   private val offsets = new Array[Long](queries * k)
   private val sizes = new Array[Int](queries)
@@ -91,9 +91,9 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
       slot: Int,
       segmentId: Long,
       rowOffset: Long,
-      score: Double
+      score: Float
   ): Int = {
-    val byScore = JavaDouble.compare(scores(slot), score) * better
+    val byScore = JavaFloat.compare(scores(slot), score) * better
     if (byScore != 0) byScore
     else {
       val bySegment = JavaLong.compare(segments(slot), segmentId)
@@ -161,7 +161,7 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
     * candidates of most segments do once a query has seen one segment; one that
     * is kept replaces the root and sinks.
     */
-  def add(query: Int, segmentId: Long, rowOffset: Long, score: Double): Unit = {
+  def add(query: Int, segmentId: Long, rowOffset: Long, score: Float): Unit = {
     require(
       query >= 0 && query < queries,
       s"Candidate names query $query of $queries"
@@ -192,13 +192,13 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
     * rejected whoever holds it; a caller with a segment's whole answer for a
     * query in hand asks this once per candidate before it looks anything up.
     */
-  def rejectsScore(query: Int, score: Double): Boolean = {
+  def rejectsScore(query: Int, score: Float): Boolean = {
     require(
       query >= 0 && query < queries,
       s"Query $query is outside the $queries queries"
     )
     sizes(query) == k &&
-    JavaDouble.compare(scores(worstSlot(query)), score) * better < 0
+    JavaFloat.compare(scores(worstSlot(query)), score) * better < 0
   }
 
   private var scanned = 0L
@@ -226,7 +226,7 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
   }
 
   /** The score of the worst candidate a full query keeps. */
-  def worstScore(query: Int): Double = {
+  def worstScore(query: Int): Float = {
     require(isFull(query), s"Query $query keeps fewer than $k candidates")
     scores(worstSlot(query))
   }
@@ -302,14 +302,22 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
     * its state: the merge stage requires ordered bytes. Repeated reads encode
     * the same candidates without sorting; each nonempty output owns its bytes.
     */
-  def takePacked(query: Int): Array[Byte] = {
+  def takePacked(query: Int, encoding: CandidateEncoding): Array[Byte] = {
     val size = querySize(query)
     if (!sorted(query))
       throw new IllegalStateException(
         s"Query $query must be sorted before packing"
       )
     if (size == 0) CandidateBytes.Empty
-    else CandidateBytes.writeColumns(segments, offsets, scores, query * k, size)
+    else
+      CandidateBytes.writeColumns(
+        segments,
+        offsets,
+        scores,
+        query * k,
+        size,
+        encoding
+      )
   }
 
   /** Where every kept candidate is, query by query, in no particular order:

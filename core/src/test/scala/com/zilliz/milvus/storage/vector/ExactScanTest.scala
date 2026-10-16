@@ -1,5 +1,6 @@
 package com.zilliz.milvus.storage.vector
 
+import java.lang.{Float => JavaFloat}
 import java.nio.ByteOrder
 import java.util.{BitSet, Random}
 import java.util.concurrent.{ExecutorService, Executors}
@@ -35,13 +36,13 @@ class ExactScanTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     }
 
   /** L2 as the connector's kernel computes it, the squared distance summed in
-    * double.
+    * Double, then rounded to the Float score used by every selection stage.
     */
   private object SquaredDistance extends RankingFunction {
     override def score(
         query: Array[Float],
         row: Array[Float]
-    ): java.lang.Double = {
+    ): JavaFloat = {
       var sum = 0.0
       var at = 0
       while (at < query.length) {
@@ -49,7 +50,7 @@ class ExactScanTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
         sum += difference * difference
         at += 1
       }
-      java.lang.Double.valueOf(sum)
+      JavaFloat.valueOf(sum.toFloat)
     }
   }
 
@@ -61,7 +62,7 @@ class ExactScanTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       queries: Seq[Array[Float]],
       k: Int,
       allocator: RootAllocator
-  ): (Seq[Seq[(Long, Double)]], Long) = {
+  ): (Seq[Seq[(Long, Float)]], Long) = {
     val dimension = vectors.head.length
     val layout = VectorLayout(VectorElementType.Float32, dimension)
     val batch =
@@ -78,7 +79,7 @@ class ExactScanTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
         def collected(
             collector: Option[ExecutorService],
             threads: Int
-        ): (Seq[Seq[(Long, Double)]], Long) = {
+        ): (Seq[Seq[(Long, Float)]], Long) = {
           val merger = new TopKMerger(queries.size, k, MetricType.L2)
           var rescans = 0L
           ExactScan.batch(
@@ -243,7 +244,7 @@ class ExactScanTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       for (count <- Seq(19, 20, 64)) withClue(s"$count queries: ") {
         val (kept, rescans) =
           searchL2(vectors, Seq.fill(count)(center), k = 2, allocator)
-        kept.distinct shouldBe Seq(Seq((2L, 0.25), (0L, 25.0)))
+        kept.distinct shouldBe Seq(Seq((2L, 0.25f), (0L, 25.0f)))
         rescans shouldBe count.toLong
       }
     }
@@ -278,8 +279,8 @@ class ExactScanTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       val (kept, rescans) = searchL2(vectors, queries, k = 2, allocator)
       rescans shouldBe 16L
       kept.zip(queries).foreach { case (rows, query) =>
-        if (query eq origin) rows shouldBe Seq((6L, 1.0), (7L, 10000.0))
-        else rows shouldBe Seq((2L, 0.25), (0L, 25.0))
+        if (query eq origin) rows shouldBe Seq((6L, 1.0f), (7L, 10000.0f))
+        else rows shouldBe Seq((2L, 0.25f), (0L, 25.0f))
       }
     }
   }
@@ -324,7 +325,7 @@ class ExactScanTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
           )
         }
         merger.sort(0).results(0).map(c => (c.rowOffset, c.score)) shouldBe
-          Seq((2L, 0.25), (1L, 1.0))
+          Seq((2L, 0.25f), (1L, 1.0f))
       } finally {
         matrix.close()
         second.close()
@@ -345,7 +346,7 @@ class ExactScanTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       val exact = queries.map(query =>
         vectors.indices
           .map(row =>
-            (row.toLong, SquaredDistance.score(query, vectors(row)).doubleValue)
+            (row.toLong, SquaredDistance.score(query, vectors(row)).floatValue)
           )
           .sortBy { case (row, score) => (score, row) }
           .take(10)
@@ -353,7 +354,7 @@ class ExactScanTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       kept.map(_.map(_._1)) shouldBe exact.map(_.map(_._1))
       // Knowhere's sums pair by pair, within float rounding of the exact ones.
       kept.flatten.zip(exact.flatten).foreach { case ((_, got), (_, want)) =>
-        got shouldBe want +- want * 1e-5
+        got shouldBe want +- want * 1e-5f
       }
     }
   }

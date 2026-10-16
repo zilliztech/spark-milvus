@@ -4,6 +4,7 @@ import java.lang.{Long => JavaLong}
 import java.util.HashSet
 import scala.reflect.ClassTag
 
+import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{DataFrame, Encoders, Row, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow
@@ -12,7 +13,12 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.HashPartitioner
 
 import com.zilliz.milvus.storage.schema.MetricType
-import com.zilliz.milvus.storage.vector.{CandidateBytes, CandidateRuns}
+import com.zilliz.milvus.storage.vector.{
+  CandidateBytes,
+  CandidateDictionary,
+  CandidateRuns,
+  SearchPlan
+}
 
 /** The merge stage both inputs share, and the hits a search gives back.
   *
@@ -82,7 +88,7 @@ private[search] object SearchMerge {
       k: Int,
       heapBytesPerTask: Long,
       layout: CandidateRuns.Layout = CandidateRuns.Plain,
-      candidateBytes: Long = CandidateBytes.Width.toLong,
+      candidateBytes: Long = SearchPlan.PackedCandidateReserveBytes.toLong,
       maxRuns: Int = MaxRuns
   ): Plan = {
     require(partitions > 0, s"The merge needs a partition: $partitions")
@@ -141,20 +147,26 @@ private[search] object SearchMerge {
       candidates: RDD[(Long, Array[Byte])],
       metric: MetricType,
       plan: Plan,
+      dictionary: Broadcast[CandidateDictionary],
       required: Option[Array[Long]] = None
-  ): DataFrame =
+  ): DataFrame = {
+    require(
+      plan.layout == CandidateRuns.Plain,
+      "A Milvus merge needs address candidates"
+    )
     spark.createDataFrame(
       byQuery[Row](
         spark,
         candidates,
         plan,
         metric,
-        rows,
+        (query, packed) => rows(query, packed, dictionary.value),
         required,
         id => Row(id, null, null)
       ),
       if (required.isEmpty) HitSchema else NullableHitSchema
     )
+  }
 
   /** The merge of either input: every query's answers merged into one, the rows
     * `rowsOf` makes of it, and with `required` the `absent` row of each id that
@@ -315,7 +327,11 @@ private[search] object SearchMerge {
   }
 
   /** One query's selected addresses, best first. */
-  def rows(query: Long, packed: Array[Byte]): Iterator[Row] = {
+  def rows(
+      query: Long,
+      packed: Array[Byte],
+      dictionary: CandidateDictionary
+  ): Iterator[Row] = {
     // One row at a time: at k=16,384 a query's answer is 16,384 rows, and a
     // vector of them per query is what the reduce task would otherwise hold
     // on top of the packed bytes.
@@ -323,7 +339,7 @@ private[search] object SearchMerge {
     Iterator.tabulate(count)(at =>
       Row(
         query,
-        CandidateBytes.segmentId(packed, at),
+        CandidateBytes.segmentId(packed, at, dictionary),
         CandidateBytes.rowOffset(packed, at)
       )
     )

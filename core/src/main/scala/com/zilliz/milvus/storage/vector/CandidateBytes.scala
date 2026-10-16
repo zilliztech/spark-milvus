@@ -7,23 +7,24 @@ import com.zilliz.milvus.storage.schema.MetricType
 
 /** One query's candidates as bytes: what a first-stage task sends on.
   *
-  * A candidate is a place and a score — segment id, row offset, the metric
-  * score — and a task sends at most k of them for each of its queries, best
-  * first under [[Candidate.ranking]]. Packing them into one array per query is
-  * what keeps the first stage's output at "queries × k × Width" bytes rather
-  * than that many JVM objects. The merge stage walks two answers directly, or
-  * selects the best heads of a larger batch
+  * A candidate is a place and a score — a global segment ordinal, an unsigned
+  * row offset and a Float score — and a task sends at most k of them for each
+  * of its queries, best first under [[Candidate.ranking]]. Packing them into
+  * one array per query is what keeps the first stage's output at "queries × k ×
+  * 12" bytes rather than that many JVM objects. The merge stage walks two
+  * answers directly, or selects the best heads of a larger batch
   * (docs/design/projects/spark-milvus/architecture/ candidate-merge.html).
   * Inputs and returned arrays are read-only; an empty side or a single run may
   * return an input array itself.
   *
+  * All runs in one merge use the same global dictionary, whose ordinal order
+  * preserves signed Long segment-id order without decoding during comparisons.
   * The bytes are big-endian, so what one executor writes another reads.
   */
 object CandidateBytes {
 
-  /** Segment id, row offset, score: the three fields a candidate is. */
-  val Width: Int = 8 + 8 + 8
-
+  val Width: Int = 12
+  val MaxRows: Long = 1L << 32
   val Empty: Array[Byte] = Array.emptyByteArray
 
   def count(packed: Array[Byte]): Int = {
@@ -34,28 +35,39 @@ object CandidateBytes {
     packed.length / Width
   }
 
-  def segmentId(packed: Array[Byte], at: Int): Long =
-    ByteBuffer.wrap(packed).getLong(at * Width)
+  def segmentId(
+      packed: Array[Byte],
+      at: Int,
+      dictionary: CandidateDictionary
+  ): Long = {
+    val encoded =
+      ByteBuffer.wrap(packed).getInt(at * Width).toLong & 0xffffffffL
+    dictionary.segmentId(encoded)
+  }
 
   def rowOffset(packed: Array[Byte], at: Int): Long =
-    ByteBuffer.wrap(packed).getLong(at * Width + 8)
+    ByteBuffer.wrap(packed).getInt(at * Width + 4).toLong & 0xffffffffL
 
-  def score(packed: Array[Byte], at: Int): Double =
-    ByteBuffer.wrap(packed).getDouble(at * Width + 16)
+  def score(packed: Array[Byte], at: Int): Float =
+    ByteBuffer.wrap(packed).getFloat(at * Width + 8)
 
   /** The candidates in the order they were packed, best first. */
-  def foreach(packed: Array[Byte])(
-      each: (Long, Long, Double) => Unit
+  def foreach(
+      packed: Array[Byte],
+      dictionary: CandidateDictionary
+  )(
+      each: (Long, Long, Float) => Unit
   ): Unit = {
     val buffer = ByteBuffer.wrap(packed)
     val size = count(packed)
     var at = 0
     while (at < size) {
       val offset = at * Width
+      val encoded = buffer.getInt(offset).toLong & 0xffffffffL
       each(
-        buffer.getLong(offset),
-        buffer.getLong(offset + 8),
-        buffer.getDouble(offset + 16)
+        dictionary.segmentId(encoded),
+        buffer.getInt(offset + 4).toLong & 0xffffffffL,
+        buffer.getFloat(offset + 8)
       )
       at += 1
     }
@@ -68,21 +80,26 @@ object CandidateBytes {
   private[vector] def writeColumns(
       segments: Array[Long],
       offsets: Array[Long],
-      scores: Array[Double],
+      scores: Array[Float],
       base: Int,
-      size: Int
+      size: Int,
+      encoding: CandidateEncoding
   ): Array[Byte] = {
     require(size >= 0, s"$size candidates")
     if (size == 0) return Empty
-    val packed = new Array[Byte](checkedLength(size.toLong * Width))
+    val packed =
+      new Array[Byte](checkedLength(size.toLong * Width))
     val buffer = ByteBuffer.wrap(packed)
     var at = 0
     while (at < size) {
       val from = base + at
-      val offset = at * Width
-      buffer.putLong(offset, segments(from))
-      buffer.putLong(offset + 8, offsets(from))
-      buffer.putDouble(offset + 16, scores(from))
+      encoding.write(
+        buffer,
+        at * Width,
+        segments(from),
+        offsets(from),
+        scores(from)
+      )
       at += 1
     }
     packed
@@ -103,13 +120,14 @@ object CandidateBytes {
   ): Array[Byte] = {
     require(k > 0, s"topK must be positive: $k")
     val sign = if (metric.smallerIsBetter) 1 else -1
+    val width = Width
     val leftSize = count(left)
     val rightSize = count(right)
-    if (rightSize == 0) return if (leftSize <= k) left else left.take(k * Width)
+    if (rightSize == 0) return if (leftSize <= k) left else left.take(k * width)
     if (leftSize == 0)
-      return if (rightSize <= k) right else right.take(k * Width)
+      return if (rightSize <= k) right else right.take(k * width)
     val size = math.min(k.toLong, leftSize.toLong + rightSize).toInt
-    val packed = new Array[Byte](checkedLength(size.toLong * Width))
+    val packed = new Array[Byte](checkedLength(size.toLong * width))
     val leftBuffer = ByteBuffer.wrap(left)
     val rightBuffer = ByteBuffer.wrap(right)
     var leftAt = 0
@@ -123,14 +141,14 @@ object CandidateBytes {
           CandidateHeads.compare(
             sign,
             leftBuffer,
-            leftAt * Width,
+            leftAt * width,
             rightBuffer,
-            rightAt * Width
+            rightAt * width
           ) <= 0
       val source = if (takeLeft) left else right
-      val from = (if (takeLeft) leftAt else rightAt) * Width
-      val to = at * Width
-      System.arraycopy(source, from, packed, to, Width)
+      val from = (if (takeLeft) leftAt else rightAt) * width
+      val to = at * width
+      System.arraycopy(source, from, packed, to, width)
       if (takeLeft) leftAt += 1 else rightAt += 1
       at += 1
     }
@@ -154,12 +172,13 @@ object CandidateBytes {
     if (runs.size == 2) return merge(runs(0), runs(1), k, metric)
 
     val size = math.min(k.toLong, total).toInt
-    val packed = new Array[Byte](checkedLength(size.toLong * Width))
+    val width = Width
+    val packed = new Array[Byte](checkedLength(size.toLong * width))
     val buffers = runs.iterator.map(ByteBuffer.wrap).toArray
-    val heads = new CandidateHeads(buffers, metric, (_, _) => Width)
+    val heads = new CandidateHeads(buffers, metric, (_, _) => width)
     var at = 0
     while (at < size) {
-      System.arraycopy(runs(heads.run), heads.offset, packed, at * Width, Width)
+      System.arraycopy(runs(heads.run), heads.offset, packed, at * width, width)
       at += 1
       if (at < size) heads.advance()
     }
