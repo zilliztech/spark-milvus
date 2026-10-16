@@ -19,6 +19,7 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
+CACHE_FORMAT = 2
 ENGINES = ("milvus-storage", "knowhere")
 PLATFORMS = {"linux-x86_64": "x86_64", "linux-aarch64": "aarch64"}
 EXPLICIT_INPUTS = (
@@ -110,10 +111,6 @@ def toolchain_identity(platform):
         "g++": ["g++-12", "--version"],
         "gfortran": ["gfortran-12", "--version"],
         "compilerTarget": ["gcc-12", "-dumpmachine"],
-        # Native dependency recipes can select instructions from the host.
-        # This contains compiler feature choices, not changing CPU frequencies.
-        "compilerNativeTarget": ["gcc-12", "-march=native" if platform == "linux-x86_64" else "-mcpu=native",
-                                 "-Q", "--help=target"],
         "cmake": ["cmake", "--version"],
         "conan": ["conan", "--version"],
         "rustc": ["rustc", "--version", "--verbose"],
@@ -140,7 +137,7 @@ def fingerprint(root, plan, platform, identity):
             and identity["glibc"] == "glibc " + row["glibc"] and row["libc"] == "glibc",
             "Native cache runner does not match the Ubuntu 22.04 glibc build baseline")
     inputs = {
-        "cacheFormat": 1,
+        "cacheFormat": CACHE_FORMAT,
         "platform": platform,
         "runner": row["runner"],
         "baseline": {name: row[name] for name in ("libc", "glibc", "glibcxx", "cxxabi")},
@@ -153,11 +150,14 @@ def fingerprint(root, plan, platform, identity):
         return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     digest = identity_digest(inputs)
+    # Profiles invalidate complete bundles. Dependency caches retain multiple
+    # Conan package IDs (including declared CPU targets and thread capacity),
+    # while ccache distinguishes compiler flags and Cargo caches downloads.
     toolchain_digest = identity_digest({name: inputs[name] for name in
                                        ("cacheFormat", "platform", "runner", "baseline", "toolchain")})
-    return {"schemaVersion": 1, "key": f"native-bundle-v1-{platform}-{digest}",
+    return {"schemaVersion": 1, "key": f"native-bundle-v{CACHE_FORMAT}-{platform}-{digest}",
             "keyDigest": digest, "toolchainDigest": toolchain_digest,
-            "dependencyKeyPrefix": f"native-deps-v1-{platform}-{toolchain_digest}-", "inputs": inputs}
+            "dependencyKeyPrefix": f"native-deps-v{CACHE_FORMAT}-{platform}-{toolchain_digest}-", "inputs": inputs}
 
 
 def main():

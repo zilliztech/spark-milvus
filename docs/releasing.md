@@ -207,7 +207,10 @@ automatically. Cache growth and build size can require more capacity; a runner
 that fails the capacity check must be provisioned with enough space.
 
 Native caching has three levels, all separated by platform, OS baseline and
-actual toolchain identity:
+actual toolchain identity. Cache format v2 uses the declared compilation targets
+and fixed OpenBLAS capacity; it does not key on the random runner CPU. The
+build provenance still records that CPU. The format change requires an initial
+rebuild and does not fall back to older complete bundles:
 
 - The complete native JAR and checksum sidecar use an exact fingerprint of the
   pinned engines, native build inputs and toolchain. Connector-only JVM changes
