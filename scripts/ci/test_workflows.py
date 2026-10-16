@@ -1,7 +1,9 @@
 """Release must traverse every native and consumer gate, even after PR tuning."""
 
+import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -20,7 +22,8 @@ def workflow(name):
 
 class WorkflowGateTest(unittest.TestCase):
     def release_identity(self, tag):
-        script = workflow("release.yml")["jobs"]["identity"]["steps"][-1]["run"]
+        steps = workflow("release.yml")["jobs"]["identity"]["steps"]
+        script = next(step for step in steps if step.get("id") == "identity")["run"]
         code = script.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "github-output"
@@ -45,9 +48,11 @@ class WorkflowGateTest(unittest.TestCase):
     def test_release_requires_full_ci_and_its_candidate(self):
         release = workflow("release.yml")
         self.assertEqual(release["on"]["push"]["tags"], ["v2.*"])
+        self.assertEqual(release["permissions"], {"actions": "read", "contents": "read"})
         identity = release["jobs"]["identity"]
-        self.assertEqual(set(identity["outputs"]), {"version", "mode"})
-        identity_script = identity["steps"][-1]["run"]
+        self.assertEqual(set(identity["outputs"]), {"version", "mode", "native_source_run_id"})
+        identity_script = next(step for step in identity["steps"]
+                               if step.get("id") == "identity")["run"]
         self.assertIn("-central-test\\.\\d+", identity_script)
         self.assertLess(identity_script.index("if central_test"), identity_script.index("elif release"))
         self.assertIn("reserved_test_name", identity_script)
@@ -57,6 +62,8 @@ class WorkflowGateTest(unittest.TestCase):
         self.assertEqual(validate["uses"], "./.github/workflows/ci.yml")
         self.assertEqual(validate["with"]["full_validation"], "true")
         self.assertEqual(validate["with"]["version"], "${{ needs.identity.outputs.version }}")
+        self.assertEqual(validate["with"]["native_source_run_id"],
+                         "${{ needs.identity.outputs.native_source_run_id }}")
         publish = release["jobs"]["publish"]
         self.assertIn("validate", publish["needs"])
         self.assertEqual(publish["if"], "needs.identity.outputs.mode == 'publish'")
@@ -84,6 +91,78 @@ class WorkflowGateTest(unittest.TestCase):
         })
         self.assertNotIn("CENTRAL_USERNAME", signing["env"])
         self.assertNotIn("GPG_PRIVATE_KEY", publication["env"])
+
+    def test_release_native_source_is_exact_trusted_successful_push(self):
+        release = workflow("release.yml")
+        identity = release["jobs"]["identity"]
+        source = next(step for step in identity["steps"] if step.get("id") == "native-source")
+        self.assertEqual(source["env"], {
+            "GH_TOKEN": "${{ github.token }}",
+            "RELEASE_REPOSITORY": "${{ github.repository }}",
+            "RELEASE_SHA": "${{ github.sha }}",
+        })
+        script = source["run"]
+        for fragment in (
+                "actions/workflows/ci.yml/runs", "branch=refactor/v2", "event=push",
+                "status=success", 'head_sha="$RELEASE_SHA"',
+                "run.get('path') == '.github/workflows/ci.yml'",
+                "run.get('head_branch') == 'refactor/v2'",
+                "run.get('head_sha') == sha", "run.get('status') == 'completed'",
+                "run.get('conclusion') == 'success'", "native-linux-x86_64",
+                "native-linux-aarch64", "artifact.get('expired') is False",
+                "artifact.get('workflow_run', {}).get('id') == run_id"):
+            self.assertIn(fragment, script)
+        self.assertNotIn("secrets.", str(source))
+
+    def test_release_native_source_resolver_accepts_only_matching_artifacts(self):
+        source = next(step for step in workflow("release.yml")["jobs"]["identity"]["steps"]
+                      if step.get("id") == "native-source")
+        sha = "a" * 40
+        repository = "example/spark-milvus"
+        run_id = 12345
+        run = {
+            "id": run_id, "created_at": "2026-10-16T00:00:00Z",
+            "repository": {"full_name": repository},
+            "head_repository": {"full_name": repository},
+            "path": ".github/workflows/ci.yml", "event": "push",
+            "head_branch": "refactor/v2", "head_sha": sha,
+            "status": "completed", "conclusion": "success",
+        }
+        artifact_run = {"id": run_id, "head_branch": "refactor/v2", "head_sha": sha}
+        artifacts = [{
+            "name": name, "expired": False, "size_in_bytes": 1,
+            "workflow_run": artifact_run,
+        } for name in ("native-linux-x86_64", "native-linux-aarch64")]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runs_path = root / "runs.json"
+            artifacts_path = root / "artifacts.json"
+            output = root / "output"
+            runs_path.write_text(json.dumps({"workflow_runs": [run]}))
+            artifacts_path.write_text(json.dumps({
+                "total_count": len(artifacts), "artifacts": artifacts}))
+            fake_gh = root / "gh"
+            fake_gh.write_text(
+                '#!/bin/sh\ncase "$*" in *"/artifacts"*) cat "$FAKE_ARTIFACTS";; '
+                '*) cat "$FAKE_RUNS";; esac\n')
+            fake_gh.chmod(0o755)
+            environment = dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"],
+                               GH_TOKEN="token", RELEASE_REPOSITORY=repository,
+                               RELEASE_SHA=sha, RUNNER_TEMP=str(root),
+                               GITHUB_OUTPUT=str(output), FAKE_RUNS=str(runs_path),
+                               FAKE_ARTIFACTS=str(artifacts_path))
+            result = subprocess.run(["bash", "-c", source["run"]], cwd=ROOT,
+                                    env=environment, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(output.read_text(), f"run_id={run_id}\n")
+
+            run["head_sha"] = "b" * 40
+            runs_path.write_text(json.dumps({"workflow_runs": [run]}))
+            output.unlink()
+            result = subprocess.run(["bash", "-c", source["run"]], cwd=ROOT,
+                                    env=environment, text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(output.exists())
 
     def test_central_test_validates_downloads_and_drops_without_publishing(self):
         release = workflow("release.yml")
@@ -155,9 +234,15 @@ class WorkflowGateTest(unittest.TestCase):
         self.assertEqual(ci["on"]["workflow_call"]["inputs"]["full_validation"], {
             "type": "boolean", "default": "true",
         })
+        self.assertEqual(ci["on"]["workflow_call"]["inputs"]["native_source_run_id"], {
+            "type": "string", "default": "",
+        })
+        self.assertEqual(ci["permissions"], {"actions": "read", "contents": "read"})
         self.assertIn("workflow_dispatch", ci["on"])
         condition = "github.event_name != 'pull_request' || inputs.full_validation == true"
         self.assertEqual(ci["jobs"]["artifacts"]["with"]["build_native"], "${{ " + condition + " }}")
+        self.assertEqual(ci["jobs"]["artifacts"]["with"]["native_source_run_id"],
+                         "${{ inputs.native_source_run_id }}")
         self.assertEqual(ci["jobs"]["consumer"]["if"], condition)
         self.assertEqual(ci["jobs"]["consumer"]["needs"], "artifacts")
         for job in ("artifacts", "build-and-test", "native-build-driver", "integration-helm"):
@@ -168,6 +253,10 @@ class WorkflowGateTest(unittest.TestCase):
         self.assertEqual(build["on"]["workflow_call"]["inputs"]["build_native"], {
             "type": "boolean", "default": "true",
         })
+        self.assertEqual(build["on"]["workflow_call"]["inputs"]["native_source_run_id"], {
+            "type": "string", "default": "",
+        })
+        self.assertEqual(build["permissions"], {"actions": "read", "contents": "read"})
         self.assertNotIn("if", build["jobs"]["jvm"])
         for name in ("native", "native-cpu", "candidate"):
             self.assertEqual(build["jobs"][name]["if"], "inputs.build_native")
@@ -202,24 +291,43 @@ class WorkflowGateTest(unittest.TestCase):
         prepare = by_name["Prepare native toolchain"]
         fingerprint = by_name["Fingerprint native inputs and the prepared toolchain"]
         bundle = by_name["Restore the exact native bundle"]
+        branch_bundle = by_name["Restore the exact-commit branch native artifact"]
+        branch_verify = by_name["Verify the exact-commit branch native artifact"]
         dependencies = by_name["Restore compatible native dependencies"]
         build = by_name["Build both native engines on a bundle cache miss"]
         audit = by_name["Audit the native ABI on every build and cache hit"]
         trim = by_name["Trim dependency caches before saving"]
         self.assertLess(steps.index(prepare), steps.index(fingerprint))
         self.assertLess(steps.index(fingerprint), steps.index(bundle))
-        self.assertLess(steps.index(bundle), steps.index(dependencies))
+        self.assertLess(steps.index(bundle), steps.index(branch_bundle))
+        self.assertLess(steps.index(branch_bundle), steps.index(branch_verify))
+        self.assertLess(steps.index(branch_verify), steps.index(dependencies))
         self.assertNotIn("restore-keys", bundle["with"])
         self.assertEqual(bundle["with"]["key"], "${{ steps.fingerprint.outputs.key }}")
         self.assertEqual(len(bundle["with"]["path"].splitlines()), 2)
         self.assertNotIn("abi.json", bundle["with"]["path"])
-        self.assertEqual(build["if"], "steps.bundle-cache.outputs.cache-hit != 'true'")
+        available = ("steps.bundle-cache.outputs.cache-hit != 'true' && "
+                     "steps.branch_bundle_verify.outcome != 'success'")
+        self.assertEqual(build["if"], available)
         self.assertEqual(dependencies["if"], build["if"])
+        self.assertEqual(branch_bundle["if"],
+                         "steps.bundle-cache.outputs.cache-hit != 'true' && inputs.native_source_run_id != ''")
+        self.assertEqual(branch_bundle["uses"], "actions/download-artifact@v4")
+        self.assertEqual(branch_bundle["with"], {
+            "name": "native-${{ matrix.platform }}",
+            "path": "target/native-${{ matrix.platform }}",
+            "github-token": "${{ github.token }}",
+            "repository": "${{ github.repository }}",
+            "run-id": "${{ inputs.native_source_run_id }}",
+        })
+        self.assertEqual(branch_verify["if"], "steps.branch-bundle.outcome == 'success'")
+        self.assertIn("scripts/ci/verify_native_reuse.py", branch_verify["run"])
+        self.assertIn("--expected-cache-inputs", branch_verify["run"])
         self.assertEqual(dependencies["with"]["restore-keys"], "${{ steps.fingerprint.outputs.dependency_key_prefix }}")
         self.assertNotIn("if", audit)
         self.assertIn("scripts/check-native-abi.py", audit["run"])
         self.assertLess(steps.index(build), steps.index(audit))
-        self.assertEqual(trim["if"], build["if"])
+        self.assertEqual(trim["if"], "steps.native_build.outcome == 'success'")
         self.assertLess(steps.index(audit), steps.index(trim))
         self.assertIn("conan cache clean '*' --build --source --download --temp", trim["run"])
         self.assertIn("ccache --cleanup", trim["run"])

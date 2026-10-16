@@ -9,12 +9,16 @@ on:
       build_native:
         type: boolean
         default: true
+      native_source_run_id:
+        type: string
+        default: ''
     outputs:
       candidate_artifact:
         description: Maven candidate and its immutable release manifest
         value: ${{ jobs.candidate.outputs.artifact }}
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -112,8 +116,28 @@ jobs:
             target/native-${{ matrix.platform }}/milvus-native-${{ matrix.platform }}.jar
             target/native-${{ matrix.platform }}/milvus-native-${{ matrix.platform }}.jar.properties
           key: ${{ steps.fingerprint.outputs.key }}
+      - name: Restore the exact-commit branch native artifact
+        id: branch-bundle
+        if: steps.bundle-cache.outputs.cache-hit != 'true' && inputs.native_source_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: native-${{ matrix.platform }}
+          path: target/native-${{ matrix.platform }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.native_source_run_id }}
+      - name: Verify the exact-commit branch native artifact
+        id: branch_bundle_verify
+        if: steps.branch-bundle.outcome == 'success'
+        env:
+          NATIVE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          python3 scripts/ci/verify_native_reuse.py \
+            --artifact "target/native-$NATIVE_PLATFORM" \
+            --expected-cache-inputs "$RUNNER_TEMP/native-cache-inputs.json" \
+            --platform "$NATIVE_PLATFORM"
       - name: Restore compatible native dependencies
-        if: steps.bundle-cache.outputs.cache-hit != 'true'
+        if: steps.bundle-cache.outputs.cache-hit != 'true' && steps.branch_bundle_verify.outcome != 'success'
         uses: actions/cache@v4
         with:
           # Conan auth lives outside p/. Cargo credentials live outside these
@@ -126,7 +150,8 @@ jobs:
           key: ${{ steps.fingerprint.outputs.dependency_key_prefix }}${{ steps.fingerprint.outputs.key_digest }}
           restore-keys: ${{ steps.fingerprint.outputs.dependency_key_prefix }}
       - name: Build both native engines on a bundle cache miss
-        if: steps.bundle-cache.outputs.cache-hit != 'true'
+        id: native_build
+        if: steps.bundle-cache.outputs.cache-hit != 'true' && steps.branch_bundle_verify.outcome != 'success'
         env:
           NATIVE_PLATFORM: ${{ matrix.platform }}
           NATIVE_JOBS: ${{ matrix.build_jobs }}
@@ -145,7 +170,7 @@ jobs:
             --output "target/native-$NATIVE_PLATFORM/abi.json"
           cp "$RUNNER_TEMP/native-cache-inputs.json" "target/native-$NATIVE_PLATFORM/cache-inputs.json"
       - name: Trim dependency caches before saving
-        if: steps.bundle-cache.outputs.cache-hit != 'true'
+        if: steps.native_build.outcome == 'success'
         run: |
           conan cache clean '*' --build --source --download --temp
           ccache --cleanup

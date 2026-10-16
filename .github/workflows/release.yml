@@ -5,6 +5,7 @@ on:
     tags: ['v2.*']
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -17,6 +18,7 @@ jobs:
     outputs:
       version: ${{ steps.identity.outputs.version }}
       mode: ${{ steps.identity.outputs.mode }}
+      native_source_run_id: ${{ steps.native-source.outputs.run_id }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -43,6 +45,67 @@ jobs:
               print('version=' + version, file=out)
               print('mode=' + mode, file=out)
           PY
+      - id: native-source
+        name: Require native artifacts from exact successful branch CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          runs="$RUNNER_TEMP/native-source-runs.json"
+          artifacts="$RUNNER_TEMP/native-source-artifacts.json"
+          gh api --method GET \
+            "repos/$RELEASE_REPOSITORY/actions/workflows/ci.yml/runs" \
+            -f branch=refactor/v2 -f event=push -f status=success \
+            -f head_sha="$RELEASE_SHA" -f per_page=100 > "$runs"
+          source_run_id="$(python3 - "$runs" <<'PY'
+          import json, os, sys
+
+          repository = os.environ['RELEASE_REPOSITORY']
+          sha = os.environ['RELEASE_SHA']
+          runs = json.load(open(sys.argv[1], encoding='utf-8')).get('workflow_runs', [])
+          matches = [run for run in runs if
+                     run.get('repository', {}).get('full_name') == repository and
+                     run.get('head_repository', {}).get('full_name') == repository and
+                     run.get('path') == '.github/workflows/ci.yml' and
+                     run.get('event') == 'push' and
+                     run.get('head_branch') == 'refactor/v2' and
+                     run.get('head_sha') == sha and
+                     run.get('status') == 'completed' and
+                     run.get('conclusion') == 'success']
+          if not matches:
+              raise SystemExit(
+                  'Release requires a successful refactor/v2 push CI run for the exact tag commit')
+          matches.sort(key=lambda run: (run.get('created_at', ''), int(run['id'])), reverse=True)
+          print(matches[0]['id'])
+          PY
+          )"
+          gh api --method GET \
+            "repos/$RELEASE_REPOSITORY/actions/runs/$source_run_id/artifacts" \
+            -f per_page=100 > "$artifacts"
+          SOURCE_RUN_ID="$source_run_id" python3 - "$artifacts" <<'PY'
+          import json, os, sys
+
+          data = json.load(open(sys.argv[1], encoding='utf-8'))
+          artifacts = data.get('artifacts', [])
+          if data.get('total_count') != len(artifacts):
+              raise SystemExit('Native source run has too many artifacts to verify in one response')
+          run_id = int(os.environ['SOURCE_RUN_ID'])
+          sha = os.environ['RELEASE_SHA']
+          for name in ('native-linux-x86_64', 'native-linux-aarch64'):
+              matches = [artifact for artifact in artifacts if
+                         artifact.get('name') == name and
+                         artifact.get('expired') is False and
+                         artifact.get('size_in_bytes', 0) > 0 and
+                         artifact.get('workflow_run', {}).get('id') == run_id and
+                         artifact.get('workflow_run', {}).get('head_branch') == 'refactor/v2' and
+                         artifact.get('workflow_run', {}).get('head_sha') == sha]
+              if len(matches) != 1:
+                  raise SystemExit('Native source run lacks one unexpired ' + name + ' artifact')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as out:
+              print('run_id=' + str(run_id), file=out)
+          PY
 
   validate:
     needs: identity
@@ -50,6 +113,7 @@ jobs:
     with:
       version: ${{ needs.identity.outputs.version }}
       full_validation: true
+      native_source_run_id: ${{ needs.identity.outputs.native_source_run_id }}
 
   publish:
     needs: [identity, validate]
