@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       version: ${{ steps.identity.outputs.version }}
+      mode: ${{ steps.identity.outputs.mode }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -27,10 +28,20 @@ jobs:
           python3 - <<'PY'
           import os, re
           tag = os.environ['RELEASE_TAG']
-          if not re.fullmatch(r'v2\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?', tag):
-              raise SystemExit('Release requires a v2.x.y version tag')
+          central_test = re.fullmatch(r'v(2\.\d+\.\d+-central-test\.\d+)', tag)
+          release = re.fullmatch(
+              r'v(2\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?)', tag)
+          reserved_test_name = re.search(r'[.-]central[.-]test', tag, re.IGNORECASE)
+          if central_test:
+              version, mode = central_test.group(1), 'test'
+          elif release and not reserved_test_name:
+              version, mode = release.group(1), 'publish'
+          else:
+              raise SystemExit(
+                  'Release requires v2.x.y; a Central test requires v2.x.y-central-test.<digits>')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
-              print('version=' + tag[1:], file=out)
+              print('version=' + version, file=out)
+              print('mode=' + mode, file=out)
           PY
 
   validate:
@@ -42,9 +53,13 @@ jobs:
 
   publish:
     needs: [identity, validate]
+    if: needs.identity.outputs.mode == 'publish'
     runs-on: ubuntu-22.04
     timeout-minutes: 150
     environment: maven-central
+    concurrency:
+      group: maven-central-${{ github.repository }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v5
         with:
@@ -61,21 +76,23 @@ jobs:
           name: ${{ needs.validate.outputs.candidate_artifact }}
           path: candidate
       - name: Verify the tested candidate before accessing credentials
+        env:
+          RELEASE_VERSION: ${{ needs.identity.outputs.version }}
         run: |
           python3 scripts/release.py verify --candidate candidate
           python3 - <<'PY'
-          import json, subprocess
+          import json, os, subprocess
           manifest = json.load(open('candidate/release-manifest.json'))
           source = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
           if manifest['plan']['sourceSha'] != source:
               raise SystemExit('Candidate source commit differs from the release tag')
+          if manifest['version'] != os.environ['RELEASE_VERSION']:
+              raise SystemExit('Candidate version differs from the release tag')
           PY
-      - name: Sign, validate and publish the tested files
+      - name: Sign the tested files
         env:
           GPG_PRIVATE_KEY: ${{ secrets.PGP_SECRET }}
           GPG_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
-          CENTRAL_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
-          CENTRAL_TOKEN: ${{ secrets.SONATYPE_PASSWORD }}
         run: |
           export GNUPGHOME="$RUNNER_TEMP/release-gnupg"
           install -d -m 700 "$GNUPGHOME"
@@ -83,6 +100,11 @@ jobs:
           python3 scripts/release.py import-key
           unset GPG_PRIVATE_KEY
           python3 scripts/release.py bundle --candidate candidate --output central.zip
+      - name: Validate and publish the signed files
+        env:
+          CENTRAL_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
+          CENTRAL_TOKEN: ${{ secrets.SONATYPE_PASSWORD }}
+        run: |
           python3 scripts/release.py publish --bundle central.zip
       - uses: actions/upload-artifact@v4
         with:
@@ -92,8 +114,130 @@ jobs:
           compression-level: 0
           retention-days: 30
 
+  central-test:
+    needs: [identity, validate]
+    if: needs.identity.outputs.mode == 'test'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    environment: maven-central
+    concurrency:
+      group: maven-central-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Require the fully validated candidate
+        env:
+          CANDIDATE_ARTIFACT: ${{ needs.validate.outputs.candidate_artifact }}
+        run: test -n "$CANDIDATE_ARTIFACT"
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.validate.outputs.candidate_artifact }}
+          path: candidate
+      - name: Verify the tested candidate before accessing credentials
+        env:
+          RELEASE_VERSION: ${{ needs.identity.outputs.version }}
+        run: |
+          python3 scripts/release.py verify --candidate candidate
+          python3 - <<'PY'
+          import json, os, subprocess
+          manifest = json.load(open('candidate/release-manifest.json'))
+          source = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          if manifest['plan']['sourceSha'] != source:
+              raise SystemExit('Candidate source commit differs from the Central test tag')
+          if manifest['version'] != os.environ['RELEASE_VERSION']:
+              raise SystemExit('Candidate version differs from the Central test tag')
+          PY
+      - name: Sign the tested files
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.PGP_SECRET }}
+          GPG_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
+        run: |
+          export GNUPGHOME="$RUNNER_TEMP/release-gnupg"
+          install -d -m 700 "$GNUPGHOME"
+          trap 'gpgconf --kill gpg-agent; rm -rf "$GNUPGHOME"' EXIT
+          python3 scripts/release.py import-key
+          unset GPG_PRIVATE_KEY
+          python3 scripts/release.py bundle --candidate candidate --output central.zip
+      - name: Validate the signed files without publishing
+        id: central_test
+        env:
+          CENTRAL_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
+          CENTRAL_TOKEN: ${{ secrets.SONATYPE_PASSWORD }}
+        run: |
+          python3 scripts/release.py test-publish --bundle central.zip --candidate candidate \
+            --output central-candidate --report central-test-report.json \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Retry Central deployment cleanup
+        if: always() && steps.central_test.outputs.deployment_id != ''
+        env:
+          CENTRAL_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
+          CENTRAL_TOKEN: ${{ secrets.SONATYPE_PASSWORD }}
+          DEPLOYMENT_ID: ${{ steps.central_test.outputs.deployment_id }}
+        run: |
+          python3 scripts/release.py drop --deployment-id "$DEPLOYMENT_ID" \
+            --report central-test-report.json
+      - name: Upload the authenticated Central candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: central-test-candidate-${{ needs.identity.outputs.version }}
+          path: central-candidate/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+      - name: Preserve the Central test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: central-test-report-${{ needs.identity.outputs.version }}
+          path: central-test-report.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  central-test-consumer:
+    needs: [identity, validate, central-test]
+    if: needs.identity.outputs.mode == 'test'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: sbt/setup-sbt@v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: central-test-candidate-${{ needs.identity.outputs.version }}
+          path: central-test-input
+      - name: Verify the authenticated Central candidate
+        run: python3 scripts/release.py verify --candidate central-test-input
+      - name: Consume the authenticated Central files with fresh caches
+        run: |
+          python3 scripts/ci/consumer_smoke.py \
+            --candidate central-test-input \
+            --line 4.0 --platform linux-x86_64 --output central-test-consumer-results
+      - name: Preserve Central test consumer evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: central-test-consumer
+          path: central-test-consumer-results/
+          if-no-files-found: warn
+          retention-days: 30
+
   public-consumer:
-    needs: [validate, publish]
+    needs: [identity, validate, publish]
+    if: needs.identity.outputs.mode == 'publish'
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Stage, verify and publish an immutable Maven release candidate.
 
-Only ``publish`` changes Central; ``download-public`` verifies its public files.
-Candidate packaging and verification use the exact bytes tested by consumers.
+``publish`` promotes a deployment; ``test-publish`` creates and drops a private
+deployment after verification. Candidate packaging and verification use the
+exact bytes tested by consumers.
 """
 
 import argparse
@@ -29,6 +30,7 @@ MATRIX = ROOT / "scripts/release-matrix.json"
 PROJECT_URL = "https://github.com/zilliztech/spark-milvus"
 CENTRAL = "https://central.sonatype.com/api/v1/publisher"
 CENTRAL_REPOSITORY = "https://repo.maven.apache.org/maven2"
+SIGNING_FINGERPRINT = "F0004DED15D9C011F344D6A8526AB23093F3D44A"
 COMPATIBILITY = "META-INF/milvus-native/compatibility.properties"
 VERSION = re.compile(r"2\.\d+\.\d+(?:-[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*)?")
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -413,11 +415,37 @@ def verify(candidate):
     return manifest
 
 
+def secret_primary_key():
+    result = subprocess.run(
+        ["gpg", "--batch", "--with-colons", "--fingerprint", "--list-secret-keys"],
+        check=True, capture_output=True, text=True)
+    fingerprints = []
+    expecting_fingerprint = False
+    for line in result.stdout.splitlines():
+        fields = line.split(":")
+        kind = fields[0] if fields else ""
+        if kind == "sec":
+            require(not expecting_fingerprint, "Secret primary key is missing its fingerprint")
+            expecting_fingerprint = True
+        elif kind == "fpr" and expecting_fingerprint:
+            require(len(fields) > 9 and re.fullmatch(r"(?:[0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})", fields[9]),
+                    "Secret primary key has an invalid fingerprint")
+            fingerprints.append(fields[9].upper())
+            expecting_fingerprint = False
+    require(not expecting_fingerprint, "Secret primary key is missing its fingerprint")
+    require(len(fingerprints) == 1,
+            f"Expected exactly one secret primary key, found {len(fingerprints)}")
+    require(fingerprints[0] == SIGNING_FINGERPRINT,
+            f"Secret primary key does not match release fingerprint {SIGNING_FINGERPRINT}")
+    return fingerprints[0]
+
+
 def bundle(candidate, output):
     manifest = verify(candidate)
     require(not output.exists(), "Central bundle already exists")
     passphrase = os.environ.get("GPG_PASSPHRASE")
     require(passphrase is not None, "GPG_PASSPHRASE must be set for signing")
+    signing_key = secret_primary_key()
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="central-sign-") as directory:
         repository = Path(directory) / "repository"
@@ -425,8 +453,10 @@ def bundle(candidate, output):
         for file in manifest["artifacts"]:
             path = repository / file["path"]
             subprocess.run(["gpg", "--batch", "--yes", "--pinentry-mode", "loopback", "--passphrase-fd", "0",
-                            "--armor", "--detach-sign", "--output", str(path) + ".asc", str(path)],
+                            "--local-user", signing_key, "--armor", "--detach-sign",
+                            "--output", str(path) + ".asc", str(path)],
                            input=passphrase.encode(), check=True)
+            require(Path(str(path) + ".asc").is_file(), f"GPG did not create a signature: {file['path']}")
         with zipfile.ZipFile(output, "w", zipfile.ZIP_STORED, allowZip64=True) as archive:
             for path in sorted(repository.rglob("*")):
                 if path.is_file():
@@ -449,35 +479,64 @@ def import_key():
     subprocess.run(["gpg", "--batch", "--import"], input=encoded, check=True)
 
 
-def central_request(path, token, data=b"", headers=None):
-    request = urllib.request.Request(CENTRAL + path, data=data, method="POST",
+def central_token():
+    username, password = os.environ.get("CENTRAL_USERNAME"), os.environ.get("CENTRAL_TOKEN")
+    require(username and password, "CENTRAL_USERNAME and CENTRAL_TOKEN must be set")
+    return base64.b64encode(f"{username}:{password}".encode()).decode()
+
+
+def central_request(path, token, data=b"", headers=None, method="POST", allow_not_found=False):
+    request = urllib.request.Request(CENTRAL + path, data=data, method=method,
         headers={"Authorization": "Bearer " + token, **(headers or {})})
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
             return response.read()
     except urllib.error.HTTPError as error:
+        if allow_not_found and error.code == 404:
+            error.close()
+            return None
         # Do not include request headers or credential-bearing objects in logs.
         raise ValueError(f"Central returned HTTP {error.code}: {error.read(4096).decode(errors='replace')}") from None
 
 
+def central_download(path, token, output):
+    request = urllib.request.Request(
+        CENTRAL + path, method="GET", headers={"Authorization": "Bearer " + token})
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response, output.open("wb") as stream:
+            shutil.copyfileobj(response, stream)
+    except urllib.error.HTTPError as error:
+        # Do not include request headers or credential-bearing objects in logs.
+        raise ValueError(f"Central returned HTTP {error.code}: {error.read(4096).decode(errors='replace')}") from None
+
+
+def checked_deployment_id(value):
+    try:
+        parsed = str(uuid.UUID(value))
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError("Invalid Central deployment ID") from None
+    require(parsed == value.lower(), "Invalid Central deployment ID")
+    return parsed
+
+
 def await_central(deployment, token, expected, timeout=1800):
+    deployment = checked_deployment_id(deployment)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         status = json.loads(central_request("/status?id=" + deployment, token))
         state = status.get("deploymentState")
         print(f"Central deployment {deployment}: {state}", flush=True)
         if state == expected:
-            return
+            return status
         require(state != "FAILED", "Central validation failed: " + json.dumps(status.get("errors", {})))
         require(state in {"PENDING", "VALIDATING", "VALIDATED", "PUBLISHING", "PUBLISHED"}, "Unknown Central state")
         time.sleep(10)
     raise TimeoutError(f"Central deployment {deployment} did not reach {expected}")
 
 
-def publish(path):
-    username, password = os.environ.get("CENTRAL_USERNAME"), os.environ.get("CENTRAL_TOKEN")
-    require(username and password, "CENTRAL_USERNAME and CENTRAL_TOKEN must be set")
-    token = base64.b64encode(f"{username}:{password}".encode()).decode()
+def upload_bundle(path, token):
+    path = Path(path)
+    require(path.is_file() and not path.is_symlink(), "Central bundle must be a regular file")
     # curl streams the potentially multi-gigabyte multipart upload from disk.
     # The credential is supplied through stdin config, never argv or a log.
     config = f'header = "Authorization: Bearer {token}"\n'
@@ -485,11 +544,129 @@ def publish(path):
         "--max-time", "3600", "--form", f"bundle=@{path};type=application/octet-stream",
         CENTRAL + "/upload?publishingType=USER_MANAGED"], input=config, text=True, capture_output=True)
     require(result.returncode == 0, "Central upload failed: " + result.stderr[:2000] + result.stdout[:2000])
-    deployment = result.stdout.strip()
-    require(str(uuid.UUID(deployment)) == deployment.lower(), "Invalid Central deployment ID")
+    deployment = checked_deployment_id(result.stdout.strip())
     print(f"Central deployment: {deployment}", flush=True)
-    await_central(deployment, token, "VALIDATED")
+    return deployment
+
+
+def promote_deployment(deployment, token):
+    deployment = checked_deployment_id(deployment)
     central_request("/deployment/" + deployment, token)
+
+
+def drop_deployment(deployment, token):
+    deployment = checked_deployment_id(deployment)
+    response = central_request(
+        "/deployment/" + deployment, token, data=None, method="DELETE", allow_not_found=True)
+    if response is None:
+        print(f"Central deployment already absent: {deployment}", flush=True)
+        return False
+    print(f"Dropped Central deployment: {deployment}", flush=True)
+    return True
+
+
+def drop(deployment, report_path=None):
+    deployment = checked_deployment_id(deployment)
+    report = None
+    if report_path is not None:
+        require(report_path.is_file(), "Central test report does not exist")
+        report = json.loads(report_path.read_text())
+        require(report.get("deploymentId") == deployment,
+                "Central test report identifies another deployment")
+    removed = drop_deployment(deployment, central_token())
+    result = {"deploymentId": deployment, "dropped": True,
+              "dropResult": "dropped" if removed else "already-absent"}
+    if report is not None:
+        report.update(dropped=True, dropResult=result["dropResult"])
+        report.pop("dropError", None)
+        write_json(report_path, report)
+    return result
+
+
+def download_deployment(candidate, output, deployment, token):
+    manifest = verify(candidate)
+    deployment = checked_deployment_id(deployment)
+    require(not output.exists(), "Central test candidate already exists")
+    output.mkdir(parents=True)
+    write_json(output / "release-manifest.json", manifest)
+    source_repository = candidate / "repository"
+    for source in sorted(path for path in source_repository.rglob("*") if path.is_file()):
+        relative = source.relative_to(source_repository)
+        destination = output / "repository" / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        encoded = urllib.parse.quote(str(relative), safe="/")
+        central_download(f"/deployment/{deployment}/download/{encoded}", token, destination)
+        require(destination.stat().st_size == source.stat().st_size
+                and digest(destination) == digest(source), f"Central deployment bytes differ: {relative}")
+    verify(output)
+    return manifest
+
+
+def append_github_output(path, name, value):
+    require(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name), "Invalid GitHub output name")
+    with path.open("a", encoding="utf-8") as stream:
+        print(f"{name}={value}", file=stream)
+
+
+def test_publish(bundle_path, candidate, output, report_path, github_output=None):
+    manifest = verify(candidate)
+    bundle_path = Path(bundle_path)
+    require(bundle_path.is_file() and not bundle_path.is_symlink(), "Central bundle must be a regular file")
+    require(not report_path.exists(), "Central test report already exists")
+    token = central_token()
+    report = {
+        "schemaVersion": 1,
+        "operation": "central-test",
+        "version": manifest["version"],
+        "sourceSha": manifest["plan"]["sourceSha"],
+        "bundleSha256": digest(bundle_path),
+        "manifestSha256": digest(candidate / "release-manifest.json"),
+        "deploymentId": None,
+        "deploymentState": "PREPARED",
+        "downloadVerified": False,
+        "dropped": False,
+    }
+    write_json(report_path, report)
+    deployment = None
+    failure = None
+    cleanup_failure = None
+    try:
+        deployment = upload_bundle(bundle_path, token)
+        report.update(deploymentId=deployment, deploymentState="UPLOADED")
+        write_json(report_path, report)
+        if github_output is not None:
+            append_github_output(github_output, "deployment_id", deployment)
+        status = await_central(deployment, token, "VALIDATED")
+        report["deploymentState"] = status["deploymentState"]
+        write_json(report_path, report)
+        download_deployment(candidate, output, deployment, token)
+        report["downloadVerified"] = True
+        write_json(report_path, report)
+    except BaseException as error:
+        failure = error
+    finally:
+        if deployment is not None:
+            try:
+                removed = drop_deployment(deployment, token)
+                report.update(dropped=True, dropResult="dropped" if removed else "already-absent")
+            except BaseException as error:
+                cleanup_failure = error
+                report["dropError"] = str(error)
+            write_json(report_path, report)
+    if failure is not None:
+        if cleanup_failure is not None:
+            failure.add_note(f"Central deployment cleanup also failed: {cleanup_failure}")
+        raise failure.with_traceback(failure.__traceback__)
+    if cleanup_failure is not None:
+        raise cleanup_failure.with_traceback(cleanup_failure.__traceback__)
+    return report
+
+
+def publish(path):
+    token = central_token()
+    deployment = upload_bundle(path, token)
+    await_central(deployment, token, "VALIDATED")
+    promote_deployment(deployment, token)
     await_central(deployment, token, "PUBLISHED")
 
 
@@ -536,6 +713,15 @@ def main():
     signing.add_argument("--output", type=Path, required=True)
     publishing = commands.add_parser("publish")
     publishing.add_argument("--bundle", type=Path, required=True)
+    testing = commands.add_parser("test-publish")
+    testing.add_argument("--bundle", type=Path, required=True)
+    testing.add_argument("--candidate", type=Path, required=True)
+    testing.add_argument("--output", type=Path, required=True)
+    testing.add_argument("--report", type=Path, required=True)
+    testing.add_argument("--github-output", type=Path)
+    dropping = commands.add_parser("drop")
+    dropping.add_argument("--deployment-id", required=True)
+    dropping.add_argument("--report", type=Path)
     public = commands.add_parser("download-public")
     public.add_argument("--candidate", type=Path, required=True)
     public.add_argument("--output", type=Path, required=True)
@@ -552,6 +738,10 @@ def main():
         bundle(args.candidate, args.output)
     elif args.command == "publish":
         publish(args.bundle)
+    elif args.command == "test-publish":
+        test_publish(args.bundle, args.candidate, args.output, args.report, args.github_output)
+    elif args.command == "drop":
+        print(json.dumps(drop(args.deployment_id, args.report)))
     else:
         download_public(args.candidate, args.output)
 

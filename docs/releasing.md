@@ -188,7 +188,8 @@ behavior therefore remain outside this gate.
 |---|---|
 | Pull request to `main` or `refactor/v2` | Existing formatting, compile, unit, script and Helm checks, plus JVM release export for both lines |
 | Push to those branches or manual CI dispatch | The checks above, native builds, candidate verification and all eight consumer jobs |
-| Accepted `v2.*` release tag | Full CI explicitly enabled, nonempty validated candidate, controlled publication and public Central consumer check |
+| `v2.x.y-central-test.<digits>` tag | Full CI, signed `USER_MANAGED` upload, Central validation, authenticated byte verification, one consumer job and deployment deletion; no public release |
+| Other accepted `v2.*` release tag | Full CI explicitly enabled, nonempty validated candidate, controlled publication and public Central consumer check |
 
 A successful PR CI result covers the PR checks and JVM export; it does not mean
 the full native release matrix has passed. Reusable CI defaults to full
@@ -241,10 +242,11 @@ while a rebuild is still running.
 ## Configure and publish a release
 
 Repository files do not configure GitHub protection rules or prove that stored
-credentials work. The repository already has the following secret names; their
-values have not been read or validated for this workflow:
+credentials work. The `maven-central` environment has the following secrets;
+they are environment secrets rather than repository secrets so another workflow
+cannot read them without entering the protected environment:
 
-| GitHub secret | Environment variable in the publication step | Required value |
+| GitHub environment secret | Environment variable in the publication step | Required value |
 |---|---|---|
 | `PGP_SECRET` | `GPG_PRIVATE_KEY` | ASCII-armored private signing key, or its base64 encoding |
 | `PGP_PASSPHRASE` | `GPG_PASSPHRASE` | Signing key passphrase |
@@ -255,21 +257,36 @@ The Sonatype names are retained for compatibility with repository configuration;
 their values must be valid **Central Portal** token credentials. Existing legacy
 Sonatype credentials are not evidence of Portal access. The signing public key
 must be available for Central verification and the account must control the
-`com.zilliz` namespace.
+`com.zilliz` namespace. The release script requires signing fingerprint
+`F0004DED15D9C011F344D6A8526AB23093F3D44A`.
 
 A maintainer must configure the `maven-central` GitHub environment with required
-reviewers and permitted release tags. No environment was configured when this
-workflow was introduced. Protect creation, replacement and deletion of `v2.*`
-tags and ensure releases point to reviewed commits. Restrict tag bypass and
-environment administration appropriately. These are repository settings, not
-checks that committing this YAML enables.
+reviewers and a deployment policy limited to `v2.*` tags. The release repository
+has those controls and the four environment secrets as of 2026-10-16; forks and
+replacement repositories must create them separately because committing the
+workflow does not configure GitHub environments. Protect creation, replacement
+and deletion of `v2.*` tags and ensure releases point to reviewed commits.
+Restrict tag bypass and environment administration appropriately.
 
 Release accepts `v2.x.y` tags and prereleases such as `v2.0.0-rc.1`. It verifies
 that the candidate source commit is the tagged commit, then enters the
 `maven-central` environment. Build and consumer jobs have no signing or Central
 credentials. The publication job imports the key into a temporary GPG home,
-signs the already tested files, uploads a `USER_MANAGED` deployment, waits for
-Central validation and requests publication. It does not rebuild the candidate.
+requires exactly one primary secret key and explicitly selects its fingerprint
+for every signature. A separate step receives only the Central credentials,
+uploads a `USER_MANAGED` deployment, waits for Central validation and requests
+publication. It does not rebuild the candidate.
+
+A tag such as `v2.0.0-central-test.2026101601` takes the mutually exclusive test
+path. It runs the same full validation and signing steps, uploads a
+`USER_MANAGED` deployment, waits for `VALIDATED`, downloads every candidate file
+through that deployment's authenticated endpoint and checks the bytes. The
+workflow then deletes the deployment, retries that idempotent cleanup at the
+step boundary, and runs the Spark 4.0 x86_64 universal and platform-specific
+consumer checks from the downloaded repository. This path never calls Central's
+promotion endpoint, so it does not create a public Maven version. The test
+report records the deployment ID for manual cleanup if the runner stops before
+deletion.
 
 The equivalent final commands, with the signing key already imported and
 credentials provided by a trusted environment, are:
@@ -279,6 +296,25 @@ python3 scripts/release.py verify --candidate target/release-candidate
 python3 scripts/release.py bundle --candidate target/release-candidate --output target/central.zip
 python3 scripts/release.py publish --bundle target/central.zip
 ```
+
+The equivalent reversible Central test is:
+
+```bash
+python3 scripts/release.py test-publish --bundle target/central.zip \
+  --candidate target/release-candidate \
+  --output target/central-test-candidate \
+  --report target/central-test-report.json
+```
+
+If an interrupted run leaves the report's deployment in `VALIDATED` or `FAILED`,
+remove it with:
+
+```bash
+python3 scripts/release.py drop --deployment-id <id> \
+  --report target/central-test-report.json
+```
+
+Omit `--report` if that file is unavailable.
 
 After publication, the workflow downloads every manifest-listed file from
 Central and checks its digest, then consumes both entries again with fresh
