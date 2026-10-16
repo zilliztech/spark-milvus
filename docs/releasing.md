@@ -235,6 +235,22 @@ A complete bundle hit skips native compilation, but always reruns the ELF ABI
 audit. Staging still verifies pins and checksums, and the full consumer matrix
 still runs. Caches accelerate a gate; they do not replace it.
 
+GitHub scopes caches by ref and otherwise falls back only to the repository's
+default branch. This repository's default branch is `main`, so a release tag
+cannot directly restore a complete bundle cached by `refactor/v2`. Before a
+release runs, it therefore requires a successful `CI` push run on
+`refactor/v2` for the exact tagged commit and verifies that run still has one
+unexpired native artifact for each Linux platform. On a tag-local cache miss,
+the native jobs download those artifacts by exact run ID and name. They accept
+them only when the file inventory is regular and complete, the recorded native
+inputs exactly equal the inputs recomputed with the current prepared toolchain,
+and the platform and JAR SHA-256 agree across the sidecar and ABI report. The
+current ABI audit, x86 CPU gate, candidate verification and all eight consumer
+jobs still run. JVM artifacts and the versioned candidate are rebuilt by the
+tag run. If the exact successful source run is missing or its artifacts no
+longer satisfy these checks, the release fails before entering the protected
+publication environment.
+
 The small `cache-inputs-<platform>` artifact is uploaded before cache restoration.
 Compare its `native-cache-inputs.json` with an earlier run to explain a miss
 while a rebuild is still running.

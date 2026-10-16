@@ -12,6 +12,9 @@ on:
       full_validation:
         type: boolean
         default: true
+      native_source_run_id:
+        type: string
+        default: ''
     outputs:
       candidate_artifact:
         description: Candidate that passed the build and consumer gates
@@ -23,6 +26,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -37,6 +41,7 @@ jobs:
       # Direct fork PRs have no workflow_call inputs. Reusable callers can
       # request the full gate even when their originating event is a PR.
       build_native: ${{ github.event_name != 'pull_request' || inputs.full_validation == true }}
+      native_source_run_id: ${{ inputs.native_source_run_id }}
 
   consumer:
     needs: artifacts
