@@ -276,6 +276,11 @@ must be available for Central verification and the account must control the
 `com.zilliz` namespace. The release script requires signing fingerprint
 `F0004DED15D9C011F344D6A8526AB23093F3D44A`.
 
+When a source displays a secret as Markdown inline code, store only the value
+inside the formatting backticks; those backticks are not part of the value.
+Preserve every character that belongs to the credential itself, and do not log
+or commit the value while checking it.
+
 A maintainer must configure the `maven-central` GitHub environment with required
 reviewers and a deployment policy limited to `v2.*` tags. The release repository
 has those controls and the four environment secrets as of 2026-10-16; forks and
