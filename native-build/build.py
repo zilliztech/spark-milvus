@@ -433,8 +433,8 @@ def build(args, repository, java_home, work, target, profile):
                               ("cpu", adapter.cpu_report())):
             with (provenance / (name + ".txt")).open("w") as log:
                 subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True, env=env)
-        metadata["cpu.portability"] = ("Host-native upstream compiler flags; "
-                                      + target + " is not an ISA baseline")
+        metadata["cpu.portability"] = ("CPU requirements depend on dependency targets and compiler flags; "
+                                      + target + " alone does not specify an ISA baseline")
         phase("validate-upstream-dependencies")
         build_source_files = tree_hashes(repository / "native-build")
         build_source_manifest = provenance / "build-source-files.json"

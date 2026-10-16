@@ -47,7 +47,7 @@ class NativeCacheKeyTest(unittest.TestCase):
         self.identity = {"os": {"id": "ubuntu", "versionId": "22.04"}, "glibc": "glibc 2.35",
                          "tools": {"gcc": "gcc 12.3.0", "cmake": "cmake 3.27.5", "conan": "Conan 2.25.1",
                                    "rustc": "rustc 1.90.0", "java": "openjdk 21.0.8",
-                                   "compilerNativeTarget": "-march= x86-64-v3"}}
+                                   "compilerTarget": "x86_64-linux-gnu"}}
 
     @staticmethod
     def git(directory, *arguments):
@@ -130,16 +130,53 @@ class NativeCacheKeyTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be clean"):
             self.fingerprint()
 
-    def test_toolchain_and_cpu_feature_changes_isolate_dependency_cache(self):
+    def test_toolchain_versions_and_declared_compiler_target_isolate_dependency_cache(self):
         before = self.fingerprint()
         for name in self.identity["tools"]:
             with self.subTest(tool=name):
                 original = self.identity["tools"][name]
-                self.identity["tools"][name] += " new version or CPU feature"
+                self.identity["tools"][name] += " changed"
                 after = self.fingerprint()
                 self.assertNotEqual(before["key"], after["key"])
                 self.assertNotEqual(before["dependencyKeyPrefix"], after["dependencyKeyPrefix"])
                 self.identity["tools"][name] = original
+
+    def test_random_runner_cpu_does_not_change_bundle_or_dependency_identity(self):
+        java = self.root / "jdk/bin/java"
+        java.parent.mkdir(parents=True)
+        java.touch()
+        for platform, machine, runner in (("linux-x86_64", "x86_64", "ubuntu-22.04"),
+                                          ("linux-aarch64", "aarch64", "ubuntu-22.04-arm")):
+            self.plan["native"][0].update(platform=platform, runner=runner)
+            identities = []
+            for host_cpu in ("icelake-client", "znver3", "sapphirerapids"):
+                def probe(arguments):
+                    if any(argument in ("-march=native", "-mcpu=native") for argument in arguments):
+                        return "compiler feature choices for " + host_cpu
+                    if arguments == ["getconf", "GNU_LIBC_VERSION"]:
+                        return "glibc 2.35"
+                    return "same prepared tool identity"
+
+                with mock.patch.dict(os.environ, {"JAVA_HOME": str(java.parent.parent)}, clear=True), \
+                        mock.patch.object(cache.host_platform, "system", return_value="Linux"), \
+                        mock.patch.object(cache.host_platform, "machine", return_value=machine), \
+                        mock.patch.object(cache, "os_release", return_value=self.identity["os"]), \
+                        mock.patch.object(cache, "command", side_effect=probe):
+                    identity = cache.toolchain_identity(platform)
+                identities.append(cache.fingerprint(self.root, self.plan, platform, identity))
+            with self.subTest(platform=platform):
+                self.assertEqual(len({value["key"] for value in identities}), 1)
+                self.assertEqual(len({value["dependencyKeyPrefix"] for value in identities}), 1)
+                self.assertNotIn("compilerNativeTarget", identities[0]["inputs"]["toolchain"]["tools"])
+
+    def test_declared_profile_changes_rebuild_bundle_and_reuse_package_id_aware_dependencies(self):
+        profile = self.root / "native-build/profiles/linux-x86_64"
+        profile.write_text("openblas/*:target=NEHALEM\nopenblas/*:NUM_THREADS=64\n")
+        before = self.fingerprint()
+        profile.write_text("openblas/*:target=HASWELL\nopenblas/*:NUM_THREADS=32\n")
+        after = self.fingerprint()
+        self.assertNotEqual(before["key"], after["key"])
+        self.assertEqual(before["dependencyKeyPrefix"], after["dependencyKeyPrefix"])
 
     def test_abi_baseline_changes_isolate_cache_and_other_os_is_rejected(self):
         before = self.fingerprint()
@@ -178,7 +215,8 @@ class NativeCacheKeyTest(unittest.TestCase):
             self.assertIn("rustc", tools)
             self.assertIn("systemPackages", tools)
             self.assertIn(mock.call([str(java), "-version"]), run.call_args_list)
-            self.assertIn(mock.call(["gcc-12", "-mcpu=native", "-Q", "--help=target"]), run.call_args_list)
+            self.assertIn(mock.call(["gcc-12", "-dumpmachine"]), run.call_args_list)
+            self.assertNotIn("compilerNativeTarget", tools)
             os.environ["RUSTFLAGS"] = "-C target-cpu=native"
             with self.assertRaisesRegex(ValueError, "environment overrides"):
                 cache.toolchain_identity("linux-aarch64")
@@ -195,6 +233,9 @@ class NativeCacheKeyTest(unittest.TestCase):
                 mock.patch.object(cache.sys, "argv", arguments), mock.patch("builtins.print"):
             cache.main()
         report = json.loads(output.read_text())
+        self.assertEqual(report["inputs"]["cacheFormat"], 2)
+        self.assertTrue(report["key"].startswith("native-bundle-v2-"))
+        self.assertTrue(report["dependencyKeyPrefix"].startswith("native-deps-v2-"))
         outputs = dict(line.split("=", 1) for line in github.read_text().splitlines())
         self.assertEqual(outputs["key"], report["key"])
         self.assertEqual(outputs["key_digest"], report["keyDigest"])
