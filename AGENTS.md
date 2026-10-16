@@ -82,6 +82,11 @@ Code, comments, build scripts, `README.md` and the documents under `docs/` are
 English, and the public documents are Markdown. Use imports and short type or
 object names in code; follow the [import rules](docs/contributing.md#imports).
 
+Repository documents must not cite workstation-hosted web documents. Copy any
+needed document and its required assets into the appropriate repository first,
+then cite that copy with repository-relative links; see
+[document references](docs/contributing.md#repository-local-document-references).
+
 ## Before every commit
 
 Apply [.agents/skills/spark-milvus-sbt/SKILL.md](.agents/skills/spark-milvus-sbt/SKILL.md).

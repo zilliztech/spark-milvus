@@ -8,6 +8,7 @@ import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
 import com.zilliz.milvus.storage.vector.{
   CandidateBytes,
+  CandidateDictionary,
   CandidateRuns,
   IndexSearch,
   SearchPlan
@@ -50,6 +51,7 @@ private[connector] object SearchExecutionPlan {
       tasks: Vector[Task],
       batch: SearchResources.Choice,
       stageHeap: SearchResources.Choice,
+      candidateDictionary: CandidateDictionary,
       merge: SearchMerge.Plan,
       takePartitioning: Option[SearchTake.Partitioning]
   )
@@ -89,6 +91,7 @@ private[connector] object SearchExecutionPlan {
                            SegmentIndexHandle.select(task, fieldId, metric)
                          else None)
     }.toMap
+    val dictionary = candidateDictionary(tasks)
     val plan = SearchPlan.of(
       descriptors,
       layout,
@@ -169,6 +172,7 @@ private[connector] object SearchExecutionPlan {
       policies,
       batch,
       stageHeap,
+      dictionary,
       SearchMerge.plan(
         mergePartitions(
           spark,
@@ -181,7 +185,8 @@ private[connector] object SearchExecutionPlan {
         queries.count,
         plan.sets.size,
         k,
-        stageHeap.bytes
+        stageHeap.bytes,
+        CandidateRuns.Plain
       ),
       if (takeColumns)
         Some(
@@ -194,6 +199,25 @@ private[connector] object SearchExecutionPlan {
         )
       else None
     )
+  }
+
+  /** One global segment dictionary for every candidate source in this search.
+    * Known physical extents fail early when UInt32 row addresses cannot cover
+    * them. Unknown extents remain eligible; every encoded offset is checked.
+    * Planning estimates and index row counts do not prove physical extents.
+    */
+  private[search] def candidateDictionary(
+      tasks: Seq[SegmentReadTask]
+  ): CandidateDictionary = {
+    tasks.foreach { task =>
+      task.provenPhysicalRows.foreach { rows =>
+        require(
+          rows <= CandidateBytes.MaxRows,
+          s"Segment ${task.segmentId} has $rows physical rows, exceeding the UInt32 candidate address limit of ${CandidateBytes.MaxRows}"
+        )
+      }
+    }
+    CandidateDictionary(tasks.map(_.segmentId))
   }
 
   /** A frame task carries its candidate rows and scans one base partition
@@ -273,14 +297,14 @@ private[connector] object SearchExecutionPlan {
           math.max(1, basePartitions),
           k,
           taskHeap.bytes,
-          CandidateBytes.Width.toLong + 4L + rowBytes
+          SearchPlan.PackedCandidateReserveBytes.toLong + 4L + rowBytes
         ),
         queries.count,
         math.max(1, basePartitions),
         k,
         taskHeap.bytes,
         CandidateRuns.Carried,
-        CandidateBytes.Width.toLong + 4L + rowBytes
+        SearchPlan.PackedCandidateReserveBytes.toLong + 4L + rowBytes
       )
     )
   }
@@ -463,7 +487,10 @@ private[connector] object SearchExecutionPlan {
     val retainedRows = Math.multiplyExact(k.toLong, rowBytes)
     val answer = Math.multiplyExact(
       k.toLong,
-      Math.addExact(CandidateBytes.Width.toLong + 4L, rowBytes)
+      Math.addExact(
+        SearchPlan.PackedCandidateReserveBytes.toLong + 4L,
+        rowBytes
+      )
     )
     val perQuery = Math.addExact(queryHeap, retainedRows)
     // Both regions use the same half-heap limit. Only one query's encoded
@@ -522,7 +549,7 @@ private[connector] object SearchExecutionPlan {
       candidateSourcesPerQuery: Int,
       k: Int,
       heapBytesPerTask: Long,
-      candidateBytes: Long = CandidateBytes.Width.toLong
+      candidateBytes: Long = SearchPlan.PackedCandidateReserveBytes.toLong
   ): Int = {
     require(queries > 0, s"A search needs at least one query: $queries")
     require(

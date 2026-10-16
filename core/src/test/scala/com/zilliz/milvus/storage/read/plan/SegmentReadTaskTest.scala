@@ -55,6 +55,7 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
     copy.limits shouldBe task.limits
     copy.dataFiles shouldBe group.filePaths
     copy.expectedRows shouldBe Some(4500L)
+    copy.provenPhysicalRows shouldBe Some(4500L)
   }
 
   test("a manifest task survives serialization") {
@@ -128,7 +129,52 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
     indexed.knownRows shouldBe Some(25L)
     indexed.copy(indexes = SegmentIndexes.Unknown).knownRows shouldBe None
     indexed.expectedRows shouldBe None
+    indexed.provenPhysicalRows shouldBe None
     indexed.copy(snapshotRows = Some(30L)).knownRows shouldBe Some(30L)
+  }
+
+  test(
+    "physical address bounds use complete snapshot counts without narrowing"
+  ) {
+    val manifest =
+      v2Task.copy(layout = SegmentLayout.Manifest("segments/451", 3L))
+    Seq(0L, 4500L, 1L << 32, (1L << 32) + 1L, Long.MaxValue).foreach { rows =>
+      manifest.copy(snapshotRows = Some(rows)).provenPhysicalRows shouldBe Some(
+        rows
+      )
+    }
+    manifest.provenPhysicalRows shouldBe None
+    v2Task.copy(snapshotRows = Some(-1L)).provenPhysicalRows shouldBe None
+    v2Task.copy(snapshotRows = Some(5000L)).provenPhysicalRows shouldBe Some(
+      5000L
+    )
+  }
+
+  test("physical address bounds require complete and agreeing column groups") {
+    def rows(groups: V2ColumnGroup*): Option[Long] =
+      v2Task
+        .copy(layout = SegmentLayout.ColumnGroups(groups))
+        .provenPhysicalRows
+
+    val sameTotal = group.copy(
+      fieldIds = Seq(102L),
+      filePaths = Seq("other-column"),
+      fileRowCounts = Seq(4500L)
+    )
+    rows(group, sameTotal) shouldBe Some(4500L)
+    rows(group, sameTotal.copy(fileRowCounts = Seq(4501L))) shouldBe None
+    rows(group.copy(fileRowCounts = Seq.empty)) shouldBe None
+    rows(group.copy(fileRowCounts = Seq(4500L))) shouldBe None
+    rows(group.copy(fileRowCounts = Seq(4500L, 0L, 0L))) shouldBe None
+    rows(group.copy(fileRowCounts = Seq(4501L, -1L))) shouldBe None
+    rows(group.copy(fileRowCounts = Seq(Long.MaxValue, 1L))) shouldBe None
+    rows(group.copy(fileRowCounts = Seq(Long.MaxValue, 0L))) shouldBe Some(
+      Long.MaxValue
+    )
+    rows(
+      group.copy(filePaths = Seq.empty, fileRowCounts = Seq.empty)
+    ) shouldBe Some(0L)
+    rows() shouldBe None
   }
 
   test("a materialized delete plan survives serialization") {

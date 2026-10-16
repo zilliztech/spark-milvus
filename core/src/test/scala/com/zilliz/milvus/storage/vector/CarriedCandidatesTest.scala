@@ -1,7 +1,7 @@
 package com.zilliz.milvus.storage.vector
 
 import java.io.{ByteArrayOutputStream, DataOutputStream}
-import java.lang.{Double => JavaDouble}
+import java.lang.{Float => JavaFloat}
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.ByteBuffer
 import java.util.{Arrays, BitSet}
@@ -24,8 +24,8 @@ class CarriedCandidatesTest extends AnyFunSuite with Matchers {
 
   private def carried(
       packed: Array[Byte]
-  ): Vector[(Long, Long, Double, String)] = {
-    val read = Vector.newBuilder[(Long, Long, Double, String)]
+  ): Vector[(Long, Long, Float, String)] = {
+    val read = Vector.newBuilder[(Long, Long, Float, String)]
     CarriedCandidates.foreach(packed) { (unit, row, score, at, length) =>
       read += ((unit, row, score, new String(packed, at, length, UTF_8)))
     }
@@ -34,7 +34,7 @@ class CarriedCandidatesTest extends AnyFunSuite with Matchers {
 
   private def answer(
       metric: MetricType,
-      entries: (Long, Long, Double, String)*
+      entries: (Long, Long, Float, String)*
   ): Array[Byte] = {
     val merger = new TopKMerger(1, math.max(1, entries.size), metric)
     val rows = entries.map { case (unit, row, score, text) =>
@@ -53,9 +53,9 @@ class CarriedCandidatesTest extends AnyFunSuite with Matchers {
 
   test("encoding keeps the supplied order and each associated row") {
     val ascending = Vector(
-      (2L, 8L, 1.0, "first"),
-      (1L, 9L, 2.0, ""),
-      (0L, 7L, 3.0, "last")
+      (2L, 8L, 1.0f, "first"),
+      (1L, 9L, 2.0f, ""),
+      (0L, 7L, 3.0f, "last")
     )
     // These are already ordered for L2 and IP respectively. Encoding needs
     // neither the metric nor a second sort to preserve either answer.
@@ -69,11 +69,64 @@ class CarriedCandidatesTest extends AnyFunSuite with Matchers {
     }
   }
 
+  test("carried addresses use unsigned 32-bit fields and a 16-byte header") {
+    val candidate = Candidate(0, 0xffffffffL, 0x80000000L, 1.5f)
+    val row = Array[Byte](42)
+    val packed = CarriedCandidates.writeSorted(Vector(candidate -> row))
+    packed.toVector shouldBe Vector[Byte](
+      -1,
+      -1,
+      -1,
+      -1,
+      0x80.toByte,
+      0,
+      0,
+      0,
+      0x3f,
+      0xc0.toByte,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      42
+    )
+    var actual = Vector.empty[(Long, Long, Float, Int, Int)]
+    CarriedCandidates.foreach(packed) {
+      (partition, offset, score, from, length) =>
+        actual :+= ((partition, offset, score, from, length))
+    }
+    actual shouldBe Vector((0xffffffffL, 0x80000000L, 1.5f, 16, 1))
+    CarriedCandidates.encodedSize(Vector(candidate))(_ =>
+      row.length
+    ) shouldBe 17L
+  }
+
+  test(
+    "both carried writers reject addresses outside UInt32 before narrowing"
+  ) {
+    val invalid = Seq(Long.MinValue, -1L, 1L << 32, Long.MaxValue)
+    val candidates = invalid.flatMap(address =>
+      Seq(Candidate(0, address, 0L, 1.0f), Candidate(0, 0L, address, 1.0f))
+    )
+    candidates.foreach { candidate =>
+      intercept[IllegalArgumentException] {
+        CarriedCandidates.writeSorted(Vector(candidate -> Array.emptyByteArray))
+      }.getMessage should include("outside UInt32")
+      intercept[IllegalArgumentException] {
+        CarriedCandidates.writeSorted(Vector(candidate), 16)(_ =>
+          Array.emptyByteArray
+        )
+      }.getMessage should include("outside UInt32")
+    }
+  }
+
   test("an empty sorted answer writes no bytes and merges away") {
     val empty = CarriedCandidates.writeSorted(Vector.empty)
     empty.length shouldBe 0
     carried(empty) shouldBe Vector.empty
-    val one = answer(MetricType.L2, (1L, 2L, 3.0, "row"))
+    val one = answer(MetricType.L2, (1L, 2L, 3.0f, "row"))
     CarriedCandidates.merge(empty, one, 2, MetricType.L2).toSeq shouldBe
       one.toSeq
     CarriedCandidates.merge(one, empty, 2, MetricType.L2).toSeq shouldBe
@@ -84,20 +137,21 @@ class CarriedCandidatesTest extends AnyFunSuite with Matchers {
   test("each candidate keeps its row, best first") {
     val packed = answer(
       MetricType.L2,
-      (1L, 7L, 2.0, "seven"),
-      (0L, 3L, 0.5, ""),
-      (2L, 1L, 1.0, "a row")
+      (1L, 7L, 2.0f, "seven"),
+      (0L, 3L, 0.5f, ""),
+      (2L, 1L, 1.0f, "a row")
     )
     carried(packed) shouldBe Vector(
-      (0L, 3L, 0.5, ""),
-      (2L, 1L, 1.0, "a row"),
-      (1L, 7L, 2.0, "seven")
+      (0L, 3L, 0.5f, ""),
+      (2L, 1L, 1.0f, "a row"),
+      (1L, 7L, 2.0f, "seven")
     )
   }
 
   test("two answers merge into the best k, rows and all") {
-    val left = answer(MetricType.L2, (0L, 1L, 1.0, "l1"), (0L, 2L, 3.0, "l3"))
-    val right = answer(MetricType.L2, (1L, 1L, 2.0, "r2"), (1L, 2L, 4.0, "r4"))
+    val left = answer(MetricType.L2, (0L, 1L, 1.0f, "l1"), (0L, 2L, 3.0f, "l3"))
+    val right =
+      answer(MetricType.L2, (1L, 1L, 2.0f, "r2"), (1L, 2L, 4.0f, "r4"))
     carried(CarriedCandidates.merge(left, right, 3, MetricType.L2))
       .map(_._4) shouldBe
       Vector("l1", "r2", "l3")
@@ -111,12 +165,12 @@ class CarriedCandidatesTest extends AnyFunSuite with Matchers {
     "a similarity ranks the larger first, NaN above every number, ties by place"
   ) {
     val left =
-      answer(MetricType.IP, (0L, 5L, 1.0, "tie-late"), (0L, 9L, -1.0, "low"))
+      answer(MetricType.IP, (0L, 5L, 1.0f, "tie-late"), (0L, 9L, -1.0f, "low"))
     val right =
       answer(
         MetricType.IP,
-        (0L, 2L, 1.0, "tie-early"),
-        (1L, 0L, Double.NaN, "nan")
+        (0L, 2L, 1.0f, "tie-early"),
+        (1L, 0L, Float.NaN, "nan")
       )
     carried(CarriedCandidates.merge(left, right, 4, MetricType.IP))
       .map(_._4) shouldBe
@@ -161,14 +215,14 @@ class CarriedCandidatesTest extends AnyFunSuite with Matchers {
   ) {
     val random = new Random(812)
     val scores = Vector(
-      Double.NaN,
-      JavaDouble.longBitsToDouble(0x7ff8000000000042L),
-      Double.NegativeInfinity,
-      -0.0,
-      0.0,
-      Double.PositiveInfinity,
-      1.0,
-      -1.0
+      Float.NaN,
+      JavaFloat.intBitsToFloat(0x7fc00042),
+      Float.NegativeInfinity,
+      -0.0f,
+      0.0f,
+      Float.PositiveInfinity,
+      1.0f,
+      -1.0f
     )
     MetricType.values.foreach { metric =>
       val ranking = Candidate.ranking(metric)
@@ -216,7 +270,7 @@ class CarriedCandidatesTest extends AnyFunSuite with Matchers {
 
   test("single runs are reused or cut at a complete carried record boundary") {
     val packed =
-      answer(MetricType.L2, (0L, 1L, 1.0, ""), (0L, 2L, 2.0, "longer"))
+      answer(MetricType.L2, (0L, 1L, 1.0f, ""), (0L, 2L, 2.0f, "longer"))
     val inputs = ArrayBuffer(Array.emptyByteArray, packed)
     (CarriedCandidates.merge(
       inputs,
@@ -230,7 +284,7 @@ class CarriedCandidatesTest extends AnyFunSuite with Matchers {
       MetricType.L2
     ) eq packed) shouldBe true
     carried(CarriedCandidates.merge(inputs, 1, MetricType.L2)) shouldBe
-      Vector((0L, 1L, 1.0, ""))
+      Vector((0L, 1L, 1.0f, ""))
     CarriedCandidates.merge(Vector.empty, 1, MetricType.L2).length shouldBe 0
     the[IllegalArgumentException] thrownBy
       CarriedCandidates.merge(Vector.empty, 0, MetricType.L2)
@@ -239,11 +293,11 @@ class CarriedCandidatesTest extends AnyFunSuite with Matchers {
   test(
     "all merge paths reject malformed records before comparing their heads"
   ) {
-    val good = answer(MetricType.L2, (0L, 1L, 1.0, "row"))
-    val negative = ByteBuffer.allocate(28).putInt(24, -1).array()
-    val overflow = ByteBuffer.allocate(28).putInt(24, Int.MaxValue).array()
-    val truncated = ByteBuffer.allocate(29).putInt(24, 2).array()
-    Seq(new Array[Byte](23), new Array[Byte](27), negative, overflow, truncated)
+    val good = answer(MetricType.L2, (0L, 1L, 1.0f, "row"))
+    val negative = ByteBuffer.allocate(16).putInt(12, -1).array()
+    val overflow = ByteBuffer.allocate(16).putInt(12, Int.MaxValue).array()
+    val truncated = ByteBuffer.allocate(17).putInt(12, 2).array()
+    Seq(new Array[Byte](11), new Array[Byte](15), negative, overflow, truncated)
       .foreach { bad =>
         the[IllegalArgumentException] thrownBy
           CarriedCandidates.foreach(bad)((_, _, _, _, _) => ())
@@ -257,10 +311,10 @@ class CarriedCandidatesTest extends AnyFunSuite with Matchers {
   }
 
   test("the unvisited tail after the kth winner is not read") {
-    val first = answer(MetricType.L2, (0L, 1L, 0.0, "first"))
+    val first = answer(MetricType.L2, (0L, 1L, 0.0f, "first"))
     val badTail = first ++ Array[Byte](1)
-    val second = answer(MetricType.L2, (1L, 1L, 1.0, "second"))
-    val third = answer(MetricType.L2, (2L, 1L, 2.0, "third"))
+    val second = answer(MetricType.L2, (1L, 1L, 1.0f, "second"))
+    val third = answer(MetricType.L2, (2L, 1L, 2.0f, "third"))
     Seq(
       Vector(badTail),
       Vector(badTail, second),
@@ -280,7 +334,7 @@ class CarriedCandidatesTest extends AnyFunSuite with Matchers {
   ) {
     // Reuse one payload to test a total above Int.MaxValue with modest input memory.
     val row = new Array[Byte](1024 * 1024)
-    val record = Candidate(0, 0L, 0L, 0.0) -> row
+    val record = Candidate(0, 0L, 0L, 0.0f) -> row
     the[IllegalArgumentException] thrownBy
       CarriedCandidates.writeSorted(Vector.fill(2048)(record))
     val packed = CarriedCandidates.writeSorted(Vector(record))
@@ -290,12 +344,12 @@ class CarriedCandidatesTest extends AnyFunSuite with Matchers {
 
   test("pre-sized encoding agrees with an independent protocol writer") {
     val records = Vector(
-      Candidate(0, 2L, 1L, Double.NegativeInfinity) -> Array.emptyByteArray,
-      Candidate(0, 1L, 2L, -0.0) -> Array[Byte](7),
-      Candidate(0, 3L, 3L, +0.0) -> Array.tabulate[Byte](7)(_.toByte),
-      Candidate(0, 1L, 4L, 3.0) -> Array.tabulate[Byte](65)(_.toByte),
-      Candidate(0, 1L, 5L, 3.0) -> Array.tabulate[Byte](1024)(_.toByte),
-      Candidate(0, 2L, 6L, Double.NaN) -> Array[Byte](-1)
+      Candidate(0, 2L, 1L, Float.NegativeInfinity) -> Array.emptyByteArray,
+      Candidate(0, 1L, 2L, -0.0f) -> Array[Byte](7),
+      Candidate(0, 3L, 3L, +0.0f) -> Array.tabulate[Byte](7)(_.toByte),
+      Candidate(0, 1L, 4L, 3.0f) -> Array.tabulate[Byte](65)(_.toByte),
+      Candidate(0, 1L, 5L, 3.0f) -> Array.tabulate[Byte](1024)(_.toByte),
+      Candidate(0, 2L, 6L, Float.NaN) -> Array[Byte](-1)
     )
     val candidates = records.map(_._1)
     val rows = records.map { case (candidate, row) =>
@@ -304,9 +358,9 @@ class CarriedCandidatesTest extends AnyFunSuite with Matchers {
     val output = new ByteArrayOutputStream()
     val oracle = new DataOutputStream(output)
     records.foreach { case (candidate, row) =>
-      oracle.writeLong(candidate.segmentId)
-      oracle.writeLong(candidate.rowOffset)
-      oracle.writeDouble(candidate.score)
+      oracle.writeInt(candidate.segmentId.toInt)
+      oracle.writeInt(candidate.rowOffset.toInt)
+      oracle.writeFloat(candidate.score)
       oracle.writeInt(row.length)
       oracle.write(row)
     }
@@ -338,13 +392,13 @@ class CarriedCandidatesTest extends AnyFunSuite with Matchers {
 
   test("encoded sizes use Long before the caller checks the array limit") {
     val candidates = Vector(
-      Candidate(0, 1L, 2L, 0.0),
-      Candidate(0, 1L, 3L, 1.0)
+      Candidate(0, 1L, 2L, 0.0f),
+      Candidate(0, 1L, 3L, 1.0f)
     )
     CarriedCandidates.encodedSize(candidates)(_ => Int.MaxValue) shouldBe
-      2L * (28L + Int.MaxValue.toLong)
+      2L * (16L + Int.MaxValue.toLong)
     CarriedCandidates.encodedSize(candidates.take(1))(_ =>
-      Int.MaxValue - 28
+      Int.MaxValue - 16
     ) shouldBe Int.MaxValue.toLong
     CarriedCandidates.encodedSize(Vector.empty)(_ =>
       fail("empty answer requested a row size")
@@ -361,9 +415,9 @@ class CarriedCandidatesTest extends AnyFunSuite with Matchers {
   ) {
     val packed = answer(
       MetricType.L2,
-      (0L, 1L, 0.0, "first"),
-      (0L, 2L, 1.0, ""),
-      (0L, 3L, 2.0, "last")
+      (0L, 1L, 0.0f, "first"),
+      (0L, 2L, 1.0f, ""),
+      (0L, 3L, 2.0f, "last")
     )
     val original = packed.clone()
     var calls = 0
@@ -392,7 +446,7 @@ class CarriedCandidatesTest extends AnyFunSuite with Matchers {
   }
 
   test("row callbacks expose failures without changing encoded input") {
-    val candidate = Candidate(0, 1L, 2L, 3.0)
+    val candidate = Candidate(0, 1L, 2L, 3.0f)
     val candidates = Vector(candidate)
     val row = "row".getBytes(UTF_8)
     val bytes = CarriedCandidates.encodedSize(candidates)(_ => row.length)

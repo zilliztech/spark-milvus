@@ -86,6 +86,28 @@ query. The `Search budget` log line reports the resulting query count. At
 768 float32 dimensions and K=100,000, a 24 GiB-heap, 32-core executor still
 targets 256 queries per call; an explicit 512 MiB holds 74 with overlap
 reserved, compared with 111 under the serial estimate.
+
+Milvus candidate records use a fixed 12-byte encoding: a UInt32 segment
+ordinal, a UInt32 physical row offset and a Float32 score. One dictionary for
+all segments in the search sorts their original signed Long ids and is
+broadcast once; each task retains only its own subset of those global
+ordinals. Physical row counts include deleted rows. A known physical extent
+above 2^32 fails planning. Unknown extents may execute, and every encoded
+offset must be in [0, 2^32); overflow fails without truncation or a wider
+fallback. Every search uses Float32 candidate scores before local top-k
+selection and throughout merging. Distance calculations may still accumulate
+in Double; L2 keeps the squared-distance ranking scale and rounds the square
+to Float32. Values that round together use segment id and row offset to break
+ties, including large L2 squares that overflow to infinity and small squares
+that underflow to zero. This can change near-tie selection compared with Double
+scores. No encoding option is needed. Group and merge planning retain the
+conservative 24-byte candidate estimate and the 48/72-byte reserves above, so
+smaller records do not increase group sizes or reduce merge partitions.
+DataFrame inputs use their nonnegative Spark partition id as the ordinal and
+the same checked UInt32 row offsets and Float32 scores. They carry rows after
+the 12-byte candidate and a 4-byte row length: a 16-byte header plus row bytes.
+Their planning still reserves the previous 28-byte header plus row bytes.
+
 `milvus.search.collect.threads` (default 0, the cores the task holds) is how many
 threads a search task checks, collects and packs a group's candidates on between
 two Knowhere calls; at large K that work is a third of the task, and on one

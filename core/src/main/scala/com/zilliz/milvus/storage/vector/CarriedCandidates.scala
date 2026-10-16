@@ -11,11 +11,13 @@ import com.zilliz.milvus.storage.schema.MetricType
   * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
   * 4).
   *
-  * A candidate holds the same place and score as [[CandidateBytes]], followed
-  * by its row's length and opaque bytes. Runs are best first under
-  * [[Candidate.ranking]], with big-endian headers. Binary and multiway merging
-  * select candidates before copying their complete records. Inputs and returned
-  * arrays are read-only; a single run can be returned without copying.
+  * A candidate holds a UInt32 base-partition ordinal, UInt32 physical row
+  * offset and Float32 score, followed by its row's length and opaque bytes. The
+  * partition ordinal is used directly, without a Milvus segment dictionary.
+  * Runs are best first under [[Candidate.ranking]], with big-endian headers.
+  * Binary and multiway merging select candidates before copying their complete
+  * records. Inputs and returned arrays are read-only; a single run can be
+  * returned without copying.
   */
 object CarriedCandidates {
 
@@ -67,10 +69,18 @@ object CarriedCandidates {
       candidate: Candidate,
       row: Array[Byte]
   ): Unit = {
+    require(
+      candidate.segmentId >= 0L && candidate.segmentId < CandidateBytes.MaxRows,
+      s"Carried partition ${candidate.segmentId} is outside UInt32 addresses"
+    )
+    require(
+      candidate.rowOffset >= 0L && candidate.rowOffset < CandidateBytes.MaxRows,
+      s"Carried row ${candidate.rowOffset} is outside UInt32 addresses"
+    )
     buffer
-      .putLong(candidate.segmentId)
-      .putLong(candidate.rowOffset)
-      .putDouble(candidate.score)
+      .putInt(candidate.segmentId.toInt)
+      .putInt(candidate.rowOffset.toInt)
+      .putFloat(candidate.score)
       .putInt(row.length)
       .put(row)
     ()
@@ -80,16 +90,16 @@ object CarriedCandidates {
     * and score, and where its row lies in `packed` and how long it is.
     */
   def foreach(packed: Array[Byte])(
-      each: (Long, Long, Double, Int, Int) => Unit
+      each: (Long, Long, Float, Int, Int) => Unit
   ): Unit = {
     val buffer = ByteBuffer.wrap(packed)
     var at = 0
     while (at < packed.length) {
       val size = recordSize(buffer, at)
       each(
-        buffer.getLong(at),
-        buffer.getLong(at + 8),
-        buffer.getDouble(at + 16),
+        buffer.getInt(at).toLong & 0xffffffffL,
+        buffer.getInt(at + 4).toLong & 0xffffffffL,
+        buffer.getFloat(at + 8),
         at + Header,
         size - Header
       )
@@ -141,7 +151,13 @@ object CarriedCandidates {
     while (chosen.size < k && (l < left.length || r < right.length)) {
       val fromLeft =
         r >= right.length || (l < left.length &&
-          CandidateHeads.compare(sign, buffers(0), l, buffers(1), r) <= 0)
+          CandidateHeads.compare(
+            sign,
+            buffers(0),
+            l,
+            buffers(1),
+            r
+          ) <= 0)
       if (fromLeft) {
         chosen.append(0, l, leftSize)
         l += leftSize

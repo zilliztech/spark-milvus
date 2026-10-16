@@ -1,5 +1,7 @@
 package com.zilliz.spark.connector.extensions
 
+import java.lang.{Float => JavaFloat}
+
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult.DataTypeMismatch
 import org.apache.spark.sql.catalyst.expressions.{
@@ -171,7 +173,7 @@ object VectorKernels {
       left: ArrayData,
       right: ArrayData,
       functionName: UTF8String
-  ): java.lang.Float = {
+  ): JavaFloat = {
     val length = checkedLength(left, right, functionName)
     if (length == 0) return null
     var dot = 0.0d
@@ -209,16 +211,16 @@ object VectorKernels {
     }
     val norms = math.sqrt(leftSquares * rightSquares)
     if (norms == 0.0d) null
-    else java.lang.Float.valueOf((dot / norms).toFloat)
+    else JavaFloat.valueOf((dot / norms).toFloat)
   }
 
   def innerProduct(
       left: ArrayData,
       right: ArrayData,
       functionName: UTF8String
-  ): java.lang.Float = {
+  ): JavaFloat = {
     val length = checkedLength(left, right, functionName)
-    if (length == 0) return java.lang.Float.valueOf(0.0f)
+    if (length == 0) return JavaFloat.valueOf(0.0f)
     var dot = 0.0d
     var i = 0
     val grouped = (length / 8) * 8
@@ -238,16 +240,16 @@ object VectorKernels {
       dot += left.getFloat(i).toDouble * right.getFloat(i).toDouble
       i += 1
     }
-    java.lang.Float.valueOf(dot.toFloat)
+    JavaFloat.valueOf(dot.toFloat)
   }
 
   def l2Distance(
       left: ArrayData,
       right: ArrayData,
       functionName: UTF8String
-  ): java.lang.Float = {
+  ): JavaFloat = {
     val length = checkedLength(left, right, functionName)
-    if (length == 0) return java.lang.Float.valueOf(0.0f)
+    if (length == 0) return JavaFloat.valueOf(0.0f)
     var squares = 0.0d
     var i = 0
     val grouped = (length / 8) * 8
@@ -269,13 +271,15 @@ object VectorKernels {
       squares += d * d
       i += 1
     }
-    java.lang.Float.valueOf(math.sqrt(squares).toFloat)
+    JavaFloat.valueOf(math.sqrt(squares).toFloat)
   }
 }
 
 /** One of the three vector functions as a [[RankingFunction]]: the function
   * called on the query and the row in the order the ranking names them, and its
-  * value on the engine's scale, so L2's distance is squared.
+  * value on the engine's scale, rounded to Float before local top-k. L2's
+  * distance is squared in Double, then narrowed: extreme squares can become
+  * infinity or zero and therefore introduce score ties.
   */
 abstract class VectorRanking(
     metric: MetricType,
@@ -288,26 +292,24 @@ abstract class VectorRanking(
       first: ArrayData,
       second: ArrayData,
       functionName: UTF8String
-  ): java.lang.Float
+  ): JavaFloat
 
   @transient private lazy val functionName = UTF8String.fromString(name)
 
   override final def score(
       query: Array[Float],
       row: Array[Float]
-  ): java.lang.Double = {
+  ): JavaFloat = {
     val queryArray = UnsafeArrayData.fromPrimitiveArray(query)
     val rowArray = UnsafeArrayData.fromPrimitiveArray(row)
     val result =
       if (queryFirst) value(queryArray, rowArray, functionName)
       else value(rowArray, queryArray, functionName)
     if (result == null) null
-    else {
-      val score = result.doubleValue()
-      java.lang.Double.valueOf(
-        if (metric == MetricType.L2) score * score else score
-      )
-    }
+    else if (metric == MetricType.L2) {
+      val distance = result.doubleValue()
+      JavaFloat.valueOf((distance * distance).toFloat)
+    } else result
   }
 }
 
@@ -322,7 +324,7 @@ final case class ConnectorVectorRanking(
       first: ArrayData,
       second: ArrayData,
       functionName: UTF8String
-  ): java.lang.Float = metric match {
+  ): JavaFloat = metric match {
     case MetricType.L2 => VectorKernels.l2Distance(first, second, functionName)
     case MetricType.Cosine =>
       VectorKernels.cosineSimilarity(first, second, functionName)

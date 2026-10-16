@@ -28,19 +28,27 @@ package com.zilliz.spark.connector
   * id, compacted with `CandidateBytes.merge`) and reads the base columns of the
   * rows that survived (`SearchTake`, which projects requested columns once into
   * owned rows paired with query ids). Rank and score stop at the global top-k
-  * merge. A base that is not such a scan is a DataFrame input (`FrameSearch`):
-  * every pair of a base partition and a query group is one task, which reads
-  * the partition a block at a time into float32 batches for the exact scan and
-  * keeps the rows some query's heap holds; the candidates carry those rows
-  * through the merge (`CarriedCandidates`), so there is no take stage. Both
-  * inputs share the delivery and the merge, and `NearestBySearch` handles their
-  * query rows the same way; a DataFrame input's dimension is the commonest
-  * length among the query vectors it could search. `SearchExecutionPlan`
-  * resolves budgets, task resources, query delivery, retention, concurrency,
-  * prefetch and partition counts for both inputs. `SearchResources` holds the
-  * resource formulas and `core.vector.SearchPlan` the format-independent
-  * grouping algorithm. Executors consume the plan and check actual retained
-  * bytes as data loads
+  * merge. Every local top-k and merge ranks Float scores. Every candidate has
+  * one 12-byte encoding: a UInt32 segment ordinal, a UInt32 physical row offset
+  * and a Float score. `MilvusSearch` broadcasts the whole search's ordered
+  * segment dictionary once; task packers retain only their set's global
+  * ordinals and merge states carry no dictionary. Known oversized physical
+  * extents fail planning; every encoded offset is checked even when metadata
+  * cannot establish the extent. Final rows recover the original segment ids.
+  * Resource planning keeps its conservative candidate estimates. A base that is
+  * not such a scan is a DataFrame input (`FrameSearch`): every pair of a base
+  * partition and a query group is one task, which reads the partition a block
+  * at a time into float32 batches for the exact scan and keeps the rows some
+  * query's heap holds; the candidates use the base partition id as their
+  * ordinal and carry those rows after a 16-byte header through the merge
+  * (`CarriedCandidates`), so there is no take stage. Both inputs share the
+  * delivery and the merge, and `NearestBySearch` handles their query rows the
+  * same way; a DataFrame input's dimension is the commonest length among the
+  * query vectors it could search. `SearchExecutionPlan` resolves budgets, task
+  * resources, query delivery, retention, concurrency, prefetch and partition
+  * counts for both inputs. `SearchResources` holds the resource formulas and
+  * `core.vector.SearchPlan` the format-independent grouping algorithm.
+  * Executors consume the plan and check actual retained bytes as data loads
   * (docs/design/projects/spark-milvus/architecture/search-resources.html
   * section 3.3). `SearchGroupPipeline` overlaps one held-set group search with
   * the current group's packing and output when the task holds every executor

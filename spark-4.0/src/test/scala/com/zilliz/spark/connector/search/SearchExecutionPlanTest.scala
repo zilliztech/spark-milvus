@@ -13,12 +13,171 @@ import org.apache.spark.sql.SparkSession
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
-import com.zilliz.milvus.storage.vector.{CandidateBytes, SearchPlan}
+import com.zilliz.milvus.storage.read.plan.SegmentReadTask
+import com.zilliz.milvus.storage.schema.{
+  MetricType,
+  VectorElementType,
+  VectorLayout
+}
+import com.zilliz.milvus.storage.snapshot.{
+  SegmentIndex,
+  SegmentIndexes,
+  SegmentLayout,
+  V2ColumnGroup
+}
+import com.zilliz.milvus.storage.vector.{
+  Candidate,
+  CandidateBytes,
+  CandidateBytesFixture,
+  CandidateEncoding,
+  SearchPlan
+}
 import com.zilliz.spark.connector.options.{SearchLimits, TaskResources}
 
 class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
   private val layout = VectorLayout(VectorElementType.Float32, 2)
+
+  private def segment(id: Long, rows: Option[Long]): SegmentReadTask =
+    SegmentReadTask(
+      id,
+      2L,
+      SegmentLayout.Manifest("unused", 1L),
+      Array.emptyByteArray,
+      Map.empty,
+      snapshotRows = rows
+    )
+
+  test(
+    "candidate dictionary uses all segment ids and rejects known oversized physical extents"
+  ) {
+    val maximum = CandidateBytes.MaxRows
+    val dictionary = SearchExecutionPlan.candidateDictionary(
+      Seq(segment(Long.MaxValue, Some(maximum)), segment(-1L, Some(0L)))
+    )
+    dictionary.segmentId(0L) shouldBe -1L
+    dictionary.segmentId(1L) shouldBe Long.MaxValue
+    Seq(None, Some(-1L)).foreach { rows =>
+      val unknown = SearchExecutionPlan.candidateDictionary(
+        Seq(segment(1L, Some(10L)), segment(2L, rows))
+      )
+      unknown.segmentId(0L) shouldBe 1L
+      unknown.segmentId(1L) shouldBe 2L
+      val encoding = CandidateEncoding(unknown, Seq(2L))
+      val packed = CandidateBytesFixture.pack(
+        Seq(Candidate(0, 2L, maximum - 1L, 1f)),
+        MetricType.L2,
+        encoding
+      )
+      CandidateBytes.rowOffset(packed, 0) shouldBe maximum - 1L
+      intercept[IllegalArgumentException] {
+        CandidateBytesFixture.pack(
+          Seq(Candidate(0, 2L, maximum, 1f)),
+          MetricType.L2,
+          encoding
+        )
+      }
+    }
+    Seq(maximum + 1L, Long.MaxValue).foreach { rows =>
+      intercept[IllegalArgumentException] {
+        SearchExecutionPlan.candidateDictionary(
+          Seq(segment(1L, Some(10L)), segment(2L, Some(rows)))
+        )
+      }.getMessage should include(
+        "exceeding the UInt32 candidate address limit"
+      )
+    }
+    SearchExecutionPlan
+      .candidateDictionary(
+        Seq(segment(1L, Some(10L)), segment(1L, Some(11L)))
+      )
+      .size shouldBe 1
+  }
+
+  test(
+    "indexed exact and mixed searches share a fixed dictionary and conservative budgets"
+  ) {
+    val spark = SparkSession
+      .builder()
+      .master("local[2]")
+      .appName("candidate-address-planning")
+      .config("spark.ui.enabled", "false")
+      .config("spark.driver.host", "127.0.0.1")
+      .config("spark.driver.bindAddress", "127.0.0.1")
+      .getOrCreate()
+    try {
+      def indexed(id: Long): SegmentReadTask = {
+        val descriptor = SegmentIndex(
+          1L,
+          2L,
+          id,
+          4L,
+          5L,
+          6L,
+          "vector_index",
+          Map("index_type" -> "HNSW", "metric_type" -> "L2"),
+          Vector("unused/index"),
+          10L,
+          100L,
+          1L,
+          Some(8),
+          Some(0)
+        )
+        segment(id, Some(10L))
+          .copy(indexes = SegmentIndexes.Available(Vector(descriptor)))
+      }
+      def plan(tasks: Seq[SegmentReadTask], mode: SearchMode) =
+        SearchExecutionPlan.milvus(
+          spark,
+          SearchLimits.Default,
+          SearchQueries
+            .Rows(spark.sparkContext.emptyRDD[(Long, Array[Float])], 100L),
+          tasks,
+          4L,
+          layout,
+          3,
+          MetricType.L2,
+          mode,
+          None,
+          takeColumns = false
+        )
+      val first = indexed(1L)
+      val second = indexed(2L)
+      val full = plan(Seq(first, second), SearchMode.PreferIndex)
+      full.candidateDictionary.size shouldBe 2
+      plan(
+        Seq(first, second),
+        SearchMode.Exact
+      ).candidateDictionary.size shouldBe 2
+      plan(
+        Seq(first, second.copy(indexes = SegmentIndexes.Unindexed)),
+        SearchMode.PreferIndex
+      ).candidateDictionary.size shouldBe 2
+
+      // The legacy expectedRows estimate sees the first column group only;
+      // missing counts remain unknown and cannot reject the fixed encoding.
+      val unproven = second.copy(
+        snapshotRows = None,
+        layout = SegmentLayout.ColumnGroups(
+          Seq(
+            V2ColumnGroup(Seq(4L), Seq("unused/vector"), Seq(10L)),
+            V2ColumnGroup(Seq(5L), Seq("unused/scalar"))
+          )
+        )
+      )
+      unproven.expectedRows shouldBe Some(10L)
+      unproven.provenPhysicalRows shouldBe None
+      val unknown = plan(Seq(first, unproven), SearchMode.PreferIndex)
+      unknown.candidateDictionary.size shouldBe 2
+      unknown.candidateDictionary.segmentId(0L) shouldBe 1L
+      unknown.candidateDictionary.segmentId(1L) shouldBe 2L
+      unknown.segments shouldBe full.segments
+      unknown.merge shouldBe full.merge
+      plan(
+        Seq(first, unproven.copy(indexes = SegmentIndexes.Unindexed)),
+        SearchMode.PreferIndex
+      ).candidateDictionary.size shouldBe 2
+    } finally spark.stop()
+  }
 
   private val frameLayout = VectorLayout(VectorElementType.Float32, 1)
   private val frameTaskHeap =
@@ -40,7 +199,8 @@ class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
   ): Unit = {
     val queryHeap = SearchPlan.bytesPerQuery(frameLayout, k) +
       SearchPlan.QueryIdBytes + SearchPlan.TopKQueueBytes
-    val answerBytes = k.toLong * (CandidateBytes.Width + 4L + rowBytes)
+    val answerBytes =
+      k.toLong * (SearchPlan.PackedCandidateReserveBytes + 4L + rowBytes)
     groups.foreach { group =>
       val rows = group.queries.toLong * k * rowBytes
       val required = group.queries.toLong * queryHeap +
@@ -131,7 +291,7 @@ class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
   }
 
   test("one frame query remains indivisible when fewer than k rows may exist") {
-    // A full k=10 answer needs 440 bytes, but one actual hit needs only 44.
+    // A full k=10 answer reserves 440 bytes; one encoded Float hit needs 40.
     // The 1,499-byte budget leaves 439 bytes after the query's 620-byte state.
     Seq(1499L, 1500L).foreach { available =>
       SearchExecutionPlan
@@ -190,7 +350,7 @@ class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
       )
       val largest = planned.groups.map(_.queries.toLong).max
       val requiredRows = largest * rowBytes
-      val encodedAnswer = CandidateBytes.Width + 4L + rowBytes
+      val encodedAnswer = SearchPlan.PackedCandidateReserveBytes + 4L + rowBytes
       withClue(s"heap=$heap taskHeap=$taskHeap groups=${planned.groups}: ") {
         planned.retainedMaxBytes should be >= requiredRows
         planned.retainedMaxBytes should be >= encodedAnswer

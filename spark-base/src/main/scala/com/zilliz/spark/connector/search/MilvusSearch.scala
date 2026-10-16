@@ -2,6 +2,7 @@ package com.zilliz.spark.connector.search
 
 import scala.jdk.CollectionConverters._
 
+import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{DataFrame, SparkSession}
@@ -12,7 +13,13 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import com.zilliz.milvus.storage.expr.{FilterExpr, PredicateExpr}
 import com.zilliz.milvus.storage.read.exec.SegmentIndexHandle
 import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
-import com.zilliz.milvus.storage.vector.{RankingFunction, SearchPlan}
+import com.zilliz.milvus.storage.vector.{
+  CandidateBytes,
+  CandidateDictionary,
+  CandidateEncoding,
+  RankingFunction,
+  SearchPlan
+}
 import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.options.{MilvusOption, SearchLimits}
 import com.zilliz.spark.connector.read.MilvusInputPartition
@@ -146,11 +153,13 @@ object MilvusSearch extends Logging {
     // share of the unmanaged heap is the queries' budget at that concurrency.
     val stageHeap = execution.stageHeap
     val mergePlan = execution.merge
+    val dictionary = spark.sparkContext.broadcast(execution.candidateDictionary)
     logInfo(
       s"Merge stage: $queryCount queries x ${plan.sets.size} answers of $k over ${mergePlan.partitions} partitions, " +
         s"about ${mergePlan.queriesPerPartition} queries a partition at ${mergePlan.bytesPerQuery} estimated bytes each " +
         s"against ${stageHeap.bytes} bytes of heap a task; batches up to ${mergePlan.maxRuns} runs, " +
-        s"${mergePlan.targetBytes} retained bytes per query before compaction"
+        s"${mergePlan.targetBytes} retained bytes per query before compaction; " +
+        s"candidateWidth=${CandidateBytes.Width}"
     )
     val found = candidates(
       spark,
@@ -158,6 +167,7 @@ object MilvusSearch extends Logging {
       execution,
       request,
       layout,
+      dictionary,
       metrics
     )
     SearchProgress.watch(
@@ -170,7 +180,14 @@ object MilvusSearch extends Logging {
       segments = plan.sets.map(_.size).sum
     )
     val hits =
-      SearchMerge.merged(spark, found, searchMetric, mergePlan, required)
+      SearchMerge.merged(
+        spark,
+        found,
+        searchMetric,
+        mergePlan,
+        dictionary,
+        required
+      )
     if (outputSchema.isEmpty) {
       val schema = hits.schema
       hits.queryExecution.toRdd.mapPartitions(rows =>
@@ -287,6 +304,7 @@ object MilvusSearch extends Logging {
       execution: SearchExecutionPlan.Milvus,
       request: SegmentSetSearch.Request,
       layout: VectorLayout,
+      dictionary: Broadcast[CandidateDictionary],
       metrics: SearchMetrics
   ): RDD[(Long, Array[Byte])] = {
     val plan = execution.segments
@@ -317,10 +335,18 @@ object MilvusSearch extends Logging {
     val rangeSizes = ranges.map(_.size).toVector
     val searched = new SearchQueryRanges(delivered, sets.size, ranges)
       .mapPartitionsWithIndex { (index, streamed) =>
+        val set = held.value._1(index / rangeCount)
+        // Only this set's address mapping enters its packers. The full
+        // dictionary remains in the one executor broadcast shared with merge.
+        val encoding = CandidateEncoding(
+          dictionary.value,
+          set.map(_.task.segmentId)
+        )
         SegmentSetSearch.run(
-          held.value._1(index / rangeCount),
+          set,
           request,
           held.value._2(index),
+          encoding,
           streamed,
           rangeSizes(index % rangeCount),
           metrics

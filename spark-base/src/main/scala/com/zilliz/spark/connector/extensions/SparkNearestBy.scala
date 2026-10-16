@@ -13,10 +13,10 @@ import com.zilliz.milvus.storage.vector.RankingFunction
   * (docs/design/projects/spark-milvus/architecture/dataframe-api.html sections
   * 2 and 4).
   *
-  * The connector computes what Knowhere computes as Spark would. The rest is
-  * Spark's: `function` scores the base rows Knowhere is not given, and
-  * `execute` runs the join, as Spark runs it, for the query rows the connector
-  * does not search.
+  * The connector ranks candidates by Float engine-scale scores, including Float
+  * squared distances for L2. `function` scores base rows Knowhere is not given,
+  * and `execute` runs the join, as Spark runs it, for the query rows the
+  * connector does not search.
   */
 trait SparkNearestBy {
 

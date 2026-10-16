@@ -1,5 +1,6 @@
 package com.zilliz.milvus.storage.vector
 
+import java.lang.{Float => JavaFloat}
 import java.nio.ByteBuffer
 import java.util.BitSet
 
@@ -17,8 +18,8 @@ import com.zilliz.milvus.storage.schema.{
 class SegmentSearchTest extends AnyFunSuite with Matchers {
   private val layout = VectorLayout(VectorElementType.Float32, 2)
   private val function = new RankingFunction {
-    def score(query: Array[Float], row: Array[Float]): java.lang.Double =
-      java.lang.Double.valueOf(query(0).toDouble + row(1).toDouble)
+    def score(query: Array[Float], row: Array[Float]): JavaFloat =
+      JavaFloat.valueOf((query(0).toDouble + row(1).toDouble).toFloat)
   }
 
   private final class Batch(
@@ -255,7 +256,7 @@ class SegmentSearchTest extends AnyFunSuite with Matchers {
         Map.empty,
         allocator
       )
-      mergers.head.results(0) shouldBe Seq(Candidate(0, 7L, 40L, 4.0))
+      mergers.head.results(0) shouldBe Seq(Candidate(0, 7L, 40L, 4.0f))
       targetCloses shouldBe 1
     } finally {
       matrix.close()
@@ -292,7 +293,7 @@ class SegmentSearchTest extends AnyFunSuite with Matchers {
     val matrix = QueryMatrix.ofFloats(Seq(Array(0f, 0f)), layout, allocator)
     val stream = new Stream(Seq(new Batch(2f, 4L, allocator)))
     val failing = new RankingFunction {
-      def score(query: Array[Float], row: Array[Float]): java.lang.Double = {
+      def score(query: Array[Float], row: Array[Float]): JavaFloat = {
         stream.closes shouldBe 0
         throw new IllegalStateException("ranking failed")
       }

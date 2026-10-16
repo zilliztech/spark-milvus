@@ -125,7 +125,7 @@ object IndexSearch {
     * is how many shards of queries an answer is checked and collected in at
     * once; one keeps everything on the worker thread. With `rankNonFinite` a
     * NaN or infinite score is a value like any other, ranked by
-    * `Double.compare`, as the ranking function of a nearest-by join ranks it
+    * `Float.compare`, as the ranking function of a nearest-by join ranks it
     * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
     * 2); without it such a score fails the search.
     */
@@ -622,7 +622,7 @@ object IndexSearch {
         val position = query.toLong * count + slot
         val id = ids.getLong(position * 8L)
         if (id != -1L) {
-          val score = scores.getFloat(position * 4L).toDouble
+          val score = scores.getFloat(position * 4L)
           if (!merger.rejectsScore(query, score))
             merger.add(query, segmentId, target.rowOf(id), score)
         }

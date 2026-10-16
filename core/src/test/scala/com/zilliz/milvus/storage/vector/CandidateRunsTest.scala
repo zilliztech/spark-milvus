@@ -15,7 +15,12 @@ import org.scalatest.matchers.should.Matchers
 import com.zilliz.milvus.storage.schema.MetricType
 
 class CandidateRunsTest extends AnyFunSuite with Matchers {
-  private val layouts = Seq(CandidateRuns.Plain, CandidateRuns.Carried)
+  private val segmentIds = (0L to 104L)
+  private val dictionary = CandidateDictionary(segmentIds)
+  private val encoding = CandidateEncoding(dictionary, segmentIds)
+
+  private val layouts =
+    Seq(CandidateRuns.Plain, CandidateRuns.Carried)
 
   private def ordered(
       candidates: Seq[Candidate],
@@ -31,7 +36,8 @@ class CandidateRunsTest extends AnyFunSuite with Matchers {
       metric: MetricType,
       layout: CandidateRuns.Layout
   ): Array[Byte] = layout match {
-    case CandidateRuns.Plain => CandidateBytesFixture.pack(candidates, metric)
+    case CandidateRuns.Plain =>
+      CandidateBytesFixture.pack(candidates, metric, encoding)
     case CandidateRuns.Carried =>
       CarriedCandidates.writeSorted(ordered(candidates, metric).map {
         candidate =>
@@ -68,7 +74,7 @@ class CandidateRunsTest extends AnyFunSuite with Matchers {
       state.finish() shouldBe empty
       state.runCount shouldBe 0
       state.retainedBytes shouldBe 0L
-      val one = pack(Seq(Candidate(0, 1L, 0L, 2.0)), MetricType.L2, layout)
+      val one = pack(Seq(Candidate(0, 1L, 0L, 2.0f)), MetricType.L2, layout)
       state.append(one)
       state.finish() should be theSameInstanceAs one
       state.finish() should be theSameInstanceAs one
@@ -80,12 +86,18 @@ class CandidateRunsTest extends AnyFunSuite with Matchers {
     val k = 2
     val runBytes = k * CandidateBytes.Width
     val state =
-      new CandidateRuns(k, MetricType.L2, CandidateRuns.Plain, 4, 4L * runBytes)
+      new CandidateRuns(
+        k,
+        MetricType.L2,
+        CandidateRuns.Plain,
+        4,
+        4L * runBytes
+      )
     (0 until 4).foreach { segment =>
       state.append(
         pack(
           (0 until k).map(row =>
-            Candidate(0, segment.toLong, row.toLong, segment + row.toDouble)
+            Candidate(0, segment.toLong, row.toLong, segment + row.toFloat)
           ),
           MetricType.L2,
           CandidateRuns.Plain
@@ -102,14 +114,20 @@ class CandidateRunsTest extends AnyFunSuite with Matchers {
   ) {
     val runs = (0 until 3).map(segment =>
       pack(
-        Seq(Candidate(0, segment.toLong, 0L, segment.toDouble)),
+        Seq(Candidate(0, segment.toLong, 0L, segment.toFloat)),
         MetricType.L2,
         CandidateRuns.Plain
       )
     )
-    Seq(71L -> 2, 72L -> 3, 73L -> 3).foreach { case (target, count) =>
+    Seq(35L -> 2, 36L -> 3, 37L -> 3).foreach { case (target, count) =>
       val state =
-        new CandidateRuns(1, MetricType.L2, CandidateRuns.Plain, 8, target)
+        new CandidateRuns(
+          1,
+          MetricType.L2,
+          CandidateRuns.Plain,
+          8,
+          target
+        )
       runs.foreach { run => state.append(run); checkBounds(state) }
       state.runCount shouldBe count
       state.finish().toSeq shouldBe runs.head.toSeq
@@ -121,20 +139,20 @@ class CandidateRunsTest extends AnyFunSuite with Matchers {
       new CandidateRuns(2, MetricType.L2, CandidateRuns.Carried, 8, 200L)
     val left = CarriedCandidates.writeSorted(
       Seq(
-        Candidate(0, 0L, 0L, 1.0) -> new Array[Byte](100),
-        Candidate(0, 0L, 1L, 30.0) -> Array.emptyByteArray
+        Candidate(0, 0L, 0L, 1.0f) -> new Array[Byte](100),
+        Candidate(0, 0L, 1L, 30.0f) -> Array.emptyByteArray
       )
     )
     val right = CarriedCandidates.writeSorted(
       Seq(
-        Candidate(0, 1L, 0L, 2.0) -> new Array[Byte](100),
-        Candidate(0, 1L, 1L, 40.0) -> Array.emptyByteArray
+        Candidate(0, 1L, 0L, 2.0f) -> new Array[Byte](100),
+        Candidate(0, 1L, 1L, 40.0f) -> Array.emptyByteArray
       )
     )
     state.append(left).append(right)
     checkBounds(state)
     state.runCount shouldBe 1
-    state.finish().length shouldBe 256
+    state.finish().length shouldBe 232
     state.retainedBytes should be > state.targetBytes
     state.finish().length should be > math.max(left.length, right.length)
 
@@ -149,8 +167,8 @@ class CandidateRunsTest extends AnyFunSuite with Matchers {
     "finish then append preserves old output and agrees with one final top-k"
   ) {
     layouts.foreach { layout =>
-      val first = Seq(Candidate(0, 1L, 0L, 2.0), Candidate(0, 1L, 1L, 4.0))
-      val later = Seq(Candidate(0, 2L, 0L, 1.0), Candidate(0, 2L, 1L, 3.0))
+      val first = Seq(Candidate(0, 1L, 0L, 2.0f), Candidate(0, 1L, 1L, 4.0f))
+      val later = Seq(Candidate(0, 2L, 0L, 1.0f), Candidate(0, 2L, 1L, 3.0f))
       val state = new CandidateRuns(2, MetricType.L2, layout, 4, 4096L)
       state.append(pack(first, MetricType.L2, layout))
       val old = state.finish()
@@ -171,11 +189,11 @@ class CandidateRunsTest extends AnyFunSuite with Matchers {
   ) {
     val random = new Random(913L)
     val special = Array(
-      Double.NaN,
-      Double.NegativeInfinity,
-      -0.0,
-      0.0,
-      Double.PositiveInfinity
+      Float.NaN,
+      Float.NegativeInfinity,
+      -0.0f,
+      0.0f,
+      Float.PositiveInfinity
     )
     MetricType.values.foreach { metric =>
       layouts.foreach { layout =>
@@ -184,7 +202,7 @@ class CandidateRunsTest extends AnyFunSuite with Matchers {
           (0 until (segment % (k + 1))).map { row =>
             val score =
               if (row < special.length) special(row)
-              else random.nextInt(4).toDouble
+              else random.nextInt(4).toFloat
             Candidate(0, segment.toLong, row.toLong, score)
           }
         }
@@ -240,8 +258,9 @@ class CandidateRunsTest extends AnyFunSuite with Matchers {
     layouts.foreach { layout =>
       val left = new CandidateRuns(2, MetricType.L2, layout, 8, 4096L)
       val right = new CandidateRuns(2, MetricType.L2, layout, 8, 4096L)
-      val candidates = Seq(Candidate(0, 1L, 0L, 2.0), Candidate(0, 2L, 0L, 3.0))
-      left.append(pack(Seq(Candidate(0, 0L, 0L, 1.0)), MetricType.L2, layout))
+      val candidates =
+        Seq(Candidate(0, 1L, 0L, 2.0f), Candidate(0, 2L, 0L, 3.0f))
+      left.append(pack(Seq(Candidate(0, 0L, 0L, 1.0f)), MetricType.L2, layout))
       candidates.foreach(candidate =>
         right.append(pack(Seq(candidate), MetricType.L2, layout))
       )
@@ -255,7 +274,7 @@ class CandidateRunsTest extends AnyFunSuite with Matchers {
         layout
       ).toSeq
       left.finish().toSeq shouldBe pack(
-        Seq(Candidate(0, 0L, 0L, 1.0), candidates.head),
+        Seq(Candidate(0, 0L, 0L, 1.0f), candidates.head),
         MetricType.L2,
         layout
       ).toSeq
@@ -267,7 +286,7 @@ class CandidateRunsTest extends AnyFunSuite with Matchers {
   ) {
     layouts.foreach { layout =>
       val all = (0 until 6).map(segment =>
-        Candidate(0, segment.toLong, 0L, segment.toDouble)
+        Candidate(0, segment.toLong, 0L, segment.toFloat)
       )
       val runs =
         all.map(candidate => pack(Seq(candidate), MetricType.IP, layout))

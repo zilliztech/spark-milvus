@@ -653,3 +653,18 @@ git push origin master
 cd ../..
 git add docs/design && git commit          # the new gitlink, with the code it describes
 ```
+
+### Repository-local document references
+
+Repository documents must not cite documents hosted only by a developer's local
+web server. When such a document is needed, copy its content and required
+images, data and other assets into the repository that owns the documentation,
+then use relative links to that copy. Reuse an existing repository copy when
+available. Record the source title, date and version without retaining the
+local web URL as a reference.
+
+The copied document and its links must remain usable from a checkout without
+the original machine or web server. Paths outside the repository are not a
+substitute for copying the document. Keep public and private material in their
+respective repositories. Links to official documentation and other shared
+external sources remain valid references.

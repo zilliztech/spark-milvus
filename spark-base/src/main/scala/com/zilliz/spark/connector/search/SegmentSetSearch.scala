@@ -13,6 +13,7 @@ import com.zilliz.milvus.storage.read.exec.{
 }
 import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
 import com.zilliz.milvus.storage.vector.{
+  CandidateEncoding,
   QueryMatrix,
   RankingFunction,
   SearchThreads,
@@ -73,6 +74,7 @@ private[search] object SegmentSetSearch extends Logging {
       set: Seq[MilvusInputPartition],
       request: Request,
       execution: SearchExecutionPlan.Task,
+      encoding: CandidateEncoding,
       groups: Iterator[SearchQueries.Group],
       groupCount: Int,
       metrics: SearchMetrics
@@ -104,7 +106,8 @@ private[search] object SegmentSetSearch extends Logging {
           request,
           allocator.allocator,
           metrics,
-          execution
+          execution,
+          encoding
         )
       finally allocator.close()
     } else {
@@ -204,7 +207,7 @@ private[search] object SegmentSetSearch extends Logging {
             s"queries=${ids.length}, candidates=${merger.size}, $how, " +
             s"groupPipeline=$pipelineGroups"
         )
-        candidates(merger, ids, execution.collectThreads)
+        candidates(merger, ids, execution.collectThreads, encoding)
       }
     }
   }
@@ -227,7 +230,8 @@ private[search] object SegmentSetSearch extends Logging {
       request: Request,
       allocator: BufferAllocator,
       metrics: SearchMetrics,
-      execution: SearchExecutionPlan.Task
+      execution: SearchExecutionPlan.Task,
+      encoding: CandidateEncoding
   ): Iterator[(Long, Array[Byte])] = {
     val ids = new Array[Array[Long]](groupCount)
     val matrices = new Array[QueryMatrix](groupCount)
@@ -266,7 +270,8 @@ private[search] object SegmentSetSearch extends Logging {
       request,
       allocator,
       metrics,
-      execution
+      execution,
+      encoding
     )
   }
 
@@ -282,7 +287,8 @@ private[search] object SegmentSetSearch extends Logging {
       request: Request,
       allocator: BufferAllocator,
       metrics: SearchMetrics,
-      execution: SearchExecutionPlan.Task
+      execution: SearchExecutionPlan.Task,
+      encoding: CandidateEncoding
   ): Iterator[(Long, Array[Byte])] = {
     val groupCount = matrices.length
     try {
@@ -307,7 +313,12 @@ private[search] object SegmentSetSearch extends Logging {
           s"candidates=${kept.iterator.map(_.size).sum}, queries kept"
       )
       Iterator.range(0, groupCount).flatMap { index =>
-        val rows = candidates(kept(index), ids(index), execution.collectThreads)
+        val rows = candidates(
+          kept(index),
+          ids(index),
+          execution.collectThreads,
+          encoding
+        )
         kept(index) = null
         ids(index) = null
         rows
@@ -393,9 +404,9 @@ private[search] object SegmentSetSearch extends Logging {
     * holding that query's best k packed into bytes.
     *
     * One record per query rather than one per candidate is what keeps this
-    * stage's output at the `queries * k * CandidateBytes.Width` the plan counts
-    * on, and what lets the merge stage walk two answers instead of aggregating
-    * candidate by candidate
+    * stage's output within the `queries * k * 24` conservative plan, and what
+    * lets the merge stage walk two answers instead of aggregating candidate by
+    * candidate
     * (docs/design/projects/spark-milvus/architecture/vector-search.html section
     * 2.1). The merger retains its primitive columns alongside the packed bytes
     * until the caller drops the group; SearchPlan budgets for both payloads.
@@ -403,7 +414,8 @@ private[search] object SegmentSetSearch extends Logging {
   private def candidates(
       merger: TopKMerger,
       ids: Array[Long],
-      threads: Int
+      threads: Int,
+      encoding: CandidateEncoding
   ): Seq[(Long, Array[Byte])] = {
     require(threads > 0, s"Packing takes at least one thread: $threads")
     val bytes = new Array[Array[Byte]](merger.queries)
@@ -412,7 +424,7 @@ private[search] object SegmentSetSearch extends Logging {
       var query = from
       while (query < until) {
         merger.sort(query)
-        bytes(query) = merger.takePacked(query)
+        bytes(query) = merger.takePacked(query, encoding)
         query += 1
       }
     }
