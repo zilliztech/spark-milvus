@@ -9,9 +9,9 @@ from unittest.mock import patch
 
 import jvm_load
 import platforms
-from build import (knowhere_c_api_tests, cardinal_versions, digest, platform_tool_requirements, prepare_conan_lock,
-                   promote_bundle, replace_requires_section, snapshot_corrosion, validate_conan_lock,
-                   validate_locked_graph)
+from build import (knowhere_c_api_tests, cardinal_versions, digest, export_git_ref, export_git_tree,
+                   platform_tool_requirements, prepare_conan_lock, promote_bundle, replace_requires_section,
+                   snapshot_corrosion, tree_hashes, validate_conan_lock, validate_locked_graph)
 
 
 class CardinalVersionTest(unittest.TestCase):
@@ -52,6 +52,48 @@ class BuildContextPinTest(unittest.TestCase):
         section = replace_requires_section({"openssl": "openssl/3.3.2#9f9f"})
         self.assertIn("openssl/*: openssl/3.3.2#9f9f", section)
         self.assertNotIn("openssl/*: openssl/3.3.2\n", section)
+
+
+class GitSourceExportTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.source = self.root / "source"
+        self.source.mkdir()
+        subprocess.run(["git", "-C", self.source, "init", "-q"], check=True)
+        subprocess.run(["git", "-C", self.source, "config", "user.name", "Native Build Test"], check=True)
+        subprocess.run(["git", "-C", self.source, "config", "user.email", "native-build@example.invalid"], check=True)
+        (self.source / "tracked.txt").write_text("tracked\n")
+        subprocess.run(["git", "-C", self.source, "add", "tracked.txt"], check=True)
+        subprocess.run(["git", "-C", self.source, "commit", "-qm", "Pinned fixture"], check=True)
+        self.revision = subprocess.check_output(
+            ["git", "-C", self.source, "rev-parse", "HEAD"], text=True).strip()
+
+    def test_export_contains_only_tracked_files_and_no_git_metadata(self):
+        (self.source / "untracked.txt").write_text("untracked\n")
+        (self.source / "tracked.txt").write_text("working tree change\n")
+        destination = self.root / "snapshot"
+        export_git_tree(self.source, self.revision, destination)
+        self.assertEqual("tracked\n", (destination / "tracked.txt").read_text())
+        self.assertFalse((destination / "untracked.txt").exists())
+        self.assertFalse((destination / ".git").exists())
+
+    def test_recorded_export_is_reused_only_when_unchanged(self):
+        destination = self.root / "snapshot"
+        export_git_tree(self.source, self.revision, destination)
+        recorded = tree_hashes(destination)
+        export_git_tree(self.source, self.revision, destination, recorded)
+        (destination / "tracked.txt").write_text("changed\n")
+        with self.assertRaisesRegex(RuntimeError, "source snapshot was modified"):
+            export_git_tree(self.source, self.revision, destination, recorded)
+
+    def test_local_tag_is_resolved_and_exported_without_git_metadata(self):
+        subprocess.run(["git", "-C", self.source, "tag", "v1.0.0"], check=True)
+        destination = self.root / "tag-snapshot"
+        self.assertEqual(self.revision, export_git_ref(self.source, "v1.0.0", destination))
+        self.assertEqual("tracked\n", (destination / "tracked.txt").read_text())
+        self.assertFalse((destination / ".git").exists())
 
 
 class BundlePromotionTest(unittest.TestCase):
