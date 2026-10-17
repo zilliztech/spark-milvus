@@ -561,7 +561,7 @@ lazy val integration40 = project
     moduleName := "spark-milvus-integration-4.0",
     Modules.perLine(Versions.line("4.0")),
     publish / skip := true,
-    libraryDependencies += icebergSparkRuntime % Test,
+    libraryDependencies += icebergSparkRuntime.withConfigurations(Some("test")),
     libraryDependencies ++=
       Dependencies
         .sparkDeps(Versions.line("4.0"))

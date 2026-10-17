@@ -16,8 +16,8 @@ import org.scalatest.matchers.should.Matchers
   * default catalog hardcoded to `type=hive`, which needs a Hive metastore;
   * catalog-qualified identifiers are the supported hadoop-catalog read form.
   *
-  * Prerequisites: MinIO running at localhost:9000 with a pre-created
-  * `a-bucket` and minioadmin/minioadmin credentials.
+  * Prerequisites: MinIO running at localhost:9000 with a pre-created `a-bucket`
+  * and minioadmin/minioadmin credentials.
   */
 class IcebergReadMinioIT extends AnyFunSuite with Matchers {
 

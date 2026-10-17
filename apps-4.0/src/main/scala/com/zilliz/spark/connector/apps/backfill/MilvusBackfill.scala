@@ -818,7 +818,7 @@ object MilvusBackfill {
     // Identifiers pass through normalizeObjectStorageScheme and
     // configureHadoopS3ForPath unharmed; reads go through Hadoop FS, so the
     // scoped source-bucket S3A config still applies.
-    val path = normalizeObjectStorageScheme(rawPath, config)
+    val path = BackfillStorage.normalizeObjectStorageScheme(rawPath, config)
     // Iceberg input must be a catalog-qualified identifier (catalog.db.table).
     // Raw file/object-storage paths are unsupported and would otherwise fail
     // later with a misleading Hive-metastore error from Iceberg's default
@@ -833,30 +833,33 @@ object MilvusBackfill {
       )
     }
     try {
-      Right(withScopedHadoopStorage(spark, path, config, isSource = true) {
-        // No full materialization is needed here, mirroring readParquet:
-        // S3A uses persistent per-bucket `fs.s3a.bucket.<b>.*` configuration,
-        // so a later lazy scan still resolves the source-bucket credentials
-        // even after this block returns. OSS keys are restored on exit, so
-        // oss:// inputs are materialized via localCheckpoint inside the scope.
-        // df.columns resolves the Iceberg schema (metadata read) inside the
-        // scope, failing fast on an empty table.
-        var reader = spark.read.format("iceberg")
-        config.icebergSnapshotId
-          .filter(_.trim.nonEmpty)
-          .foreach(id => reader = reader.option("snapshot-id", id.trim))
-        val df = reader.load(path)
-        if (df.columns.isEmpty) {
-          throw new IllegalArgumentException(
-            "Backfill iceberg input is empty (no columns)"
-          )
-        }
-        if (path.startsWith("oss://")) {
-          localCheckpointBackfillData(spark, df)
-        } else {
-          BackfillSource(df, None)
-        }
-      })
+      Right(
+        BackfillStorage
+          .withScopedHadoopStorage(spark, path, config, isSource = true) {
+            // No full materialization is needed here, mirroring readParquet:
+            // S3A uses persistent per-bucket `fs.s3a.bucket.<b>.*` configuration,
+            // so a later lazy scan still resolves the source-bucket credentials
+            // even after this block returns. OSS keys are restored on exit, so
+            // oss:// inputs are materialized via localCheckpoint inside the scope.
+            // df.columns resolves the Iceberg schema (metadata read) inside the
+            // scope, failing fast on an empty table.
+            var reader = spark.read.format("iceberg")
+            config.icebergSnapshotId
+              .filter(_.trim.nonEmpty)
+              .foreach(id => reader = reader.option("snapshot-id", id.trim))
+            val df = reader.load(path)
+            if (df.columns.isEmpty) {
+              throw new IllegalArgumentException(
+                "Backfill iceberg input is empty (no columns)"
+              )
+            }
+            if (path.startsWith("oss://")) {
+              localCheckpointBackfillData(spark, df)
+            } else {
+              BackfillSource(df, None)
+            }
+          }
+      )
     } catch {
       case e: Exception =>
         logger.error(s"Failed to read Iceberg table from $path", e)
