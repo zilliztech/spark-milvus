@@ -562,6 +562,7 @@ lazy val integration40 = project
     Modules.perLine(Versions.line("4.0")),
     publish / skip := true,
     libraryDependencies += icebergSparkRuntime.withConfigurations(Some("test")),
+    libraryDependencies += hadoopAws.withConfigurations(Some("test")),
     libraryDependencies ++=
       Dependencies
         .sparkDeps(Versions.line("4.0"))
