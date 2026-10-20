@@ -8,6 +8,7 @@ import java.nio.charset.{
 }
 import scala.collection.JavaConverters._
 
+import com.google.protobuf.InvalidProtocolBufferException
 import org.apache.arrow.vector._
 import org.apache.arrow.vector.complex.{ListVector, MapVector, StructVector}
 import org.apache.spark.internal.Logging
@@ -21,7 +22,7 @@ import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
 
 import com.zilliz.spark.connector.{FloatConverter, SparseFloatVectorConverter}
-import io.milvus.grpc.schema.{DataType => MilvusDataType}
+import io.milvus.grpc.schema.{DataType => MilvusDataType, ScalarField}
 
 /** Utilities for converting between Spark InternalRow and Arrow vectors
   */
@@ -137,6 +138,18 @@ object ArrowConverter extends Logging {
 
       case StringType =>
         utf8StringFromVariableWidth(vector, rowIndex)
+
+      // Milvus stores scalar arrays as a serialized ScalarField in Binary.
+      // Select by schema metadata, before the binary-backed vector branches:
+      // Float/Int8 arrays and dense vectors share Spark ArrayType.
+      case ArrayType(elementType, _)
+          if milvusType.contains(MilvusDataType.Array) =>
+        vector match {
+          case binary: VarBinaryVector =>
+            decodeStoredArray(binary, rowIndex, elementType)
+          case _ =>
+            decodeListArray(vector, rowIndex, elementType)
+        }
 
       case ArrayType(ByteType, _) if isBinaryBackedVector(vector) =>
         val bytes = binaryVectorBytes(vector, rowIndex)
@@ -307,6 +320,69 @@ object ArrowConverter extends Logging {
     }.toArray
 
     ArrayData.toArrayData(arrayElements)
+  }
+
+  private def decodeStoredArray(
+      vector: VarBinaryVector,
+      rowIndex: Int,
+      elementType: DataType
+  ): ArrayData = {
+    val context =
+      s"Milvus Array column '${vector.getName}' at row $rowIndex as Array[$elementType]"
+    val bytes = vector.get(rowIndex)
+    val scalar =
+      try {
+        ScalarField.parseFrom(bytes)
+      } catch {
+        case e: InvalidProtocolBufferException =>
+          throw new IllegalArgumentException(
+            s"Cannot decode $context: invalid ScalarField protobuf",
+            e
+          )
+      }
+
+    // Match the oneof even for typed empty arrays, rather than using default
+    // getters. Milvus also accepts a zero-byte ScalarField as an empty array;
+    // Arrow's validity bitmap (handled by arrowToInternalRow) distinguishes null.
+    val elements: Array[_] = (elementType, scalar.data) match {
+      case (
+            BooleanType | ByteType | ShortType | IntegerType | LongType |
+            FloatType | DoubleType | StringType,
+            ScalarField.Data.Empty
+          ) if bytes.isEmpty =>
+        Array.empty[Any]
+      case (BooleanType, ScalarField.Data.BoolData(values)) =>
+        values.data.toArray
+      case (ByteType, ScalarField.Data.IntData(values)) =>
+        if (values.data.exists(v => v < Byte.MinValue || v > Byte.MaxValue)) {
+          throw new IllegalArgumentException(
+            s"Cannot decode $context: Int8 overflow"
+          )
+        }
+        values.data.map(_.toByte).toArray
+      case (ShortType, ScalarField.Data.IntData(values)) =>
+        if (values.data.exists(v => v < Short.MinValue || v > Short.MaxValue)) {
+          throw new IllegalArgumentException(
+            s"Cannot decode $context: Int16 overflow"
+          )
+        }
+        values.data.map(_.toShort).toArray
+      case (IntegerType, ScalarField.Data.IntData(values)) =>
+        values.data.toArray
+      case (LongType, ScalarField.Data.LongData(values)) =>
+        values.data.toArray
+      case (FloatType, ScalarField.Data.FloatData(values)) =>
+        values.data.toArray
+      case (DoubleType, ScalarField.Data.DoubleData(values)) =>
+        values.data.toArray
+      case (StringType, ScalarField.Data.StringData(values)) =>
+        values.data.map(UTF8String.fromString).toArray
+      case _ =>
+        throw new IllegalArgumentException(
+          s"Cannot decode $context: incompatible ScalarField oneof ${scalar.data.getClass.getSimpleName}"
+        )
+    }
+    ArrayData.toArrayData(elements)
   }
 
   private def requireSparseSparkTypes(
