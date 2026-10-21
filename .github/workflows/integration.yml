@@ -62,7 +62,7 @@ jobs:
           path: candidate
       - name: Verify exact candidate files
         run: python3 scripts/release.py verify --candidate candidate
-      - name: Resolve both entries and run native Spark operations
+      - name: Resolve entries and thin modules and run native Spark operations
         env:
           SPARK_LINE: ${{ matrix.line }}
           NATIVE_PLATFORM: ${{ matrix.platform }}

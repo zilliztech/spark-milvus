@@ -266,10 +266,23 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version }}
           SBT_PROJECT: ${{ matrix.project }}
         run: sbt "-Drelease.version=$RELEASE_VERSION" "$SBT_PROJECT/releaseJvmArtifacts"
+      - name: Export transitive thin modules for Spark 4.0
+        if: matrix.line == '4.0'
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: sbt "-Drelease.version=$RELEASE_VERSION" "spark40/releaseThinArtifacts"
       - uses: actions/upload-artifact@v4
         with:
           name: jvm-${{ matrix.line }}
           path: target/release-jvm/${{ matrix.line }}/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: matrix.line == '4.0'
+        with:
+          name: thin-${{ matrix.line }}
+          path: target/release-thin/${{ matrix.line }}/
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
@@ -295,6 +308,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           pattern: jvm-*
+          path: release-inputs
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: thin-*
           path: release-inputs
       - uses: actions/download-artifact@v4
         with:

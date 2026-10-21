@@ -2,12 +2,13 @@
 """Compile only smoke fixtures, then consume a Maven entry with spark-submit.
 
 Production classes come exclusively from the candidate's published coordinates.
-The compiler and spark-submit use separate, fresh dependency caches. Both entry
-types run the same real native read/write/search workload with a worker JVM.
+The compiler and spark-submit use separate, fresh dependency caches. Entries
+and thin modules run the same native read/write/search workload with a worker JVM.
 """
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 import zipfile
 
 
@@ -43,6 +45,20 @@ def main_jars(manifest):
 
 
 def expected_artifacts(manifest, line, platform, entry):
+    if entry == "thin":
+        if line != "4.0":
+            raise ValueError("Thin consumer currently supports only Spark 4.0")
+        names = {
+            "spark-milvus-native-runtime", "spark-milvus-native-vector",
+            "spark-milvus-native-storage_2.13", "spark-milvus-core_2.13",
+            "spark-milvus-compat_2.13", "spark-milvus-client_2.13",
+            "spark-milvus-4.0-thin_2.13",
+        }
+        available = main_jars(manifest)
+        missing = names - available.keys()
+        if missing:
+            raise ValueError("Candidate is missing thin artifacts: " + ", ".join(sorted(missing)))
+        return "spark-milvus-4.0-thin_2.13", {name: available[name] for name in names}
     suffix = "" if entry == "universal" else "-" + platform
     entry_id = f"spark-milvus-{line}{suffix}_2.13"
     names = {entry_id, f"spark-milvus-{line}-jvm_2.13"}
@@ -80,11 +96,41 @@ def check_resolved(ivy, expected):
     wanted_platforms = {
         name.removeprefix("spark-milvus-native-")
         for name in expected
-        if name.startswith("spark-milvus-native-")
+        if name in {"spark-milvus-native-linux-x86_64", "spark-milvus-native-linux-aarch64"}
     }
     if native_platforms != wanted_platforms:
         raise RuntimeError(f"Resolved native platforms {native_platforms} != {wanted_platforms}")
     return found
+
+
+def thin_native_bundle(candidate, manifest, platform, requested=None):
+    """Choose a separate, validated OSS bundle; it is never a thin dependency."""
+    if requested is not None:
+        path = requested.resolve()
+    else:
+        name = "spark-milvus-native-" + platform
+        artifact = main_jars(manifest).get(name)
+        if artifact is None:
+            raise ValueError("Thin-only consumption needs --native-bundle")
+        path = candidate / "repository" / artifact["path"]
+        if digest(path) != artifact["sha256"]:
+            raise ValueError("Native bundle differs from the verified candidate")
+    spec = importlib.util.spec_from_file_location("release", ROOT / "scripts/release.py")
+    release = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(release)
+    release.verify_native(path, manifest["plan"], platform)
+    return path
+
+
+def ivy_settings(path, repository):
+    """Do not consult a developer's Maven local repository during consumption."""
+    settings = ET.Element("ivysettings")
+    ET.SubElement(settings, "settings", defaultResolver="candidate-and-central")
+    resolvers = ET.SubElement(settings, "resolvers")
+    chain = ET.SubElement(resolvers, "chain", name="candidate-and-central", returnFirst="true")
+    for name, root in (("candidate", repository), ("central", CENTRAL)):
+        ET.SubElement(chain, "ibiblio", name=name, root=root, m2compatible="true", usepoms="true")
+    ET.ElementTree(settings).write(path, encoding="utf-8", xml_declaration=True)
 
 
 def run(command, *, cwd, env, log=None):
@@ -181,11 +227,21 @@ def compile_fixture(work, repository, version, row, entry_id, env):
     return jar
 
 
-def smoke(candidate, line, platform, output, *, central=False):
+def smoke(candidate, line, platform, output, *, central=False, entry=None, native_bundle=None):
     manifest = json.loads((candidate / "release-manifest.json").read_text())
     version = manifest["version"]
     row = next(row for row in manifest["plan"]["jvm"] if row["line"] == line)
     repository = CENTRAL if central else (candidate / "repository").as_uri()
+    if entry:
+        entries = (entry,)
+    elif manifest["plan"].get("distribution") == "thin":
+        entries = ("thin",)
+    else:
+        entries = ("universal", "platform")
+        if line == "4.0" and "spark-milvus-4.0-thin_2.13" in main_jars(manifest):
+            entries += ("thin",)
+    if native_bundle is not None and entries != ("thin",):
+        raise ValueError("--native-bundle requires --entry thin or a thin-only candidate")
     expected_machine = "x86_64" if platform == "linux-x86_64" else "aarch64"
     if sys.platform != "linux" or os.uname().machine != expected_machine:
         raise ValueError("Consumer runner does not match " + platform)
@@ -216,12 +272,16 @@ def smoke(candidate, line, platform, output, *, central=False):
         env["SPARK_HOME"] = str(spark_home)
         env["PYSPARK_PYTHON"] = str(python_env / "bin/python")
         reports = []
-        for entry in ("universal", "platform"):
+        for entry in entries:
             work = root / entry
             work.mkdir()
             entry_id, expected = expected_artifacts(manifest, line, platform, entry)
+            native = thin_native_bundle(candidate, manifest, platform, native_bundle) if entry == "thin" else None
+            native_digest = digest(native) if native else None
             fixture = compile_fixture(work, repository, version, row, entry_id, env)
             ivy = work / "runtime-ivy"
+            settings = work / "ivysettings.xml"
+            ivy_settings(settings, repository)
             log = output / f"{entry}.log"
             diagnostics = output / f"{entry}-diagnostics"
             (diagnostics / "jvm").mkdir(parents=True, exist_ok=True)
@@ -239,14 +299,17 @@ def smoke(candidate, line, platform, output, *, central=False):
                 "--conf", "spark.driver.host=127.0.0.1",
                 "--conf", "spark.driver.bindAddress=127.0.0.1",
                 "--conf", f"spark.jars.ivy={ivy}",
+                "--conf", f"spark.jars.ivySettings={settings}",
                 "--conf", f"spark.executorEnv.LD_PRELOAD={signal}",
                 "--conf", "spark.executorEnv.MALLOC_ARENA_MAX=2",
                 "--conf", "spark.executorEnv.MALLOC_MMAP_THRESHOLD_=1048576",
                 "--conf", "spark.executorEnv.MALLOC_TRIM_THRESHOLD_=134217728",
                 "--repositories", repository,
                 "--packages", f"{GROUP}:{entry_id}:{version}",
-                "--class", MAIN, str(fixture),
             ]
+            if native:
+                command += ["--jars", str(native)]
+            command += ["--class", MAIN, str(fixture)]
             try:
                 run(command, cwd=work, env={**env, "LD_PRELOAD": str(signal)}, log=log)
             finally:
@@ -255,7 +318,12 @@ def smoke(candidate, line, platform, output, *, central=False):
             if "ALL PASS" not in text or "PASS independent executor JVM" not in text:
                 raise RuntimeError("Smoke did not complete every gate: " + str(log))
             resolved = check_resolved(ivy, expected)
-            reports.append({"entry": entry_id, "resolved": resolved, "result": "passed"})
+            report = {"entry": entry_id, "resolved": resolved, "result": "passed"}
+            if native:
+                if digest(native) != native_digest:
+                    raise RuntimeError("Native bundle changed during thin consumption")
+                report["nativeBundle"] = {"sha256": native_digest, "platform": platform, "withCardinal": False}
+            reports.append(report)
         (output / "consumer-result.json").write_text(json.dumps({
             "version": version, "platform": platform, "line": line,
             "manifest_sha256": digest(candidate / "release-manifest.json"), "entries": reports,
@@ -269,8 +337,11 @@ def main():
     parser.add_argument("--platform", choices=("linux-x86_64", "linux-aarch64"), required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--central", action="store_true", help="Resolve from public Maven Central")
+    parser.add_argument("--entry", choices=("universal", "platform", "thin"), help="Consume one delivery form")
+    parser.add_argument("--native-bundle", type=Path, help="Separate OSS platform JAR for a thin-only candidate")
     args = parser.parse_args()
-    smoke(args.candidate.resolve(), args.line, args.platform, args.output.resolve(), central=args.central)
+    smoke(args.candidate.resolve(), args.line, args.platform, args.output.resolve(),
+          central=args.central, entry=args.entry, native_bundle=args.native_bundle)
 
 
 if __name__ == "__main__":

@@ -100,6 +100,48 @@ class ConsumerTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Resolved native platforms"):
             consumer.check_resolved(self.ivy, expected)
 
+    def thin_manifest(self):
+        names = ("native-runtime", "native-vector", "native-storage_2.13",
+                 "core_2.13", "compat_2.13", "client_2.13", "4.0-thin_2.13")
+        return {"plan": {"distribution": "thin", "native": []},
+                "artifacts": [self.jar("spark-milvus-" + name) for name in names]}
+
+    def test_thin_resolves_modules_without_a_platform_or_fat_jar(self):
+        manifest = self.thin_manifest()
+        entry, expected = consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "thin")
+        self.assertEqual(entry, "spark-milvus-4.0-thin_2.13")
+        self.assertEqual(len(consumer.check_resolved(self.ivy, expected)), 7)
+        self.jar("spark-milvus-4.0-jvm_2.13")
+        with self.assertRaisesRegex(RuntimeError, "different connector artifacts"):
+            consumer.check_resolved(self.ivy, expected)
+
+    def test_thin_rejects_native_resources_in_transitive_dependencies(self):
+        manifest = self.thin_manifest()
+        _, expected = consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "thin")
+        with zipfile.ZipFile(self.ivy / "jars/other.group_bad.jar", "w") as archive:
+            archive.writestr("native/milvus/1/linux-x86_64/manifest.properties", "format.version=1")
+        with self.assertRaisesRegex(RuntimeError, "Resolved native platforms"):
+            consumer.check_resolved(self.ivy, expected)
+
+    def test_thin_requires_complete_candidate_and_separate_native(self):
+        manifest = self.thin_manifest()
+        with self.assertRaisesRegex(ValueError, "needs --native-bundle"):
+            consumer.thin_native_bundle(self.root, manifest, "linux-x86_64")
+        manifest["artifacts"].pop()
+        with self.assertRaisesRegex(ValueError, "missing thin artifacts"):
+            consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "thin")
+        with self.assertRaisesRegex(ValueError, "only Spark 4.0"):
+            consumer.expected_artifacts(manifest, "4.2", "linux-x86_64", "thin")
+
+    def test_ivy_resolvers_do_not_use_maven_local(self):
+        path = self.root / "ivysettings.xml"
+        consumer.ivy_settings(path, "file:///candidate with spaces/repository")
+        settings = consumer.ET.parse(path).getroot()
+        resolvers = settings.findall("resolvers/chain/ibiblio")
+        self.assertEqual([item.get("root") for item in resolvers],
+                         ["file:///candidate with spaces/repository", consumer.CENTRAL])
+        self.assertEqual(len(settings.findall("resolvers/chain/*")), 2)
+
 
 class ConsumerDiagnosticsTest(unittest.TestCase):
     def setUp(self):
@@ -111,6 +153,7 @@ class ConsumerDiagnosticsTest(unittest.TestCase):
         self.candidate.mkdir()
         (self.candidate / "release-manifest.json").write_text(json.dumps({
             "version": "2.0.0", "plan": {"jvm": [{"line": "4.0", "spark": "4.0.1"}]},
+            "artifacts": [],
         }))
         java_home = self.root / "java"
         (java_home / "lib").mkdir(parents=True)

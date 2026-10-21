@@ -125,25 +125,11 @@ object ReleaseArtifacts {
     val sourcesJar = directory / s"$stem-sources.jar"
     archive(sources, sourcesJar)
 
-    val knowhereDocs = directory / "api-work" / "knowhere"
-    IO.delete(knowhereDocs)
-    IO.createDirectory(knowhereDocs)
-    val upstream = upstreamSources(root).map(_._1.getAbsolutePath).sorted
-    require(
-      upstream.nonEmpty,
-      "Knowhere API sources are required for release documentation"
+    val knowhereDocs = upstreamDocumentation(
+      root,
+      jdk,
+      directory / "api-work" / "knowhere"
     )
-    val result = Process(
-      Seq(
-        (jdk / "bin" / "javadoc").getAbsolutePath,
-        "-quiet",
-        "-Xdoclint:none",
-        "-d",
-        knowhereDocs.getAbsolutePath
-      ) ++ upstream,
-      root
-    ).!
-    require(result == 0, "Knowhere API documentation generation failed")
     val allDocumentation = documentation :+ ("knowhere-api" -> knowhereDocs)
     val index = directory / "api-work" / "index.html"
     IO.write(
@@ -215,6 +201,28 @@ object ReleaseArtifacts {
     files.map(_._2) :+ metadataFile
   }
 
+  def upstreamDocumentation(root: File, jdk: File, knowhereDocs: File): File = {
+    IO.delete(knowhereDocs)
+    IO.createDirectory(knowhereDocs)
+    val upstream = upstreamSources(root).map(_._1.getAbsolutePath).sorted
+    require(
+      upstream.nonEmpty,
+      "Knowhere API sources are required for release documentation"
+    )
+    val result = Process(
+      Seq(
+        (jdk / "bin" / "javadoc").getAbsolutePath,
+        "-quiet",
+        "-Xdoclint:none",
+        "-d",
+        knowhereDocs.getAbsolutePath
+      ) ++ upstream,
+      root
+    ).!
+    require(result == 0, "Knowhere API documentation generation failed")
+    knowhereDocs
+  }
+
   private def dependencies(classpath: Classpath): JSONArray = {
     // Compile precedes Runtime in the resolved classpath: it includes Spark's
     // version selection. A POM must name each group/artifact only once.
@@ -273,7 +281,7 @@ object ReleaseArtifacts {
     } finally jar.close()
   }
 
-  private def archive(mappings: Seq[(File, String)], output: File): Unit = {
+  def archive(mappings: Seq[(File, String)], output: File): Unit = {
     require(mappings.nonEmpty, s"Cannot publish an empty archive: $output")
     val entries = mappings.groupBy(_._2).toSeq.sortBy(_._1).map {
       case (name, alternatives) =>
@@ -301,7 +309,7 @@ object ReleaseArtifacts {
     finally zip.close()
   }
 
-  private def digest(file: File): String = {
+  def digest(file: File): String = {
     val hash = MessageDigest.getInstance("SHA-256")
     val input = new FileInputStream(file)
     try transfer(input, bytes => hash.update(bytes._1, 0, bytes._2))

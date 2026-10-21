@@ -265,6 +265,25 @@ class WorkflowGateTest(unittest.TestCase):
         self.assertNotIn("environment", build["jobs"]["native"])
         self.assertNotIn("environment", build["jobs"]["jvm"])
 
+    def test_thin_modules_are_exported_without_native_and_staged_with_the_same_candidate(self):
+        jobs = workflow("build-artifacts.yml")["jobs"]
+        steps = jobs["jvm"]["steps"]
+        export = next(step for step in steps if "releaseThinArtifacts" in step.get("run", ""))
+        self.assertEqual(export["if"], "matrix.line == '4.0'")
+        self.assertEqual(export["env"]["RELEASE_VERSION"], "${{ inputs.version }}")
+        self.assertIn('"-Drelease.version=$RELEASE_VERSION" "spark40/releaseThinArtifacts"', export["run"])
+        upload = next(step for step in steps if step.get("with", {}).get("name") == "thin-${{ matrix.line }}")
+        self.assertEqual(upload["if"], export["if"])
+        self.assertEqual(upload["with"]["path"], "target/release-thin/${{ matrix.line }}/")
+        self.assertEqual(upload["with"]["if-no-files-found"], "error")
+        self.assertLess(steps.index(export), steps.index(upload))
+        candidate = jobs["candidate"]["steps"]
+        download = next(step for step in candidate if step.get("with", {}).get("pattern") == "thin-*")
+        stage = next(step for step in candidate if "release.py stage" in step.get("run", ""))
+        self.assertEqual(download["with"]["path"], "release-inputs")
+        self.assertLess(candidate.index(download), candidate.index(stage))
+        self.assertNotIn("--thin-only", stage["run"])
+
     def test_native_cpu_gate_cannot_be_bypassed_by_a_bundle_cache_hit(self):
         build = workflow("build-artifacts.yml")
         cpu = build["jobs"]["native-cpu"]

@@ -10,6 +10,7 @@ import ReleaseArtifacts.{
   releaseJvmSourceMappings,
   ReleaseJvm
 }
+import ThinArtifacts.{releaseThinArtifacts, thinModule}
 
 // Shared defaults. Per-line Scala and Java settings live in Modules.
 ThisBuild / scalaVersion := Versions.scala213
@@ -53,6 +54,8 @@ lazy val root = project
     releaseJvmArtifacts / aggregate := false,
     releaseJvmArtifacts :=
       (spark40 / releaseJvmArtifacts).value ++ (spark42 / releaseJvmArtifacts).value,
+    releaseThinArtifacts / aggregate := false,
+    releaseThinArtifacts := (spark40 / releaseThinArtifacts).value,
     rootRunSettings,
     rootAssemblySettings,
     rootPublishingSettings
@@ -66,6 +69,7 @@ lazy val nativeRuntime = Project("native-runtime", file("native-runtime"))
     moduleName := "spark-milvus-native-runtime",
     Modules.javaOnly,
     NativeBundle.settings,
+    ThinArtifacts.settings("native-runtime", Versions.sharedJavaRelease),
     libraryDependencies ++= Seq(
       "junit" % "junit" % "4.13.2" % Test,
       "com.github.sbt" % "junit-interface" % "0.13.3" % Test
@@ -80,6 +84,7 @@ lazy val nativeStorage = Project("native-storage", file("native-storage"))
     name := "native-storage",
     moduleName := "spark-milvus-native-storage",
     Modules.sparkFreeModuleSettings,
+    ThinArtifacts.settings("native-storage", Versions.sharedJavaRelease),
     // Native libraries reach the build only through the unified bundle. A
     // native/ directory here is left by the storage-only build that copied
     // libraries into the sources; packaging it would put a second, older copy
@@ -135,6 +140,7 @@ lazy val nativeVector = Project("native-vector", file("native-vector"))
     moduleName := "spark-milvus-native-vector",
     Modules.javaOnly,
     KnowhereBuild.settings,
+    ThinArtifacts.settings("native-vector", Versions.sharedJavaRelease),
     NativeBundle.validatedNativeBundle := (nativeRuntime / NativeBundle.validatedNativeBundle).value,
     KnowhereBuild.knowhereRuntimeJar := (nativeRuntime / Compile / packageBin).value,
     libraryDependencies ++= Seq(
@@ -160,6 +166,7 @@ lazy val core = project
     name := "core",
     moduleName := "spark-milvus-core",
     Modules.sparkFreeModuleSettings,
+    ThinArtifacts.settings("core", Versions.sharedJavaRelease),
     Modules.jacksonPin,
     publish / skip := true,
     // Arrow is pinned by spark-<line>; core compiles against the interfaces.
@@ -224,6 +231,7 @@ lazy val compat = project
     name := "compat",
     moduleName := "spark-milvus-compat",
     Modules.sparkFreeModuleSettings,
+    ThinArtifacts.settings("compat", Versions.sharedJavaRelease),
     Modules.jacksonPin,
     publish / skip := true,
     libraryDependencies ++= Seq(
@@ -249,6 +257,7 @@ lazy val client = project
     name := "client",
     moduleName := "spark-milvus-client",
     Modules.sparkFreeModuleSettings,
+    ThinArtifacts.settings("client", Versions.sharedJavaRelease),
     Modules.jacksonPin,
     publish / skip := true,
     libraryDependencies ++= Seq(
@@ -351,6 +360,7 @@ lazy val spark35 = sparkProject(Versions.line("3.5"))
 lazy val spark40 = sparkProject(Versions.line("4.0"))
   .configs(ReleaseJvm)
   .settings(jvmReleaseSettings(Versions.line("4.0")))
+  .settings(thinReleaseSettings)
   .settings(connectClient(Versions.line("4.0")))
   // Reuse core's ObjectStore fixtures for source tests without loading JNI.
   .dependsOn(core % "test->test")
@@ -427,6 +437,32 @@ lazy val searchMergeSuite: Seq[Setting[_]] = Seq(
   Test / unmanagedSources +=
     (ThisBuild / baseDirectory).value / "spark-4.0" / "src" / "test" / "scala" / "com" / "zilliz" / "spark" / "connector" / "search" / "SearchMergeTest.scala"
 )
+
+// Thin candidates preserve module boundaries for downstream compilation. Their
+// POMs and manifests receive release coordinates without changing local modules.
+lazy val thinReleaseSettings: Seq[Setting[_]] =
+  ThinArtifacts.settings("spark40", Versions.line("4.0").javaRelease) ++ Seq(
+    releaseThinArtifacts / aggregate := false,
+    releaseThinArtifacts := ThinArtifacts.export(
+      (ThisBuild / baseDirectory).value,
+      Versions.line("4.0"),
+      scalaVersion.value,
+      scalaBinaryVersion.value,
+      Seq(
+        (nativeRuntime / thinModule).value,
+        (nativeStorage / thinModule).value,
+        (nativeVector / thinModule).value,
+        (core / thinModule).value,
+        (compat / thinModule).value,
+        (client / thinModule).value,
+        thinModule.value
+      ),
+      (Compile / fullClasspath).value ++ (Runtime / managedClasspath).value,
+      (nativeVector / KnowhereBuild.knowhereApiJar).value,
+      javaHome.value.getOrElse(file(sys.props("java.home"))),
+      streams.value.log
+    )
+  )
 
 // Maven's JVM implementation excludes the Milvus platform bundle. It uses
 // Compile products and the managed Runtime dependency selection, never the
