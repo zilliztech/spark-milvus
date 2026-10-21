@@ -117,6 +117,52 @@ private[storage] object IndexFileCodec extends Logging {
     require(payload.payloadLength > 0, "Decoded index payload is empty")
   }
 
+  /** Reassembles the nullable row bitmap, which may use the same sliced
+    * representation as the engine payloads. Every decoded object is closed
+    * before reading the next one, including failed and truncated reads.
+    */
+  private[codec] def readValidData(
+      slice: Option[Slice],
+      decoded: String => DecodedIndexFile
+  ): Array[Byte] = {
+    def checkedLength(length: Long): Int = {
+      require(
+        length > 0 && length <= MaxValidDataBytes,
+        s"The valid_data bitmap of $length bytes is outside the supported size"
+      )
+      length.toInt
+    }
+    slice match {
+      case None =>
+        val payload = decoded(ValidData)
+        try {
+          val bytes = new Array[Byte](checkedLength(payload.payloadLength))
+          payload.readPayload(0, ByteBuffer.wrap(bytes))
+          bytes
+        } finally payload.close()
+      case Some(parts) =>
+        val bytes = new Array[Byte](checkedLength(parts.length))
+        var offset = 0
+        (0 until parts.count).foreach { i =>
+          val payload = decoded(s"${ValidData}_$i")
+          try {
+            val length = checkedLength(payload.payloadLength)
+            require(
+              length <= bytes.length - offset,
+              "valid_data slices exceed their declared payload length"
+            )
+            payload.readPayload(0, ByteBuffer.wrap(bytes, offset, length))
+            offset += length
+          } finally payload.close()
+        }
+        require(
+          offset == bytes.length,
+          "valid_data slices do not fill their declared payload length"
+        )
+        bytes
+    }
+  }
+
   /** Cardinal's native serializer ends in a 24-byte Footer, not a Milvus event.
     */
   private[codec] def validateCardinalFooter(bytes: Array[Byte]): Unit =
@@ -575,23 +621,23 @@ private[storage] object IndexFileCodec extends Logging {
     // A nullable vector field is indexed over its non-null rows only, and the
     // segment's own row numbers come back through this bitmap (section 2.4).
     if (logicalNames.contains(ValidData)) {
-      val payload = decoded(ValidData)
-      try {
-        require(
-          payload.payloadLength > 0 && payload.payloadLength <= MaxValidDataBytes,
-          s"The valid_data bitmap of ${payload.payloadLength} bytes is outside the supported size"
-        )
-        val bytes = new Array[Byte](payload.payloadLength.toInt)
-        payload.readPayload(0, ByteBuffer.wrap(bytes))
-        validRows = Some(bytes)
-      } finally payload.close()
+      validRows = Some(readValidData(slices.find(_.name == ValidData), decoded))
     }
 
     val metric = index.metricType.get.toUpperCase(Locale.ROOT)
+    // Snapshot metadata describes the whole segment. Knowhere holds only the
+    // non-null rows, whose labels are mapped back through valid_data.
+    val indexedRows = validRows.fold(index.rowCount)(bitmap =>
+      bitmap.iterator.map(value => Integer.bitCount(value & 0xff).toLong).sum
+    )
+    require(
+      indexedRows > 0 && indexedRows <= index.rowCount,
+      s"valid_data marks $indexedRows rows for an index over ${index.rowCount} segment rows"
+    )
     val loader = new NativeVectorIndex.Loader(
       index.currentIndexVersion.get,
       dimension,
-      index.rowCount,
+      indexedRows,
       s"""{"metric_type":"$metric","dim":$dimension}"""
     )
     try

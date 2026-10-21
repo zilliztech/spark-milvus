@@ -278,11 +278,13 @@ object SegmentIndexHandle {
       segmentRows > 0,
       s"Segment ${index.segmentId} declares $segmentRows rows"
     )
-    // A nullable column's index names its valid_data bitmap among its files, so
-    // an index that cannot say which rows it holds fails before anything is
-    // read.
+    // The bitmap can be a single object or slices described by SLICE_META.
+    // The codec validates the declared slices and their payload lengths.
     require(
-      !nullable || index.filePaths.exists(_.endsWith("/valid_data")),
+      !nullable || index.filePaths.exists { path =>
+        val name = path.substring(path.lastIndexOf('/') + 1)
+        name == "valid_data" || name == "valid_data_0"
+      },
       s"Segment ${index.segmentId} has a nullable vector column and its index files carry no valid_data bitmap"
     )
     val loaded = IndexFileCodec.load(index, layout, store, decoder)

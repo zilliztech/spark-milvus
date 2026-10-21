@@ -7,6 +7,7 @@ import scala.collection.mutable.ArrayBuffer
 
 import org.scalatest.funsuite.AnyFunSuite
 
+import com.zilliz.milvus.storage.codec.IndexFileFormat.Slice
 import com.zilliz.milvus.storage.io.{FileInfo, LocalObjectStore, ObjectStore}
 import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
 import com.zilliz.milvus.storage.snapshot.SegmentIndex
@@ -81,6 +82,73 @@ class IndexFileCodecTest extends AnyFunSuite {
     override def exists(key: String): Boolean =
       throw new UnsupportedOperationException
     override def close(): Unit = ()
+  }
+
+  test("nullable row bitmaps read unsliced and sliced objects in label order") {
+    val opened = ArrayBuffer.empty[Payload]
+    val data = Map(
+      "valid_data" -> Array[Byte](0x05, 0x01),
+      "valid_data_0" -> Array[Byte](0x05),
+      "valid_data_1" -> Array[Byte](0x01)
+    )
+    def decode(name: String): DecodedIndexFile = {
+      val payload = new Payload(data(name))
+      opened += payload
+      payload
+    }
+    assert(IndexFileCodec.readValidData(None, decode).toSeq == Seq[Byte](5, 1))
+    assert(
+      IndexFileCodec
+        .readValidData(Some(Slice("valid_data", 2, 2)), decode)
+        .toSeq == Seq[Byte](5, 1)
+    )
+    assert(opened.size == 3 && opened.forall(_.closed))
+  }
+
+  test("bitmap slice length mismatches fail and close every opened object") {
+    Seq(1L, 3L).foreach { declared =>
+      val opened = ArrayBuffer.empty[Payload]
+      intercept[IllegalArgumentException] {
+        IndexFileCodec.readValidData(
+          Some(Slice("valid_data", 2, declared)),
+          _ => {
+            val payload = new Payload(Array[Byte](1))
+            opened += payload
+            payload
+          }
+        )
+      }
+      assert(opened.nonEmpty && opened.forall(_.closed))
+    }
+    intercept[IllegalArgumentException] {
+      IndexFileCodec.readValidData(
+        Some(Slice("valid_data", 1, 256L * 1024 * 1024 + 1)),
+        _ => fail("Oversized bitmap must fail before opening an object")
+      )
+    }
+  }
+
+  test("a failed bitmap slice read closes its decoded payload") {
+    var closed = false
+    val failure = new IllegalStateException("truncated bitmap")
+    val payload = new DecodedIndexFile {
+      override val collectionId = 1L
+      override val partitionId = 2L
+      override val segmentId = 3L
+      override val fieldId = 4L
+      override val buildId = 6L
+      override val payloadLength = 1L
+      override def readPayload(offset: Long, destination: ByteBuffer): Unit =
+        throw failure
+      override def close(): Unit = { closed = true }
+    }
+    val thrown = intercept[IllegalStateException] {
+      IndexFileCodec.readValidData(
+        Some(Slice("valid_data", 1, 1)),
+        _ => payload
+      )
+    }
+    assert((thrown eq failure) && closed)
   }
 
   test("large raw Cardinal objects validate the footer before loading JNI") {

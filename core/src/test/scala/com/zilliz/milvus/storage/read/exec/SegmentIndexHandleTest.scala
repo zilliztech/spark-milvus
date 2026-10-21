@@ -225,6 +225,29 @@ class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
     }
   }
 
+  test(
+    "nullable indexes accept both exact bitmap objects and declared slices"
+  ) {
+    val failure = new IllegalStateException("object read reached")
+    val store = new FailingObjectStore(failure)
+    Seq(
+      Vector("HNSW", "valid_data"),
+      Vector("build/HNSW", "build/valid_data"),
+      Vector("build/SLICE_META", "build/HNSW_0", "build/valid_data_0")
+    ).foreach { paths =>
+      val thrown = intercept[IllegalStateException] {
+        SegmentIndexHandle.open(
+          descriptor.copy(filePaths = paths),
+          layout,
+          true,
+          10L,
+          store
+        )
+      }
+      assert(thrown eq failure)
+    }
+  }
+
   test("a metric has to belong to the element type the column carries") {
     val store =
       new FailingObjectStore(
