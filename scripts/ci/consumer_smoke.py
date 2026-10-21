@@ -30,7 +30,12 @@ FIXTURES = (
 )
 MAIN = "com.zilliz.spark.connector.read.ReadOnlyConsumerSmoke"
 FIXTURE_ROOT = ROOT / "core/src/test/resources/read-fixtures"
-FIXTURE_GROUPS = ("collections/nearest", "consumer/long-v2", "consumer/string-v2")
+FIXTURE_GROUPS = ("collections/nearest",)
+REQUIRED_CHECKS = (
+    "independent-executor", "v3-snapshot", "v3-advanced", "v3-empty",
+    "repeated-actions", "exact-unfiltered", "exact-filtered",
+    "approx-unfiltered", "approx-filtered", "sql-search",
+)
 FIXTURE_CLASSES = (
     MAIN.replace(".", "/"), "com/zilliz/milvus/storage/io/ReadFixtures",
 )
@@ -39,10 +44,31 @@ FORBIDDEN_REFERENCES = (
     b"com/zilliz/milvus/storage/vector/IndexBuilder",
     b"com/zilliz/milvus/jni/vector/NativeVectorIndexBuilder",
     b"com/zilliz/spark/connector/procedure/", b"org/apache/spark/sql/DataFrameWriter",
+    b"com/zilliz/spark/connector/catalog/", b"com/zilliz/spark/connector/extensions/parser/",
+    b"com/zilliz/spark/connector/extensions/Call",
+    b"com/zilliz/spark/connector/extensions/MilvusSparkSessionExtensions",
+    b"io/milvus/client/", b"io/milvus/v2/",
     b"io/milvus/storage/MilvusStorageWriter", b"io/milvus/storage/MilvusStorageTransaction",
 )
 GROUP = "com.zilliz"
 CENTRAL = "https://repo.maven.apache.org/maven2"
+
+
+def completed_checks(log):
+    """Require each gate exactly once; a final banner cannot hide omitted work."""
+    checks = []
+    for line in log.splitlines():
+        if line.startswith("MILVUS_CHECK\t"):
+            fields = line.split("\t")
+            if len(fields) != 3 or fields[2] != "passed":
+                raise RuntimeError("Consumer check did not pass: " + line)
+            checks.append(fields[1])
+    if len(checks) != len(set(checks)) or set(checks) != set(REQUIRED_CHECKS):
+        raise RuntimeError("Consumer omitted or duplicated required checks: " + repr(checks))
+    if "ALL PASS" not in log.splitlines():
+        raise RuntimeError("Consumer did not finish")
+    return {"executed": len(checks), "passed": len(checks), "failed": 0, "canceled": 0,
+            "checks": checks}
 
 
 def digest(path):
@@ -279,7 +305,7 @@ def compile_fixture(work, repository, version, row, entry_id, env):
         f'scalaVersion := {quote(scala)}\n'
         'Compile / packageBin / artifactName := { (_, _, _) => "smoke.jar" }\n'
         'externalResolvers := Seq(\n'
-        f'  "candidate" at {quote(repository)}, Resolver.mavenCentral)\n'
+        f'  "candidate" at {quote(repository)}, "central" at {quote(CENTRAL)})\n'
         'libraryDependencies ++= Seq(\n'
         f'  "org.apache.spark" %% "spark-sql" % {quote(row["spark"])} % "provided",\n'
         f'  "com.zilliz" % {quote(entry_id)} % {quote(version)})\n'
@@ -382,10 +408,9 @@ def smoke(candidate, line, platform, output, *, central=False, entry=None, nativ
             finally:
                 collect_diagnostics(spark_home, work, diagnostics, previous_apps)
             text = log.read_text()
-            if "ALL PASS" not in text or "PASS independent executor JVM" not in text:
-                raise RuntimeError("Smoke did not complete every gate: " + str(log))
+            checks = completed_checks(text)
             resolved = check_resolved(ivy, expected)
-            report = {"entry": entry_id, "resolved": resolved, "result": "passed"}
+            report = {"entry": entry_id, "resolved": resolved, "result": "passed", **checks}
             if native:
                 if digest(native) != native_digest:
                     raise RuntimeError("Native bundle changed during thin consumption")

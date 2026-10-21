@@ -42,6 +42,7 @@ lazy val root = project
     name := "spark-milvus",
     moduleName := "spark-connector",
     CapabilityIndex.settings,
+    ReadValidation.matrixSettings,
     Compile / compile / parallelExecution := true,
     libraryDependencies ++= Dependencies.legacyRootDeps,
     // One Jackson version set in the fat jar (see Modules.jacksonPin).
@@ -70,6 +71,7 @@ lazy val nativeRuntime = Project("native-runtime", file("native-runtime"))
     Modules.javaOnly,
     NativeBundle.settings,
     ThinArtifacts.settings("native-runtime", Versions.sharedJavaRelease),
+    ReadValidation.artifactSettings,
     libraryDependencies ++= Seq(
       "junit" % "junit" % "4.13.2" % Test,
       "com.github.sbt" % "junit-interface" % "0.13.3" % Test
@@ -85,6 +87,7 @@ lazy val nativeStorage = Project("native-storage", file("native-storage"))
     moduleName := "spark-milvus-native-storage",
     Modules.sparkFreeModuleSettings,
     ThinArtifacts.settings("native-storage", Versions.sharedJavaRelease),
+    ReadValidation.artifactSettings,
     // Native libraries reach the build only through the unified bundle. A
     // native/ directory here is left by the storage-only build that copied
     // libraries into the sources; packaging it would put a second, older copy
@@ -141,6 +144,7 @@ lazy val nativeVector = Project("native-vector", file("native-vector"))
     Modules.javaOnly,
     KnowhereBuild.settings,
     ThinArtifacts.settings("native-vector", Versions.sharedJavaRelease),
+    ReadValidation.artifactSettings,
     NativeBundle.validatedNativeBundle := (nativeRuntime / NativeBundle.validatedNativeBundle).value,
     KnowhereBuild.knowhereRuntimeJar := (nativeRuntime / Compile / packageBin).value,
     libraryDependencies ++= Seq(
@@ -167,6 +171,7 @@ lazy val core = project
     moduleName := "spark-milvus-core",
     Modules.sparkFreeModuleSettings,
     ThinArtifacts.settings("core", Versions.sharedJavaRelease),
+    ReadValidation.artifactSettings,
     Modules.jacksonPin,
     publish / skip := true,
     // Arrow is pinned by spark-<line>; core compiles against the interfaces.
@@ -232,6 +237,7 @@ lazy val compat = project
     moduleName := "spark-milvus-compat",
     Modules.sparkFreeModuleSettings,
     ThinArtifacts.settings("compat", Versions.sharedJavaRelease),
+    ReadValidation.artifactSettings,
     Modules.jacksonPin,
     publish / skip := true,
     libraryDependencies ++= Seq(
@@ -258,6 +264,7 @@ lazy val client = project
     moduleName := "spark-milvus-client",
     Modules.sparkFreeModuleSettings,
     ThinArtifacts.settings("client", Versions.sharedJavaRelease),
+    ReadValidation.artifactSettings,
     Modules.jacksonPin,
     publish / skip := true,
     libraryDependencies ++= Seq(
@@ -289,6 +296,7 @@ def sparkProject(l: Versions.SparkLine): Project =
       name := s"spark-${l.id}",
       moduleName := s"spark-milvus-${l.id}",
       Modules.perLine(l),
+      ReadValidation.artifactSettings,
       publish / skip := true,
       Compile / unmanagedSourceDirectories +=
         (ThisBuild / baseDirectory).value / "spark-base" / "src" / "main" / "scala",
@@ -315,25 +323,35 @@ def sparkProject(l: Versions.SparkLine): Project =
       },
       libraryDependencies += scalaTest % Test,
       inConfig(Test)(Modules.nativeTest),
-      // The spill suite changes SparkEnv's process-wide threshold. Keep it
-      // in its own JVM, inheriting this line's Java, options and environment;
-      // every other suite retains its existing group, run policy and tags.
+      Test / envVars += {
+        val jdk =
+          (Test / javaHome).value.getOrElse(file(sys.props("java.home")))
+        val (variable, library) = Modules.signalChaining(jdk)
+        variable -> library.getAbsolutePath
+      },
+      // Spill changes process-wide thresholds; retry requires its own master.
+      // Give each suite a separate JVM with this line's Java and environment.
       Test / testGrouping := {
         val groups = (Test / testGrouping).value
         val options = (Test / forkOptions).value
         groups.flatMap { group =>
-          val (merge, remaining) = group.tests.partition(
-            _.name == "com.zilliz.spark.connector.search.SearchMergeTest"
+          val isolatedNames = Set(
+            "com.zilliz.spark.connector.search.SearchMergeTest",
+            "com.zilliz.spark.connector.read.V3ReadContractTest"
           )
-          if (merge.isEmpty) Seq(group)
+          val (isolated, remaining) =
+            group.tests.partition(test => isolatedNames(test.name))
+          if (isolated.isEmpty) Seq(group)
           else {
             val original =
               if (remaining.isEmpty) Seq.empty
               else Seq(group.withTests(remaining))
-            original :+ group
-              .withName(s"${group.name}-search-merge")
-              .withTests(merge)
-              .withRunPolicy(Tests.SubProcess(options))
+            original ++ isolated.map(test =>
+              group
+                .withName(s"${group.name}-${test.name}")
+                .withTests(Seq(test))
+                .withRunPolicy(Tests.SubProcess(options))
+            )
           }
         }
       },
@@ -346,7 +364,12 @@ def sparkProject(l: Versions.SparkLine): Project =
     )
 
 lazy val spark35 = sparkProject(Versions.line("3.5"))
-  .settings(uatScenarios, localCollectionSuites, searchMergeSuite)
+  .settings(
+    uatScenarios,
+    localCollectionSuites,
+    searchMergeSuite,
+    v3ReadContractSuite
+  )
   // The local collection suites consume core's checked read fixtures and resources.
   .dependsOn(core % "test->test")
   // Arrow 12, which Spark 3.5 ships, cannot allocate on JDK 21 (its MemoryUtil
@@ -365,13 +388,25 @@ lazy val spark40 = sparkProject(Versions.line("4.0"))
   // Reuse core's ObjectStore fixtures for source tests without loading JNI.
   .dependsOn(core % "test->test")
 lazy val spark41 = sparkProject(Versions.line("4.1"))
-  .settings(uatScenarios, localCollectionSuites, connectSuite, searchMergeSuite)
+  .settings(
+    uatScenarios,
+    localCollectionSuites,
+    connectSuite,
+    searchMergeSuite,
+    v3ReadContractSuite
+  )
   .settings(connectClient(Versions.line("4.1")))
   .dependsOn(core % "test->test")
 lazy val spark42 = sparkProject(Versions.line("4.2"))
   .configs(ReleaseJvm)
   .settings(jvmReleaseSettings(Versions.line("4.2")))
-  .settings(uatScenarios, localCollectionSuites, connectSuite, searchMergeSuite)
+  .settings(
+    uatScenarios,
+    localCollectionSuites,
+    connectSuite,
+    searchMergeSuite,
+    v3ReadContractSuite
+  )
   .settings(connectClient(Versions.line("4.2")))
   // The fat jar for Spark 4.2; on 4.0 it is root's.
   .settings(lineBundle(Versions.line("4.2")))
@@ -436,6 +471,16 @@ lazy val localCollectionSuites: Seq[Setting[_]] = Seq(
 lazy val searchMergeSuite: Seq[Setting[_]] = Seq(
   Test / unmanagedSources +=
     (ThisBuild / baseDirectory).value / "spark-4.0" / "src" / "test" / "scala" / "com" / "zilliz" / "spark" / "connector" / "search" / "SearchMergeTest.scala"
+)
+
+lazy val v3ReadContractSuite: Seq[Setting[_]] = Seq(
+  Test / unmanagedSources ++= {
+    val directory =
+      (ThisBuild / baseDirectory).value / "spark-4.0" / "src" / "test" / "scala" / "com" / "zilliz" / "spark" / "connector" / "read"
+    Seq("V3ReadContractTest.scala", "ArrowReadOwnershipTest.scala").map(
+      directory / _
+    )
+  }
 )
 
 // Thin candidates preserve module boundaries for downstream compilation. Their

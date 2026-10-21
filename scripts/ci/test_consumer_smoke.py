@@ -142,6 +142,24 @@ class ConsumerTest(unittest.TestCase):
                          ["file:///candidate with spaces/repository", consumer.CENTRAL])
         self.assertEqual(len(settings.findall("resolvers/chain/*")), 2)
 
+    def test_fixture_compilation_uses_candidate_and_canonical_central_only(self):
+        repository = "file:///candidate%20with%20spaces/repository"
+        row = {"scala": "2.13.16", "spark": "4.0.1"}
+        with mock.patch.object(consumer, "fixture_resources", return_value={}), \
+             mock.patch.object(consumer, "run") as run, \
+             mock.patch.object(consumer, "verify_fixture_jar"):
+            consumer.compile_fixture(self.root, repository, "2.0.0", row,
+                                     "spark-milvus-4.0-thin_2.13", {})
+        build = (self.root / "fixture/build.sbt").read_text()
+        resolvers = build.split("externalResolvers := Seq(\n", 1)[1].split(")\n", 1)[0]
+        self.assertEqual(resolvers,
+                         '  "candidate" at "file:///candidate%20with%20spaces/repository", '
+                         '"central" at "https://repo.maven.apache.org/maven2"')
+        self.assertNotIn("Resolver.", build)
+        self.assertNotIn("repo1.maven.org", build)
+        self.assertEqual(run.call_args.kwargs["env"]["COURSIER_CACHE"],
+                         str(self.root / "compile-coursier"))
+
 
 class ConsumerDiagnosticsTest(unittest.TestCase):
     def setUp(self):
@@ -192,7 +210,8 @@ class ConsumerDiagnosticsTest(unittest.TestCase):
             error_path = Path(error_option.removeprefix("-XX:ErrorFile=").replace("%p", "124"))
             error_path.write_text("explicit JVM error report\n")
             (cwd / "hs_err_pid125.log").write_text("driver fallback report\n")
-            Path(log).write_text("driver log\n" if fail else "ALL PASS\nPASS independent executor JVM\n")
+            Path(log).write_text("driver log\n" if fail else "ALL PASS\n" + "".join(
+                f"MILVUS_CHECK\t{name}\tpassed\n" for name in consumer.REQUIRED_CHECKS))
             if fail:
                 raise RuntimeError("original consumer failure")
 
@@ -242,6 +261,19 @@ class ConsumerDiagnosticsTest(unittest.TestCase):
         report = json.loads((self.output / "consumer-result.json").read_text())
         self.assertEqual([entry["entry"] for entry in report["entries"]], ["universal", "platform"])
         self.assertEqual(report["read_fixture_sha256"], {"read-fixtures/test": "a" * 64})
+        for entry in report["entries"]:
+            self.assertEqual(entry["executed"], len(consumer.REQUIRED_CHECKS))
+            self.assertEqual(entry["passed"], entry["executed"])
+            self.assertEqual((entry["failed"], entry["canceled"]), (0, 0))
+
+    def test_required_check_evidence_rejects_missing_duplicate_and_canceled_work(self):
+        lines = [f"MILVUS_CHECK\t{name}\tpassed" for name in consumer.REQUIRED_CHECKS]
+        for incomplete in (lines[:-1], lines + lines[:1],
+                           [line.replace("passed", "canceled") for line in lines]):
+            with self.subTest(lines=incomplete), self.assertRaises(RuntimeError):
+                consumer.completed_checks("\n".join(incomplete + ["ALL PASS"]))
+        with self.assertRaisesRegex(RuntimeError, "did not finish"):
+            consumer.completed_checks("\n".join(lines))
 
 
 class ReadFixtureTest(unittest.TestCase):

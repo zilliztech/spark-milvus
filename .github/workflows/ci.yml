@@ -34,6 +34,108 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  read-matrix:
+    name: Export supported source combinations
+    runs-on: ubuntu-22.04
+    outputs:
+      shared: ${{ steps.matrix.outputs.shared }}
+      spark: ${{ steps.matrix.outputs.spark }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: sbt
+      - uses: sbt/setup-sbt@v1
+      - run: sbt 'exportBuildMatrix build-matrix.json'
+      - id: matrix
+        run: python3 scripts/ci/read_validation.py matrix --matrix build-matrix.json --github-output "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-build-matrix
+          path: build-matrix.json
+          if-no-files-found: error
+
+  shared-libraries:
+    name: Shared libraries (Scala ${{ matrix.scala }})
+    needs: read-matrix
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.read-matrix.outputs.shared) }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: false
+      - run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '${{ matrix.buildJava }}'
+          cache: sbt
+      - uses: sbt/setup-sbt@v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: source-build-matrix
+      - name: Test each shared module with its own dependency configuration
+        run: python3 scripts/ci/read_validation.py shared --matrix build-matrix.json --scala '${{ matrix.scala }}'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shared-source-${{ matrix.scala }}
+          path: |
+            target/read-ci/
+            target/read-build/
+            **/target/test-reports/
+          if-no-files-found: error
+
+  spark-sources:
+    name: Spark source and spill checks (${{ matrix.line }}, Scala ${{ matrix.scala }})
+    needs: read-matrix
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.read-matrix.outputs.spark) }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: false
+      - run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+      - uses: actions/setup-java@v5
+        id: test-java
+        with:
+          distribution: temurin
+          java-version: '${{ matrix.java }}'
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '${{ matrix.buildJava }}'
+          cache: sbt
+      - uses: sbt/setup-sbt@v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: source-build-matrix
+      - name: Compile sources and require the spill suite
+        env:
+          SPARK35_TEST_JAVA_HOME: ${{ steps.test-java.outputs.path }}
+        run: python3 scripts/ci/read_validation.py spark --matrix build-matrix.json --line '${{ matrix.line }}' --scala '${{ matrix.scala }}'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spark-source-${{ matrix.line }}-${{ matrix.scala }}
+          path: |
+            target/read-ci/
+            target/read-build/
+            **/target/test-reports/
+          if-no-files-found: error
+
   artifacts:
     uses: ./.github/workflows/build-artifacts.yml
     with:
@@ -68,10 +170,11 @@ jobs:
       - name: Install template test dependency
         run: python3 -m pip install PyYAML==6.0.3
 
-      - name: Lint both deployment modes
+      - name: Lint service, managed and offline read modes
         run: |
           helm lint --strict deploy/helm/spark-milvus-integration -f deploy/helm/spark-milvus-integration/ci-values.example.yaml
           helm lint --strict deploy/helm/spark-milvus-integration -f deploy/helm/spark-milvus-integration/ci-values.managed.example.yaml
+          helm lint --strict deploy/helm/spark-milvus-integration -f deploy/helm/spark-milvus-integration/ci-values.read.example.yaml
 
       - name: Test templates and release lifecycle
         run: |
@@ -101,7 +204,7 @@ jobs:
         run: python3 -m unittest discover -s native-build -p 'test_git_safe_directory.py' -v
 
   build-and-test:
-    name: Build & unit tests
+    name: Legacy aggregate coverage and clean contracts
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -124,7 +227,7 @@ jobs:
       - uses: sbt/setup-sbt@v1
 
       - name: Check formatting
-        run: sbt scalafmtCheckAll
+        run: sbt scalafmtCheckAll scalafmtSbtCheck
 
       # `sbt checkCapabilityIndex` is not run here: it reads
       # docs/design/projects/spark-milvus/capabilities.md from the private design submodule. It runs
@@ -137,14 +240,120 @@ jobs:
       - name: Compile every module
         run: sbt 'compile; Test/compile; integration40/Test/compile'
 
-      # core, compat and client publish for both Scala versions.
-      - name: Cross-compile the shared modules for Scala 2.12
-        run: sbt '++2.12.20 core/compile; ++2.12.20 compat/compile; ++2.12.20 client/compile'
-
       # Suites that need the native library skip themselves, so no filter is
       # needed any more: they call it once and cancel when it is absent.
       - name: Unit tests
         run: sbt test
+      - name: Verify cross-version source packages, POMs and generated-output cleanup
+        run: |
+          sbt 'exportBuildMatrix build-matrix.json'
+          python3 scripts/ci/read_validation.py clean --matrix build-matrix.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: source-clean-contracts
+          path: target/read-ci/
+          if-no-files-found: warn
+
+  shared-native:
+    name: Shared native reads (Scala ${{ matrix.scala }})
+    needs: [read-matrix, artifacts]
+    if: github.event_name != 'pull_request' || inputs.full_validation == true
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.read-matrix.outputs.shared) }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: false
+      - run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '${{ matrix.buildJava }}'
+          cache: sbt
+      - uses: sbt/setup-sbt@v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: source-build-matrix
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-linux-x86_64
+          path: native-input
+      - name: Require native Arrow reads and loader ownership checks
+        run: python3 scripts/ci/read_validation.py shared --matrix build-matrix.json --scala '${{ matrix.scala }}' --native-bundle native-input/milvus-native-linux-x86_64.jar
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shared-native-${{ matrix.scala }}
+          path: |
+            target/read-ci/
+            **/target/test-reports/
+          if-no-files-found: error
+
+  spark-native:
+    name: Offline reads and search (${{ matrix.line }}, Scala ${{ matrix.scala }})
+    needs: [read-matrix, artifacts]
+    if: github.event_name != 'pull_request' || inputs.full_validation == true
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.read-matrix.outputs.spark) }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+      - uses: actions/setup-java@v5
+        id: test-java
+        with:
+          distribution: temurin
+          java-version: '${{ matrix.java }}'
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '${{ matrix.buildJava }}'
+          cache: sbt
+      - uses: sbt/setup-sbt@v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: source-build-matrix
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-linux-x86_64
+          path: native-input
+      - name: Require every read/search suite without cancellations
+        env:
+          SPARK35_TEST_JAVA_HOME: ${{ steps.test-java.outputs.path }}
+        run: python3 scripts/ci/read_validation.py spark --matrix build-matrix.json --line '${{ matrix.line }}' --scala '${{ matrix.scala }}' --native-bundle native-input/milvus-native-linux-x86_64.jar
+      - name: Prepare two isolated object-storage inputs
+        if: matrix.line == '4.0'
+        run: python3 scripts/ci/read_storage.py start --directory "$RUNNER_TEMP/read-storage"
+      - name: Require real object-storage reads with both identities
+        if: matrix.line == '4.0'
+        env:
+          MILVUS_READ_IT_OPTIONS: ${{ runner.temp }}/read-storage/a.json
+          MILVUS_READ_IT_OPTIONS_B: ${{ runner.temp }}/read-storage/b.json
+        run: python3 scripts/ci/read_validation.py integration --matrix build-matrix.json --native-bundle native-input/milvus-native-linux-x86_64.jar
+      - name: Remove the isolated input store
+        if: always() && matrix.line == '4.0'
+        run: python3 scripts/ci/read_storage.py stop --directory "$RUNNER_TEMP/read-storage"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spark-native-${{ matrix.line }}-${{ matrix.scala }}
+          path: |
+            target/read-ci/
+            **/target/test-reports/
+          if-no-files-found: error
 
   # build.py, platforms.py, stage.py, the packaging script and the Makefile are
   # tested without building anything native, in seconds. A job of its own, so a

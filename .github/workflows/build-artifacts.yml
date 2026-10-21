@@ -34,11 +34,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: sbt
+      - uses: sbt/setup-sbt@v1
+      - name: Export the authoritative JVM matrix
+        run: sbt 'exportBuildMatrix build-matrix.json'
       - id: plan
         env:
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
-          python3 scripts/release.py plan --version "$RELEASE_VERSION" --output plan.json
+          python3 scripts/release.py plan --version "$RELEASE_VERSION" --matrix build-matrix.json --output plan.json
           python3 - <<'PY'
           import json, os
           plan = json.load(open('plan.json'))

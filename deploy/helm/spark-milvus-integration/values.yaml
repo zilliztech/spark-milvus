@@ -25,6 +25,11 @@ runner:
     command: []
     args: []
 
+# Set this for the public fixed-V3 reader job. The Secret contains two JSON
+# options files (a.json/b.json); no Milvus endpoint or setup command is used.
+readOptions:
+  existingSecret: ""
+
 milvus:
   # Required for an existing instance; leave empty when deployment.enabled=true.
   uri: ""

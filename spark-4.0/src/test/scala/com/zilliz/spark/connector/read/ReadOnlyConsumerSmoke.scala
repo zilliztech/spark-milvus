@@ -2,9 +2,8 @@ package com.zilliz.spark.connector.read
 
 import java.nio.file.{Files, Path}
 import java.util.Comparator
-import scala.jdk.CollectionConverters._
 
-import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
+import com.fasterxml.jackson.databind.ObjectMapper
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanHelper
 import org.apache.spark.sql.functions.{call_function, col}
@@ -12,8 +11,8 @@ import org.apache.spark.sql.functions.{call_function, col}
 import com.zilliz.milvus.storage.io.ReadFixtures
 import com.zilliz.spark.connector.extensions.{
   MilvusNearestByJoinExec,
-  MilvusSparkPlugin,
-  MilvusSparkSessionExtensions
+  MilvusReadSparkSessionExtensions,
+  MilvusSparkPlugin
 }
 import com.zilliz.spark.connector.implicits._
 import com.zilliz.spark.connector.metrics.{NearestByMetrics, SearchMetrics}
@@ -48,6 +47,9 @@ object ReadOnlyConsumerSmoke extends AdaptiveSparkPlanHelper {
   private val K = 3
   private val mapper = new ObjectMapper()
 
+  private def passed(name: String): Unit =
+    println(s"MILVUS_CHECK\t$name\tpassed")
+
   private def storage(directory: Path): Map[String, String] =
     Map("fs.storage_type" -> "local", "fs.root_path" -> directory.toString)
 
@@ -68,60 +70,43 @@ object ReadOnlyConsumerSmoke extends AdaptiveSparkPlanHelper {
         .sum
     )
 
-  private def optionsFile(path: Path): Map[String, String] = {
-    val json = mapper.readTree(Files.readAllBytes(path))
-    assert(json.isObject, s"Expected an options object in $path")
-    json
-      .fields()
-      .asScala
-      .map { entry =>
-        assert(
-          entry.getValue.isTextual,
-          s"Non-string option ${entry.getKey} in $path"
-        )
-        entry.getKey -> entry.getValue.asText()
-      }
-      .toMap
-  }
-
-  private def offlineEntries(spark: SparkSession, root: Path): Unit = {
-    for (name <- Seq("long-v2", "string-v2")) {
-      val directory = root.resolve(name)
-      ReadFixtures.copyTo(s"consumer/$name", directory)
-      val expected =
-        mapper.readTree(Files.readAllBytes(directory.resolve("expected.json")))
-      val columns =
-        expected.get("columns").elements().asScala.map(_.asText()).toSeq
-      val wanted =
-        expected.get("rows").elements().asScala.map(_.toString).toSeq.sorted
-      val entries = Seq(
-        "snapshot" -> Map(MilvusOption.SnapshotPath -> "snapshot.json"),
-        "advanced" -> optionsFile(directory.resolve("options.json")),
-        "backup" -> optionsFile(directory.resolve("backup-options.json"))
+  private def offlineEntries(spark: SparkSession, directory: Path): Unit = {
+    val json =
+      mapper.readTree(Files.readAllBytes(directory.resolve("snapshot.json")))
+    val options = storage(directory) ++ Map(
+      MilvusOption.SnapshotSchemaJson -> json.toString,
+      MilvusOption.SnapshotCollectionId -> "10",
+      MilvusOption.SnapshotPartitionIds -> "20",
+      MilvusOption.SnapshotManifests -> json
+        .get("storagev2_manifest_list")
+        .toString
+    )
+    val frame = read(spark, options).select("id", "category").orderBy("id")
+    val wanted = live.sortBy(_.id).map(row => row.id -> row.category)
+    def rows = frame
+      .collect()
+      .toSeq
+      .map(row =>
+        row.getLong(0) -> Option(row.get(1)).map(_.asInstanceOf[Long])
       )
-      for ((entry, configured) <- entries) {
-        val options = configured ++ storage(directory)
-        val frame = read(spark, options).select(columns.map(col): _*)
-        val got = frame
-          .collect()
-          .toSeq
-          .map { row =>
-            mapper.valueToTree[JsonNode](row.toSeq.asJava).toString
-          }
-          .sorted
-        assert(got == wanted, s"$name $entry: got $got, expected $wanted")
-        val raw =
-          read(spark, options + (MilvusOption.ReadApplyDeletes -> "false"))
-            .count()
-        assert(
-          raw == expected.get("rawRows").asLong(),
-          s"$name $entry raw rows: $raw"
-        )
-        println(
-          s"PASS fixed $name $entry: nullable projection and equal-timestamp deletes"
-        )
-      }
-    }
+    assert(rows == wanted, "advanced V3 fields or deletes differ")
+    assert(
+      read(spark, options + (MilvusOption.ReadApplyDeletes -> "false"))
+        .count() == 16L
+    )
+    passed("v3-advanced")
+    assert(
+      frame.count() == 14L && rows == wanted,
+      "repeated actions changed the fixed relation"
+    )
+    passed("repeated-actions")
+    val empty = read(spark, options + (MilvusOption.SnapshotManifests -> "[]"))
+    assert(
+      empty.schema == read(spark, options).schema,
+      "empty V3 input lost its schema"
+    )
+    assert(empty.count() == 0L && empty.collect().isEmpty)
+    passed("v3-empty")
   }
 
   private def indexedReads(spark: SparkSession, directory: Path): Unit = {
@@ -155,7 +140,7 @@ object ReadOnlyConsumerSmoke extends AdaptiveSparkPlanHelper {
       .map(_.getLong(0))
       .toSeq
     assert(nulls == Seq(3001L), s"nullable filter: $nulls")
-    println("PASS fixed V3 snapshot: projection, nullable fields and deletes")
+    passed("v3-snapshot")
 
     import spark.implicits._
     val query = queries.toDF("qid", "query_vector")
@@ -219,7 +204,41 @@ object ReadOnlyConsumerSmoke extends AdaptiveSparkPlanHelper {
       println(
         s"PASS $mode NEAREST BY filtered=$filtered: fixed HNSW input and independent L2 oracle"
       )
+      passed(s"$mode-${if (filtered) "filtered" else "unfiltered"}")
     }
+    query.createOrReplaceTempView("consumer_queries")
+    read(spark, options).createOrReplaceTempView("consumer_docs")
+    val sql =
+      if (org.apache.spark.SPARK_VERSION.startsWith("4.2."))
+        "SELECT q.qid, d.id FROM consumer_queries q JOIN consumer_docs d " +
+          "APPROX NEAREST 3 BY DISTANCE vector_l2_distance(q.query_vector, d.vector)"
+      else
+        "SELECT query.qid, base.id FROM nearest_by_join(TABLE(consumer_queries), " +
+          "TABLE(consumer_docs), 'vector_l2_distance(query.query_vector, base.vector)', 3, 'approx', 'distance')"
+    val result = spark.sql(sql)
+    val actual = result
+      .collect()
+      .map(row => row.getString(0) -> row.getLong(1))
+      .toSeq
+      .sorted
+    val expected = queries.flatMap { case (qid, vector) =>
+      live
+        .sortBy(row => (l2(vector, row.vector), row.id))
+        .take(K)
+        .map(row => qid -> row.id)
+    }.sorted
+    assert(
+      actual == expected,
+      s"SQL search returned $actual instead of $expected"
+    )
+    val execution = collectFirst(result.queryExecution.executedPlan) {
+      case node: MilvusNearestByJoinExec => node
+    }.getOrElse(throw new AssertionError("SQL search was not taken over"))
+    assert(execution.metrics(NearestByMetrics.IndexSegments).value == 2L)
+    assert(execution.metrics(NearestByMetrics.ExactSegments).value == 0L)
+    assert(execution.metrics(SearchMetrics.IndexBytes).value > 0L)
+    assert(execution.metrics(SearchMetrics.KnowhereCalls).value > 0L)
+    passed("sql-search")
   }
 
   def main(args: Array[String]): Unit = {
@@ -232,7 +251,7 @@ object ReadOnlyConsumerSmoke extends AdaptiveSparkPlanHelper {
         .appName("read-only-consumer-smoke")
         .config(
           "spark.sql.extensions",
-          classOf[MilvusSparkSessionExtensions].getName
+          classOf[MilvusReadSparkSessionExtensions].getName
         )
         .config("spark.plugins", classOf[MilvusSparkPlugin].getName)
         .config("spark.ui.enabled", "false")
@@ -249,10 +268,10 @@ object ReadOnlyConsumerSmoke extends AdaptiveSparkPlanHelper {
           .mapPartitions(_ => Iterator(ProcessHandle.current().pid()))
           .collect()
         assert(workers.nonEmpty && workers.forall(_ != driver))
-        println("PASS independent executor JVM")
+        passed("independent-executor")
       }
       indexedReads(spark, root.resolve("nearest"))
-      offlineEntries(spark, root.resolve("offline"))
+      offlineEntries(spark, root.resolve("nearest"))
       println("ALL PASS")
     } finally {
       if (spark != null) spark.stop()

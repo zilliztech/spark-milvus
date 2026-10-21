@@ -376,6 +376,17 @@ object SnapshotCatalog extends Logging {
           }
         }
       } catch { case NonFatal(error) => return Left(error) }
+    val unsupported = entries.filter(entry =>
+      entry.segmentLevel != 1L &&
+        entry.storageVersion != 2L && entry.storageVersion != 3L
+    )
+    if (unsupported.nonEmpty)
+      return bad(
+        "snapshot contains unsupported data segment storage version(s): " +
+          unsupported
+            .map(entry => s"${entry.segmentId}=${entry.storageVersion}")
+            .mkString(", ")
+      )
     val v2Segments = v2.resolve(entries, bucket, store) match {
       case Right(segs) => segs
       case Left(e)     => return Left(e)

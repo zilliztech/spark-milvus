@@ -8,6 +8,10 @@ package com.zilliz.spark.connector
   * on Spark 4.0 and later forwards `parseRoutineParam` too. Design:
   * docs/design/projects/spark-milvus/architecture/procedure.html.
   *
+  * `MilvusReadSparkSessionExtensions` installs only vector functions, NEAREST
+  * BY and search strategies. The full extension reuses it alongside management
+  * SQL. Offline reads and searches use the read extension.
+  *
   * The shared directory also holds `MilvusSparkPlugin`: set through
   * `spark.plugins`, it loads the native bundle on every executor at start, so
   * the first task does not wait for the extraction.

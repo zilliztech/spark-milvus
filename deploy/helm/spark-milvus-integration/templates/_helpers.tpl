@@ -55,6 +55,12 @@ app.kubernetes.io/component: integration-test
 {{- define "spark-milvus-integration.runnerEnv" -}}
 - name: CI_RUN_ID
   value: {{ default .Release.Name .Values.runId | quote }}
+{{- if .Values.readOptions.existingSecret }}
+- name: MILVUS_READ_IT_OPTIONS
+  value: /etc/milvus-read/a.json
+- name: MILVUS_READ_IT_OPTIONS_B
+  value: /etc/milvus-read/b.json
+{{- else }}
 - name: MILVUS_UAT_URI
   value: {{ include "spark-milvus-integration.milvusUri" . | quote }}
 - name: MILVUS_UAT_DATABASE
@@ -90,4 +96,5 @@ app.kubernetes.io/component: integration-test
     secretKeyRef:
       name: {{ .Values.objectStorage.credentials.existingSecret | quote }}
       key: {{ .Values.objectStorage.credentials.secretAccessKeyKey | quote }}
+{{- end }}
 {{- end }}

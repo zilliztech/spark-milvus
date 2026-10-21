@@ -1,3 +1,6 @@
+{{- if and .Values.readOptions.existingSecret (or .Values.milvus.deployment.enabled .Values.runner.setup.command .Values.milvus.uri) -}}
+{{- fail "readOptions cannot be combined with Milvus deployment, endpoint or setup" -}}
+{{- end -}}
 {{- if and .Values.milvus.deployment.enabled (le (int .Values.job.activeDeadlineSeconds) (int .Values.milvus.deployment.readinessTimeoutSeconds)) -}}
 {{- fail "job.activeDeadlineSeconds must exceed milvus.deployment.readinessTimeoutSeconds" -}}
 {{- end -}}
@@ -85,6 +88,12 @@ spec:
             {{- toYaml $.Values.resources | nindent 12 }}
         {{- end }}
       {{- end }}
+      {{- if .Values.readOptions.existingSecret }}
+      volumes:
+        - name: read-options
+          secret:
+            secretName: {{ .Values.readOptions.existingSecret | quote }}
+      {{- end }}
       containers:
         - name: integration-test
           image: {{ printf "%s@%s" .Values.image.repository .Values.image.digest | quote }}
@@ -94,6 +103,12 @@ spec:
           {{- with .Values.runner.args }}
           args:
             {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.readOptions.existingSecret }}
+          volumeMounts:
+            - name: read-options
+              mountPath: /etc/milvus-read
+              readOnly: true
           {{- end }}
           terminationMessagePolicy: FallbackToLogsOnError
           securityContext:

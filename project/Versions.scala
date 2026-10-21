@@ -79,6 +79,72 @@ object Versions {
   val sharedJavaRelease = "11"
   val sharedScalas: Seq[String] = Seq(scala212, scala213)
 
+  /** Build checks cover every source combination. Publication remains a
+    * separate, smaller contract; a successful compile does not expand it.
+    */
+  val buildJava = "21"
+  val releaseConsumers: Map[String, String] =
+    Map("4.0" -> "4.0.1", "4.2" -> "4.2.0")
+
+  def buildMatrixJson: String = {
+    import scala.util.parsing.json.{JSONArray, JSONObject}
+
+    def binary(scala: String): String = scala.split('.').take(2).mkString(".")
+    val spark = for {
+      current <- lines
+      scala <- current.scalas
+    } yield JSONObject(
+      Map(
+        "line" -> current.id,
+        "project" -> current.projectId,
+        "spark" -> current.spark,
+        "scala" -> scala,
+        "scalaBinary" -> binary(scala),
+        "buildJava" -> buildJava,
+        "java" -> (if (current.id == "3.5") "17" else buildJava),
+        "javaRelease" -> current.javaRelease,
+        "arrow" -> current.arrow
+      )
+    )
+    val shared = sharedScalas.map { scala =>
+      val modules = Seq("native-storage", "core", "compat", "client") ++
+        (if (scala == scala213) Seq("native-runtime", "native-vector")
+         else Seq.empty)
+      JSONObject(
+        Map(
+          "scala" -> scala,
+          "scalaBinary" -> binary(scala),
+          "buildJava" -> buildJava,
+          "java" -> buildJava,
+          "javaRelease" -> sharedJavaRelease,
+          "modules" -> JSONArray(modules.toList)
+        )
+      )
+    }
+    val release =
+      lines.filter(current => releaseConsumers.contains(current.id)).map {
+        current =>
+          JSONObject(
+            Map(
+              "line" -> current.id,
+              "project" -> current.projectId,
+              "spark" -> releaseConsumers(current.id),
+              "compileSpark" -> current.spark,
+              "scala" -> scala213,
+              "java" -> buildJava
+            )
+          )
+      }
+    JSONObject(
+      Map(
+        "schemaVersion" -> 1,
+        "shared" -> JSONArray(shared.toList),
+        "spark" -> JSONArray(spark.toList),
+        "release" -> JSONArray(release.toList)
+      )
+    ).toString() + "\n"
+  }
+
   val scalapb = "0.11.3"
   val grpcJava = "1.37.0"
   val parquet = "1.13.1"

@@ -9,7 +9,7 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.spark.connector.extensions.{
-  MilvusSparkSessionExtensions,
+  MilvusReadSparkSessionExtensions,
   VectorKernels
 }
 
@@ -24,8 +24,6 @@ class VectorFunctionsTest
     with Matchers
     with BeforeAndAfterAll {
 
-  private val line =
-    org.apache.spark.SPARK_VERSION.split('.').take(2).mkString(".")
   private var spark: SparkSession = _
 
   override def beforeAll(): Unit = {
@@ -35,7 +33,7 @@ class VectorFunctionsTest
       .appName("vector-functions")
       .config(
         "spark.sql.extensions",
-        classOf[MilvusSparkSessionExtensions].getName
+        classOf[MilvusReadSparkSessionExtensions].getName
       )
       .config("spark.ui.enabled", "false")
       .config("spark.driver.host", "127.0.0.1")
@@ -108,8 +106,9 @@ class VectorFunctionsTest
     )
   }
 
-  test("the lines before 4.2 register the three functions in SQL") {
-    assume(line != "4.2", "Spark 4.2 has the three functions built in")
+  test(
+    "SQL resolves the three vector functions with each line's implementation"
+  ) {
     val row = spark
       .sql(
         "SELECT vector_l2_distance(array(3.0F, 4.0F), array(0.0F, 0.0F)), " +

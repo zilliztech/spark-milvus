@@ -34,8 +34,13 @@ READ_SOURCES = (
     "spark-4.0/src/test/scala/com/zilliz/spark/connector/testkit/LocalMilvusCollection.scala",
     "spark-4.0/src/test/scala/com/zilliz/spark/connector/nearestby/*.scala",
     "spark-4.0/src/test/scala/com/zilliz/spark/connector/read/ReadOnlyConsumerSmoke.scala",
+    "spark-4.0/src/test/scala/com/zilliz/spark/connector/read/V3ReadContractTest.scala",
     "spark-4.0/src/test/scala/com/zilliz/spark/connector/read/ColumnBindingTest.scala",
     "spark-4.0/src/test/scala/com/zilliz/spark/connector/connect/ConnectReadClientProgram.scala",
+    "spark-4.0/src/test/scala/com/zilliz/spark/connector/connect/ConnectReadSessionTest.scala",
+    "spark-4.0/src/test/scala/com/zilliz/spark/connector/connect/ConnectSessionTestBase.scala",
+    "spark-4.0/src/test/scala/com/zilliz/spark/connector/read/ArrowReadOwnershipTest.scala",
+    "spark-base/src/main/scala/com/zilliz/spark/connector/extensions/MilvusReadSparkSessionExtensions.scala",
     "spark-4.0/src/test/scala/com/zilliz/spark/connector/types/ArrowConverterTest.scala",
     "spark-4.0/src/test/scala/com/zilliz/spark/connector/types/MilvusSparseVectorColumnTest.scala",
     "integration-4.0/src/test/scala/com/zilliz/spark/connector/sources/MilvusDataSourceTest.scala",
@@ -45,6 +50,7 @@ FORBIDDEN = re.compile(
     r"\b(?:V3SegmentWriter|MilvusStorageWriter|ManifestTransaction|IndexBuilder|"
     r"NativeVectorIndexBuilder|PrimaryKeyStatsBuilder|PrimaryKeyStatsEncoder|"
     r"ArrowWriter|ArrayEncoder|SparseFloatVectorEncoder|WritableObjectStore|"
+    r"MilvusSparkSessionExtensions|"
     r"SnapshotSegmentWriter|SegmentIndexObjects|"
     r"NativeWritableObjectStore)\b|"
     r"\.\s*(?:buildIndex|writeSnapshot)\s*\("

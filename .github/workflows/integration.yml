@@ -62,7 +62,7 @@ jobs:
           path: candidate
       - name: Verify exact candidate files
         run: python3 scripts/release.py verify --candidate candidate
-      - name: Resolve entries and thin modules and read fixed native fixtures
+      - name: Resolve isolated thin and fat consumers and read fixed V3 files
         env:
           SPARK_LINE: ${{ matrix.line }}
           NATIVE_PLATFORM: ${{ matrix.platform }}

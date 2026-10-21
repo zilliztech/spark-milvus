@@ -28,8 +28,9 @@ consumer version must be an equal or newer patch release of the same Spark line.
 
 This release targets glibc. musl/Alpine is outside the matrix. macOS profiles
 remain available for local builds; they are not published by this workflow.
-Other Spark lines continue to compile in ordinary CI. Open-source release
-bundles disable Cardinal.
+All five source combinations receive compile/source/POM checks; full-validation
+CI also runs native read/search suites on Linux x86_64. These checks do not add
+3.5 or 4.1 release coordinates. Open-source release bundles disable Cardinal.
 
 The ELF audit rejects imported symbol requirements above GLIBC 2.35, GLIBCXX
 3.4.30 and CXXABI 1.3.13. Its report records the actual requirements and native
@@ -119,7 +120,7 @@ worker_jsig=/absolute/path/on/workers/to/jdk21/lib/libjsig.so
 export LD_PRELOAD="$JAVA_HOME/lib/libjsig.so"
 "$SPARK_HOME/bin/spark-submit" \
   --packages "com.zilliz:spark-milvus-4.0-linux-x86_64_2.13:$release_version" \
-  --conf spark.sql.extensions=com.zilliz.spark.connector.extensions.MilvusSparkSessionExtensions \
+  --conf spark.sql.extensions=com.zilliz.spark.connector.extensions.MilvusReadSparkSessionExtensions \
   --conf spark.plugins=com.zilliz.spark.connector.extensions.MilvusSparkPlugin \
   --conf "spark.executorEnv.LD_PRELOAD=$worker_jsig" \
   your_application.py
@@ -140,7 +141,9 @@ rewrite it. Python 3.12, JDK 21 and sbt are required. Native hosts also need the
 ```bash
 git submodule update --init --recursive milvus-proto milvus-storage knowhere
 release_version=2.0.0-rc.1
-python3 scripts/release.py plan --version "$release_version" --output target/release-plan.json
+sbt "exportBuildMatrix target/build-matrix.json"
+python3 scripts/release.py plan --matrix target/build-matrix.json \
+  --version "$release_version" --output target/release-plan.json
 sbt "-Drelease.version=$release_version" releaseJvmArtifacts
 sbt "-Drelease.version=$release_version" spark40/releaseThinArtifacts
 ```
@@ -194,7 +197,7 @@ For downstream development, a thin-only candidate uses the same staging and
 verification code, without rebuilding native artifacts:
 
 ```bash
-python3 scripts/release.py plan --version "$release_version" --thin-only \
+python3 scripts/release.py plan --matrix target/build-matrix.json --version "$release_version" --thin-only \
   --output target/thin-plan.json
 python3 scripts/release.py stage --plan target/thin-plan.json \
   --inputs target/release-thin/4.0 --output target/thin-candidate
@@ -233,14 +236,16 @@ match the manifest. No implementation source is compiled into the fixture JAR.
 The workload reads checked-in, SHA-256-verified files through real Storage and
 Knowhere code. It covers V3 projection, nullable fields, deletes and exact and
 approximate vector search over existing HNSW indexes. Approximate searches must
-report index loads, so an exact fallback cannot satisfy that gate. Fixed V2
-fixtures exercise snapshot, advanced option and backup inputs, including Long
-and String primary keys whose row timestamp equals the delete timestamp.
+report index loads, so an exact fallback cannot satisfy that gate. Snapshot and
+advanced schema/manifest inputs both use V3; an empty manifest list preserves
+the schema. Repeated actions and SQL run against the same fixed relation.
 Expected rows and the L2 oracle are independent of the reader under test.
-`consumer-result.json` records the hashes of all packaged fixture resources.
+`consumer-result.json` records the hashes of all packaged fixture resources and
+the ten required check names with executed/passed/canceled counts. Missing or
+duplicate checks fail the consumer.
 The consumer compiles only `ReadOnlyConsumerSmoke` and the fixture integrity
 helper; its JAR is rejected if it contains production classes or references
-writers, procedures or the online client. No normal consumer command generates
+writers, procedures, Catalog, management parser or the online client. No normal consumer command generates
 segments, builds indexes, publishes snapshots or calls Milvus.
 
 The previous `LocalEndToEndSmoke` remains in the source tree with its write,
@@ -261,13 +266,14 @@ records the consumer CPU, operating system and exact JDK version.
 This is an **offline native end-to-end test on local files**, not a live Milvus
 service test. The separate `integration40/test` suites use live object storage; their write
 and backfill cases also require Milvus. The read-only DataSource suite consumes
-pre-uploaded fixed inputs. This release workflow does not run those suites. Registration and online service
-behavior therefore remain outside this gate.
+pre-uploaded fixed inputs. The public native CI runs the V3 DataSource suite using an isolated MinIO
+fixture with two identities. Registration and online service behavior remain
+outside the public gate.
 
 | Event | Required work |
 |---|---|
-| Pull request to `main` or `refactor/v2` | Existing formatting, compile, unit, script and Helm checks, JVM release export for both lines, and Spark 4.0 thin export |
-| Push to those branches or manual CI dispatch | The checks above, native builds, candidate verification and all eight consumer jobs |
+| Pull request to `main` or `refactor/v2` | Formatting, Versions-derived five-combination source/POM/source-JAR checks, shared unit tests, legacy aggregate coverage, clean checks, scripts and Helm; existing JVM/thin exports |
+| Push to those branches or manual CI dispatch | The checks above, native builds, mandatory read/search/Arrow/Connect suites, isolated object-storage reads, candidate verification and all eight consumer jobs |
 | `v2.x.y-central-test.<digits>` tag | Full CI, signed `USER_MANAGED` upload, Central validation, authenticated byte verification, one consumer job and deployment deletion; no public release |
 | Other accepted `v2.*` release tag | Full CI explicitly enabled, nonempty validated candidate, controlled publication and public Central consumer check |
 

@@ -39,6 +39,23 @@ def environment(container):
 
 
 class ChartTest(unittest.TestCase):
+    def test_fixed_reader_has_no_service_configuration(self):
+        result = subprocess.run(["helm", "template", "reader", str(CHART), "--values",
+                                 str(CHART / "ci-values.read.example.yaml")], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        docs = list(yaml.safe_load_all(result.stdout))
+        self.assertEqual([doc["kind"] for doc in docs], ["Job"])
+        spec = pod(docs[0])
+        self.assertNotIn("initContainers", spec)
+        env = environment(spec["containers"][0])
+        self.assertEqual(set(env), {"CI_RUN_ID", "MILVUS_READ_IT_OPTIONS", "MILVUS_READ_IT_OPTIONS_B"})
+        self.assertTrue(spec["containers"][0]["volumeMounts"][0]["readOnly"])
+        self.assertEqual(spec["volumes"][0]["secret"]["secretName"], "v3-read-options")
+
+    def test_reader_rejects_service_setup(self):
+        result = render(overrides={"readOptions": {"existingSecret": "v3-read-options"}})
+        self.assertNotEqual(result.returncode, 0)
+
     def test_external_instance_keeps_its_uri_and_storage_root(self):
         docs = resources()
         self.assertEqual(set(docs), {"Job"})

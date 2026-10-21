@@ -16,6 +16,11 @@ SPEC = importlib.util.spec_from_file_location("release", Path(__file__).resolve(
 release = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(release)
 
+RELEASE_ROWS = [
+    {"line": "4.0", "project": "spark40", "spark": "4.0.1", "scala": "2.13.16", "java": "21"},
+    {"line": "4.2", "project": "spark42", "spark": "4.2.0", "scala": "2.13.16", "java": "21"},
+]
+
 
 class ReleaseTest(unittest.TestCase):
     DEPLOYMENT = "12345678-1234-4234-9234-123456789abc"
@@ -29,6 +34,9 @@ class ReleaseTest(unittest.TestCase):
         self.inputs.mkdir()
         self.output = self.root / "candidate"
         self.plan = json.loads(release.MATRIX.read_text())
+        self.plan["jvm"] = RELEASE_ROWS
+        self.build_matrix = self.root / "build-matrix.json"
+        release.write_json(self.build_matrix, {"schemaVersion": 1, "release": RELEASE_ROWS})
         self.plan.update(version="2.0.0-rc.1", sourceSha="a" * 40,
                          pins={"milvus-storage": "b" * 40, "knowhere": "c" * 40, "milvus-proto": "d" * 40})
         self.plan_path = self.root / "plan.json"
@@ -75,6 +83,8 @@ class ReleaseTest(unittest.TestCase):
             suffix = "-" + classifier if classifier else ""
             path = directory / f"{artifact}-{self.plan['version']}{suffix}.jar"
             contents = {"README.md": "fixture"}
+            if classifier == "sources":
+                contents.update({name: "source fixture" for names in release.THIN_SOURCES.values() for name in names})
             if not classifier:
                 contents.update({
                     "io/milvus/storage/Api.class": b"class fixture",
@@ -113,6 +123,8 @@ class ReleaseTest(unittest.TestCase):
                         runtime + [dict(dep, scope="provided") for dep in provided]))
                 else:
                     contents = {"README.md": "fixture"} if classifier else {f"fixture/{project}/Api.class": b"fixture"}
+                    if classifier == "sources":
+                        contents.update({name: "source fixture" for name in release.THIN_SOURCES[project]})
                     if project == "native-runtime" and not classifier:
                         contents[release.COMPATIBILITY] = "format.version=1\nstorage.revision=" + "b" * 40 + \
                             "\nknowhere.revision=" + "c" * 40 + "\n"
@@ -359,6 +371,28 @@ class ReleaseTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Changed candidate"):
             release.verify(self.output)
 
+    def test_fat_jvm_sdk_classes_are_rejected_even_after_rehash(self):
+        manifest = self.stage()
+        record = next(item for item in manifest["artifacts"]
+                      if item["kind"] == "jvm" and item["line"] == "4.2"
+                      and item["extension"] == "jar" and not item["classifier"])
+        path = self.output / "repository" / record["path"]
+        with zipfile.ZipFile(path) as archive:
+            original = {name: archive.read(name) for name in archive.namelist()}
+        for name in ("io/milvus/client/MilvusServiceClient.class",
+                     "io/milvus/v2/client/MilvusClientV2.class",
+                     "io/milvus/param/ConnectParam.class", "io/milvus/response/R.class"):
+            with self.subTest(name=name):
+                self.jar(path, {**original, name: b"unexpected SDK class"})
+                self.rewrite_file(manifest, record, path.read_bytes())
+                with self.assertRaisesRegex(ValueError, "JVM JAR embeds the official Milvus SDK"):
+                    release.verify(self.output)
+        self.jar(path, {**original,
+                        "io/milvus/grpc/milvus/MilvusServiceGrpc.class": b"generated protocol",
+                        "com/zilliz/milvus/client/api/MilvusClient.class": b"transitional client"})
+        self.rewrite_file(manifest, record, path.read_bytes())
+        release.verify(self.output)
+
     def test_platform_entry_cannot_transitively_pull_universal_entry(self):
         manifest = self.stage()
         record = next(item for item in manifest["artifacts"]
@@ -594,11 +628,52 @@ class ReleaseTest(unittest.TestCase):
 
     def test_candidate_identity_uses_checked_in_gitlinks(self):
         output = self.root / "actual-plan.json"
-        release.create_plan("2.0.0-rc.1", output)
+        release.create_plan("2.0.0-rc.1", output, self.build_matrix)
         plan = json.loads(output.read_text())
         self.assertEqual(len(plan["consumer"]), 8)
         self.assertEqual({row["os_version"] for row in plan["consumer"]}, {"ubuntu-22.04", "ubuntu-24.04"})
         self.assertEqual(set(plan["pins"]), {"milvus-proto", "milvus-storage", "knowhere"})
+
+    def test_release_plan_takes_versions_from_the_exported_matrix(self):
+        rows = [dict(row, spark="4.0.2") if row["line"] == "4.0" else row for row in RELEASE_ROWS]
+        release.write_json(self.build_matrix, {"schemaVersion": 1, "release": rows})
+        output = self.root / "exported-plan.json"
+        release.create_plan("2.0.0-rc.1", output, self.build_matrix)
+        self.assertEqual(json.loads(output.read_text())["jvm"], rows)
+        release.write_json(self.build_matrix, {"schemaVersion": 1, "release": rows + [dict(rows[0], line="4.1")]})
+        with self.assertRaisesRegex(ValueError, "supported 4.0/4.2"):
+            release.create_plan("2.0.0-rc.1", output, self.build_matrix)
+
+    def test_source_jar_requires_nonempty_api_sources_and_no_binary(self):
+        path = self.root / "sources.jar"
+        artifact = "spark-milvus-4.0-thin_2.13"
+        sources = {name: "source" for name in release.THIN_SOURCES["spark40"]}
+        for contents, message in (({"README.md": "placeholder"}, "missing API sources"),
+                                  (dict.fromkeys(sources, ""), "empty API sources"),
+                                  (sources | {"Bad.class": "binary"}, "binary implementation")):
+            with self.subTest(message=message):
+                self.jar(path, contents)
+                with self.assertRaisesRegex(ValueError, message):
+                    release.verify_sources(path, "thin", artifact)
+        self.jar(path, sources)
+        release.verify_sources(path, "thin", artifact)
+
+    def test_candidate_rejects_placeholder_sources_even_with_updated_hashes(self):
+        self.rewrite_thin_export("spark-milvus-core_2.13",
+                                 lambda path: self.jar(path, {"README.md": "placeholder"}),
+                                 classifier="sources", extension="jar")
+        with self.assertRaisesRegex(ValueError, "missing API sources"):
+            self.stage()
+
+    def test_storage_sources_keep_the_generated_upstream_directory(self):
+        path = self.root / "storage-sources.jar"
+        own = "com/zilliz/milvus/jni/storage/NativeStorageLibrary.java"
+        upstream = "milvus-storage/scala/io/milvus/storage/MilvusStorageReader.scala"
+        self.jar(path, {own: "source", upstream: "upstream source"})
+        release.verify_sources(path, "thin", "spark-milvus-native-storage_2.13")
+        self.jar(path, {own: "source", "io/milvus/storage/MilvusStorageReader.scala": "wrong mapping"})
+        with self.assertRaisesRegex(ValueError, "missing API sources"):
+            release.verify_sources(path, "thin", "spark-milvus-native-storage_2.13")
 
 
 class SigningKeyTest(unittest.TestCase):

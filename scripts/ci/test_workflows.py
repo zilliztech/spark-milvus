@@ -21,6 +21,62 @@ def workflow(name):
 
 
 class WorkflowGateTest(unittest.TestCase):
+    def test_source_and_native_lanes_consume_the_exported_matrix(self):
+        jobs = workflow("ci.yml")["jobs"]
+        exporter = jobs["read-matrix"]
+        self.assertEqual(set(exporter["outputs"]), {"shared", "spark"})
+        self.assertTrue(any("exportBuildMatrix" in step.get("run", "")
+                            for step in exporter["steps"]))
+        for name, group in (("shared-libraries", "shared"), ("spark-sources", "spark"),
+                            ("shared-native", "shared"), ("spark-native", "spark")):
+            job = jobs[name]
+            with self.subTest(job=name):
+                self.assertEqual(job["strategy"]["matrix"],
+                                 "${{ fromJSON(needs.read-matrix.outputs." + group + ") }}")
+                check = next(step for step in job["steps"]
+                             if "read_validation.py " + group in step.get("run", ""))
+                self.assertIn("--matrix build-matrix.json", check["run"])
+                self.assertIn("--scala '${{ matrix.scala }}'", check["run"])
+                self.assertNotIn("continue-on-error", check)
+                if name.endswith("native"):
+                    self.assertIn("--native-bundle", check["run"])
+                    self.assertEqual(job["if"],
+                                     "github.event_name != 'pull_request' || inputs.full_validation == true")
+                else:
+                    self.assertNotIn("if", job)
+        legacy = jobs["build-and-test"]
+        self.assertTrue(any(step.get("run") == "sbt test" for step in legacy["steps"]))
+        self.assertTrue(any("read_validation.py clean" in step.get("run", "")
+                            for step in legacy["steps"]))
+
+    def test_real_storage_reads_run_with_two_identities_and_always_clean_up(self):
+        steps = workflow("ci.yml")["jobs"]["spark-native"]["steps"]
+        start = next(step for step in steps if "read_storage.py start" in step.get("run", ""))
+        read = next(step for step in steps if "read_validation.py integration" in step.get("run", ""))
+        stop = next(step for step in steps if "read_storage.py stop" in step.get("run", ""))
+        self.assertEqual(start["if"], "matrix.line == '4.0'")
+        self.assertEqual(read["if"], start["if"])
+        self.assertEqual(set(read["env"]), {"MILVUS_READ_IT_OPTIONS", "MILVUS_READ_IT_OPTIONS_B"})
+        self.assertNotEqual(*read["env"].values())
+        self.assertEqual(stop["if"], "always() && matrix.line == '4.0'")
+        self.assertLess(steps.index(start), steps.index(read))
+        self.assertLess(steps.index(read), steps.index(stop))
+
+    def test_helm_lints_the_service_free_read_mode(self):
+        steps = workflow("ci.yml")["jobs"]["integration-helm"]["steps"]
+        lint = next(step for step in steps if "helm lint" in step.get("run", ""))
+        for values in ("ci-values.example.yaml", "ci-values.managed.example.yaml",
+                       "ci-values.read.example.yaml"):
+            self.assertIn("-f deploy/helm/spark-milvus-integration/" + values, lint["run"])
+
+    def test_release_plan_uses_versions_export_without_an_independent_jvm_matrix(self):
+        steps = workflow("build-artifacts.yml")["jobs"]["plan"]["steps"]
+        export = next(step for step in steps if "exportBuildMatrix" in step.get("run", ""))
+        plan = next(step for step in steps if "release.py plan" in step.get("run", ""))
+        self.assertIn("--matrix build-matrix.json", plan["run"])
+        self.assertLess(steps.index(export), steps.index(plan))
+        self.assertNotIn("jvm", json.loads((ROOT / "scripts/release-matrix.json").read_text()))
+
     def release_identity(self, tag):
         steps = workflow("release.yml")["jobs"]["identity"]["steps"]
         script = next(step for step in steps if step.get("id") == "identity")["run"]

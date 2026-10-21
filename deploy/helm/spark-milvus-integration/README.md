@@ -1,5 +1,22 @@
 # Spark-Milvus integration test chart
 
+## Fixed V3 reader job
+
+Use `ci-values.read.example.yaml` for public object-storage read validation.
+Prepare the immutable `collections/nearest` fixture and two read-only identities
+as described in [contributing](../../../docs/contributing.md#unit-tests).
+Create a Secret containing `a.json` and `b.json`, each holding its connector
+storage options and `milvus.snapshot.path`. Set `readOptions.existingSecret` to
+that Secret and provide an immutable image whose runner executes only
+`MilvusDataSourceTest`, failing on missing, failed or canceled tests.
+
+This mode mounts the options read-only and sets `MILVUS_READ_IT_OPTIONS` and
+`MILVUS_READ_IT_OPTIONS_B`. It rejects Milvus deployment, endpoint and fixture
+setup settings. It does not create a Milvus server, receive a Milvus token, or
+write object-storage data. The existing modes below remain for legacy suites;
+rendering either mode does not prove a live Kubernetes run.
+
+
 This chart runs an integration-test executable supplied by the selected image
 in one Kubernetes `Job`. It can connect to an existing Milvus (the default),
 or deploy a temporary standalone Milvus for this release. Test cases stay in

@@ -76,6 +76,56 @@ class SnapshotCatalogTest extends AnyFunSuite {
 
   private val avroKey = "files/snapshots/10/manifests/1/30.avro"
 
+  test(
+    "unknown data storage versions fail before a resolver can discard them"
+  ) {
+    withDir { dir =>
+      Files.createDirectories(dir.resolve(avroKey).getParent)
+      for (version <- Seq(0L, 1L, 4L, -1L)) {
+        Files.write(
+          dir.resolve(avroKey),
+          SnapshotSegmentFixture.encode(storageVersion = version)
+        )
+        val metadata = SnapshotJson
+          .parse(
+            snapshotJson("unknown", 100L, Seq.empty)
+              .replace(
+                "\"manifest_list\": []",
+                "\"manifest_list\": [\"" + avroKey + "\"]"
+              )
+          )
+          .fold(error => throw new IllegalArgumentException(error), identity)
+        val resolver = new V2SegmentResolver {
+          override def resolve(
+              entries: Seq[SnapshotSegmentEntry],
+              bucket: String,
+              store: ObjectStore
+          ): Either[Throwable, Seq[Segment]] =
+            throw new AssertionError(
+              "unsupported data must fail before resolution"
+            )
+        }
+        val failure = SnapshotCatalog
+          .fromMetadata(
+            metadata,
+            SnapshotOrigin.Options,
+            new LocalObjectStore(dir.toString),
+            "",
+            resolver
+          )
+          .left
+          .toOption
+          .get
+        assert(failure.getMessage.contains(s"30=$version"))
+        assert(
+          failure.getMessage.contains(
+            "unsupported data segment storage version"
+          )
+        )
+      }
+    }
+  }
+
   private def indexedSnapshotJson: String = snapshotJson("indexed", 100L)
     .replace(
       "\"manifest_list\": []",

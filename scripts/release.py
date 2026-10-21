@@ -32,6 +32,7 @@ CENTRAL = "https://central.sonatype.com/api/v1/publisher"
 CENTRAL_REPOSITORY = "https://repo.maven.apache.org/maven2"
 SIGNING_FINGERPRINT = "F0004DED15D9C011F344D6A8526AB23093F3D44A"
 COMPATIBILITY = "META-INF/milvus-native/compatibility.properties"
+SDK_PACKAGES = ("io/milvus/client/", "io/milvus/v2/", "io/milvus/param/", "io/milvus/response/")
 VERSION = re.compile(r"2\.\d+\.\d+(?:-[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*)?")
 SHA = re.compile(r"[0-9a-f]{40}")
 THIN_MODULES = {
@@ -46,6 +47,18 @@ THIN_MODULES = {
 }
 MAVEN_FILES = {(classifier, extension) for classifier, extension in
                (("", "jar"), ("sources", "jar"), ("javadoc", "jar"), ("", "pom"))}
+THIN_SOURCES = {
+    "native-runtime": {"com/zilliz/milvus/jni/runtime/NativeLibraries.java"},
+    "native-storage": {"com/zilliz/milvus/jni/storage/NativeStorageLibrary.java",
+                       "milvus-storage/scala/io/milvus/storage/MilvusStorageReader.scala"},
+    "native-vector": {"com/zilliz/milvus/jni/vector/NativeVectorLibrary.java", "io/knowhere/Knowhere.java"},
+    "core": {"com/zilliz/milvus/storage/snapshot/Snapshot.scala"},
+    "compat": {"com/zilliz/milvus/storage/compat/v2/FooterV2SegmentResolver.scala"},
+    "client": {"com/zilliz/milvus/client/api/MilvusClient.scala"},
+    "spark40": {"com/zilliz/spark/connector/sources/MilvusDataSource.scala",
+                "com/zilliz/spark/connector/extensions/MilvusReadSparkSessionExtensions.scala",
+                "com/zilliz/spark/connector/extensions/NearestByExtensions.scala"},
+}
 ET.register_namespace("", "http://maven.apache.org/POM/4.0.0")
 
 
@@ -121,8 +134,14 @@ def validate_plan(plan):
         require(item["scala"] == "2.13.16", "Unsupported Scala release version")
 
 
-def create_plan(version, output, thin_only=False):
+def create_plan(version, output, matrix, thin_only=False):
     plan = json.loads(MATRIX.read_text())
+    exported = json.loads(Path(matrix).read_text())
+    require(exported.get("schemaVersion") == 1, "Unsupported build matrix schema")
+    rows = exported.get("release", [])
+    require(len(rows) == 2 and {row.get("line") for row in rows} == {"4.0", "4.2"},
+            "Build matrix must retain the supported 4.0/4.2 release lines")
+    plan["jvm"] = rows
     plan["version"] = version
     if thin_only:
         plan["distribution"] = "thin"
@@ -190,6 +209,8 @@ def verify_jvm(path, plan):
     with zipfile.ZipFile(path) as archive:
         names = archive_names(archive)
         require(not any(name.startswith("native/") for name in names), "JVM JAR embeds a platform bundle")
+        require(not any(name.startswith(SDK_PACKAGES) for name in names),
+                "JVM JAR embeds the official Milvus SDK")
         required = ["io/knowhere/", "io/milvus/storage/", "com/zilliz/spark/connector/"]
         for prefix in required:
             require(any(name.startswith(prefix) and name.endswith(".class") for name in names),
@@ -198,6 +219,23 @@ def verify_jvm(path, plan):
         require(expected == {"format.version": "1", "storage.revision": plan["pins"]["milvus-storage"],
                              "knowhere.revision": plan["pins"]["knowhere"]},
                 "JVM/native compatibility identity mismatch")
+
+
+def verify_sources(path, kind, artifact):
+    """Validate real sources for the APIs consumers compile against, not a placeholder JAR."""
+    with zipfile.ZipFile(path) as archive:
+        names = archive_names(archive)
+        require(not any(name.endswith((".class", ".so", ".dll", ".dylib")) or name.startswith("native/")
+                        for name in names), "Source JAR contains binary implementation")
+        if kind == "thin":
+            required = THIN_SOURCES[THIN_MODULES[artifact][0]]
+        elif kind == "jvm":
+            required = set().union(*(THIN_SOURCES[name] for name in
+                                   ("native-runtime", "native-storage", "native-vector", "core", "spark40")))
+        else:
+            return  # Entry/native artifacts document resources; they have no JVM implementation.
+        require(required <= set(names), "Source JAR is missing API sources: " + ", ".join(sorted(required - set(names))))
+        require(all(archive.read(name).strip() for name in required), "Source JAR contains empty API sources")
 
 
 def artifact_path(group, artifact, version, classifier="", extension="jar"):
@@ -365,8 +403,7 @@ def verify_thin_jar(path, artifact, plan, classes):
                         for name in names), "Thin JAR embeds a platform bundle")
         require(not any(name.startswith("org/apache/spark/") for name in names),
                 "Thin JAR embeds Spark classes")
-        require(not any(name.startswith(("io/milvus/client/", "io/milvus/v2/", "io/milvus/param/",
-                                         "io/milvus/response/")) for name in names),
+        require(not any(name.startswith(SDK_PACKAGES) for name in names),
                 "Thin JAR embeds the official Milvus SDK")
         own_classes = {name for name in names if name.endswith(".class")}
         require(own_classes, f"Thin JAR is missing implementation classes: {artifact}")
@@ -544,6 +581,8 @@ def verify(candidate):
             elif file["kind"] == "thin":
                 verify_thin_pom(file["artifactId"], deps, thin_modules[file["artifactId"]], plan,
                                 manifest["thin"]["sparkVersion"])
+        elif file["classifier"] == "sources":
+            verify_sources(path, file["kind"], file["artifactId"])
         elif not file["classifier"]:
             if file["kind"] == "jvm":
                 verify_jvm(path, plan)
@@ -856,6 +895,8 @@ def main():
     plan = commands.add_parser("plan")
     plan.add_argument("--version", required=True)
     plan.add_argument("--output", type=Path, required=True)
+    plan.add_argument("--matrix", type=Path, required=True,
+                      help="Versions exportBuildMatrix JSON; release lines have one source of truth")
     plan.add_argument("--thin-only", action="store_true",
                       help="Export a Spark 4.0 thin-only plan for separate module consumption checks")
     staging = commands.add_parser("stage")
@@ -885,7 +926,7 @@ def main():
     if args.command == "import-key":
         import_key()
     elif args.command == "plan":
-        create_plan(args.version, args.output, thin_only=args.thin_only)
+        create_plan(args.version, args.output, args.matrix, thin_only=args.thin_only)
     elif args.command == "stage":
         stage(args.plan, args.inputs, args.output)
     elif args.command == "verify":

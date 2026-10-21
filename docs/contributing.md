@@ -141,7 +141,10 @@ with those suites reported as canceled rather than failed:
   connector's `nearestByJoin` and `nearest_by_join` before it, over a Milvus
   table input and a DataFrame input) and the DataFrame methods `buildIndex`
   and `writeSnapshot`. They also need Knowhere's libraries
-- `connect.ConnectSessionTest`, compiled into the three 4.x lines: it starts a
+- `read.V3ReadContractTest`, shared across all four lines, checks V3 lifecycle,
+  invalid inputs and real task retries using the native libraries
+- `connect.ConnectReadSessionTest` and the legacy `connect.ConnectSessionTest`,
+  compiled into the three 4.x lines: it starts a
   Spark Connect server in the test JVM and runs the client in a JVM of its own,
   whose classpath the build resolves from the line's Connect client jar and
   passes in `milvus.test.connect.client.classpath`
@@ -167,34 +170,66 @@ Spark 3.5 ships, cannot allocate on JDK 21. Name it in
 `SPARK35_TEST_JAVA_HOME` and the line's test JVM forks from it. The suites
 over a local collection read it through the same interface, so on 3.5 they
 cancel under JDK 21 and run when `SPARK35_TEST_JAVA_HOME` is set; the other
-unit tests do not allocate through the C Data Interface and run on the build's
-JDK 21.
+non-C-Data unit tests run on the build's JDK 21. The shared
+`ArrowReadOwnershipTest` uses Arrow's own C Data JNI and needs no Milvus bundle;
+it also requires the Java 17 test JVM on Spark 3.5.
 
 Use the current run's summary to report successful, failed, canceled, ignored
 and pending tests, and completed or aborted suites. Name the native or UAT
 suites that canceled and state the missing library or environment prerequisite;
 canceled tests did not pass and provide no coverage for that run.
 
-`integration-4.0` is outside the root aggregate and compiles in CI. Its write
-and backfill suites require a live Milvus and object store. The read-only
-`MilvusDataSourceTest` instead consumes the committed
-`core/src/test/resources/read-fixtures/integration/v2` files. Upload that directory
-unchanged to the root of a dedicated test bucket using your object-store tooling,
-then set `MILVUS_READ_IT_OPTIONS` to a local JSON file of connector options:
-`fs.storage_type=remote`, endpoint, bucket, credentials and
-`milvus.snapshot.path=snapshot.json`. For S3-compatible stores also configure the
-region, SSL and virtual-host settings as needed. The fixture uses bucket-relative
-keys; `fs.root_path` does not prepend a prefix to remote keys. Keep credentials out of Git.
-Run `sbt 'integration40/testOnly *MilvusDataSourceTest'` with the native bundle.
-The suite only reads files; it does not connect to Milvus, create collections,
-upload data or delete the uploaded fixture.
+`integration-4.0` is outside the root aggregate. Its legacy write and backfill
+suites still require Milvus. The public `MilvusDataSourceTest` only reads the
+committed `collections/nearest` V3 files from object storage. It checks filtering,
+projection, deletes, repeated actions, real task retries, and two explicit
+identities in the same bucket. Each identity can read its own snapshot JSON and
+its segment files; reading the other snapshot or segment must fail.
 
-A Helm chart for running that suite on Kubernetes is under
-`deploy/helm/spark-milvus-integration` (see its README); it runs one Spark local-mode
-Job, can deploy a temporary Milvus standalone, and references existing S3
-storage and Secrets. The release
-image and the currently hard-coded integration suites do not yet satisfy the
-runner contract, so chart linting is not evidence that the live suite ran.
+Prepare an isolated MinIO fixture without a Milvus server:
+
+```bash
+python3 scripts/ci/read_storage.py start --directory /tmp/milvus-read-fixture
+export MILVUS_READ_IT_OPTIONS=/tmp/milvus-read-fixture/a.json
+export MILVUS_READ_IT_OPTIONS_B=/tmp/milvus-read-fixture/b.json
+sbt -Dmilvus.native.bundle=/absolute/path/to/milvus-native-linux-x86_64.jar \
+  'integration40/testOnly *MilvusDataSourceTest'
+python3 scripts/ci/read_storage.py stop --directory /tmp/milvus-read-fixture
+```
+
+Always run `stop`, including after failed tests. The helper owns only its newly
+created container and removes its credential files. A containerized workspace
+can pass `--network-container <workspace-id>` to bind the fixture to that
+workspace's loopback. For existing object storage, upload the fixed files to a
+dedicated bucket, create the equivalent two read policies, and supply JSON options
+files yourself. Remote keys are bucket-relative; `fs.root_path` does not prepend
+a prefix. Keep credentials out of Git and test artifacts.
+
+The [integration Helm chart](../deploy/helm/spark-milvus-integration/README.md)
+accepts `readOptions.existingSecret` with `a.json` and `b.json` and runs without
+Milvus configuration. The test image must supply the declared runner; chart
+linting does not prove that a Kubernetes job ran. Existing service modes remain
+available for the legacy integration suites until migration cleanup.
+
+### Public read CI
+
+`sbt 'exportBuildMatrix target/build-matrix.json'` exports the Spark/Scala/JDK
+matrix from `Versions`. Shared libraries run with their own dependency settings;
+PRs compile all five source combinations and run the native-free spill suite.
+Push/manual/full-validation CI runs their read/search native suites on Linux
+x86_64; this is separate from the existing eight release consumer jobs. Spark
+3.5 uses JDK 17 for Arrow 12 native tests, while the sbt build and formatting use
+JDK 21. The native lane checks its required XML suites and rejects absent,
+failed or canceled tests. The ordinary root suite retains legacy coverage and
+reports native cancellations separately.
+
+`MilvusReadSparkSessionExtensions` installs only NEAREST BY/search rules. Public
+V3 fixture and Connect consumers use it without the management CALL parser or a
+Milvus endpoint. Existing `MilvusSparkSessionExtensions`, Catalog, client and
+legacy input modes remain transitional until T15; the new CI is not evidence
+that those classes have already left the distribution. Independent candidate
+consumers still validate the existing Spark 4.0/4.2 release scope; source matrix
+coverage does not add a new published coordinate.
 
 ## Building the native library
 
@@ -590,9 +625,9 @@ sbt integration40/scalafmtAll integration40/scalafmtCheckAll
 ```
 
 When changing `build.sbt` or Scala/sbt files under `project/`, also run
-`sbt scalafmtSbt scalafmtSbtCheck`. CI runs only the root `scalafmtCheckAll`;
-`integration40/scalafmtCheckAll` and `scalafmtSbtCheck` are local-only checks
-today. Use the pinned `.scalafmt.conf`; do not
+`sbt scalafmtSbt scalafmtSbtCheck`. CI runs the root `scalafmtCheckAll` and
+`scalafmtSbtCheck`; `integration40/scalafmtCheckAll` remains a local check.
+Use the pinned `.scalafmt.conf`; do not
 change its rules to make a check pass. Repeat the relevant check after further
 source edits and resolve failures before committing. Keep unrelated formatting
 repairs in a separate commit from functional changes, preserving other

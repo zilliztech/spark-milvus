@@ -178,11 +178,26 @@ searches run in Knowhere's own thread pool, so their time is in
 `milvus.search.knowhere.nanos` rather than in the task's CPU time; the batched
 float32 exact entry runs on the task thread, so its time is in both.
 
+### Offline read and search extension
+
+For fixed V3 snapshot or schema/manifest reads and searches, set
+`spark.sql.extensions=com.zilliz.spark.connector.extensions.MilvusReadSparkSessionExtensions`
+and `spark.plugins=com.zilliz.spark.connector.extensions.MilvusSparkPlugin`.
+The read extension registers vector functions, NEAREST BY and connector search
+strategies; it does not install the management `CALL` parser. Plain DataFrame
+reads do not require a search extension. It also supports the documented
+Connect SQL search path.
+
+The existing full `MilvusSparkSessionExtensions` additionally registers
+management SQL during migration. Catalog, client and legacy input modes remain
+until their planned cleanup; choosing the read extension does not remove those
+classes from the current artifact.
+
 ### NEAREST BY on Spark 4.2
 
 On Spark 4.2 a search is Spark's own NEAREST BY join. With the
 session extension installed
-(`spark.sql.extensions=com.zilliz.spark.connector.extensions.MilvusSparkSessionExtensions`)
+(`spark.sql.extensions=com.zilliz.spark.connector.extensions.MilvusReadSparkSessionExtensions`)
 and `com.zilliz.spark.connector.extensions.MilvusSparkPlugin` in
 `spark.plugins`, a join whose base is a Milvus table is executed by the
 connector:
@@ -323,9 +338,16 @@ FROM nearest_by_join(
 
 ## Version Compatibility
 
-**This connector requires Milvus 2.6 or later** (Storage V2).
+The public migration target and its offline CI support Storage V3 snapshots
+and complete schema/manifest inputs. Compatibility is determined by those
+files and the selected Spark/Scala build, not by the Milvus service version
+alone. Snapshot preparation belongs to the caller or private offline apps.
 
-For Milvus 2.5 and earlier versions, please use the `legacy` branch which is no longer actively maintained.
+The current migration artifact still contains older Storage V2, backup,
+Catalog and service entry points; these remain transitional and are not part of
+the new V3 public CI contract. Legacy compatibility and backup read/write
+belong to the private repository after cleanup. The 1.x line ended at v1.6.0
+and is no longer maintained.
 
 ## Overview
 

@@ -15,7 +15,6 @@ class MilvusSparkSessionExtensions extends (SparkSessionExtensions => Unit) {
   override def apply(extensions: SparkSessionExtensions): Unit = {
     extensions.injectParser((_, delegate) => new MilvusSqlParser(delegate))
     extensions.injectPlannerStrategy(_ => CallProcedureStrategy)
-    NearestByExtensions(extensions)
-    extensions.injectPlannerStrategy(_ => MilvusNearestByJoinStrategy)
+    new MilvusReadSparkSessionExtensions().apply(extensions)
   }
 }

@@ -14,8 +14,8 @@ import org.apache.spark.sql.types.{
 
 import com.zilliz.spark.connector.implicits._
 
-/** Read-only client for fixed persisted indexes in [[ConnectSessionTest]]. It
-  * runs in a JVM whose classpath is the Spark Connect client and this
+/** Read-only client for fixed persisted indexes in [[ConnectReadSessionTest]].
+  * It runs in a JVM whose classpath is the Spark Connect client and this
   * connector's classes, with no classic Spark, connects to the server the suite
   * started, and prints what it gets, one fact a line, fields separated by tabs.
   *
@@ -70,6 +70,10 @@ object ConnectReadClientProgram {
   ): Unit = {
     val delivered = spark.read.format("milvus").options(options).load()
     say("rows", delivered.count())
+    say(
+      "repeat",
+      delivered.select("id").collect().map(_.getLong(0)).sorted.mkString(",")
+    )
     val queries = spark.createDataFrame(
       Seq(Row("q1", Seq(1f, 3f))).asJava,
       StructType(

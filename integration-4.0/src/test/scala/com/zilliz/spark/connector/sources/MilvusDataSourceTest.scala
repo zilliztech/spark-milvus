@@ -1,35 +1,42 @@
 package com.zilliz.spark.connector.sources
 
 import java.nio.file.{Files, Paths}
+import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.concurrent.duration._
 import scala.jdk.CollectionConverters._
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.TaskContext
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.BeforeAndAfterAll
 
+import com.zilliz.spark.connector.extensions.MilvusReadSparkSessionExtensions
 import com.zilliz.spark.connector.options.MilvusOption
 
-/** Reads the committed integration/v2 fixture uploaded to object storage.
-  * MILVUS_READ_IT_OPTIONS names a JSON file containing its connector storage
-  * options and milvus.snapshot.path. This suite never creates a collection or
-  * prepares a snapshot through Milvus; see docs/contributing.md.
+/** Reads the committed collections/nearest V3 fixture from object storage. The
+  * two options files bind distinct read-only identities to the same bucket.
+  * Each identity can read its own snapshot and that snapshot's immutable
+  * segment files. The suite never creates collections or calls a Milvus
+  * service.
   */
 class MilvusDataSourceTest extends AnyFunSuite with BeforeAndAfterAll {
   private var spark: SparkSession = _
-  private var options: Map[String, String] = Map.empty
+  private var first: Map[String, String] = Map.empty
+  private var second: Map[String, String] = Map.empty
+  private val ids = (3000L to 3007L).toSet - 3002L
+  private val otherIds = (3100L to 3107L).toSet - 3105L
 
-  override def beforeAll(): Unit = {
-    super.beforeAll()
+  private def options(variable: String): Map[String, String] = {
     val path = sys.env.getOrElse(
-      "MILVUS_READ_IT_OPTIONS",
+      variable,
       throw new IllegalArgumentException(
-        "Set MILVUS_READ_IT_OPTIONS to the JSON options for the uploaded integration/v2 read fixture"
+        s"Set $variable to a V3 read fixture options file"
       )
     )
     val json = new ObjectMapper().readTree(Files.readAllBytes(Paths.get(path)))
     require(json.isObject, "Read integration options must be a JSON object")
-    options = json
+    val result = json
       .fields()
       .asScala
       .map { entry =>
@@ -41,102 +48,151 @@ class MilvusDataSourceTest extends AnyFunSuite with BeforeAndAfterAll {
       }
       .toMap
     require(
-      options.contains(MilvusOption.SnapshotPath),
+      result.contains(MilvusOption.SnapshotPath),
       "The read fixture requires milvus.snapshot.path"
+    )
+    result
+  }
+
+  override def beforeAll(): Unit = {
+    super.beforeAll()
+    first = options("MILVUS_READ_IT_OPTIONS")
+    second = options("MILVUS_READ_IT_OPTIONS_B")
+    require(
+      first("fs.address") == second("fs.address") &&
+        first("fs.bucket_name") == second("fs.bucket_name"),
+      "Identity test requires the same endpoint and bucket"
+    )
+    require(
+      first("fs.access_key_id") != second("fs.access_key_id"),
+      "Identity test requires different users"
     )
     spark = SparkSession
       .builder()
       .appName("MilvusDataSourceTest")
-      .master("local[2]")
+      .master("local[2,2]")
+      .config(
+        "spark.sql.extensions",
+        classOf[MilvusReadSparkSessionExtensions].getName
+      )
       .getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
   }
 
   override def afterAll(): Unit =
-    try {
-      if (spark != null) spark.stop()
-    } finally super.afterAll()
+    try { if (spark != null) spark.stop() }
+    finally super.afterAll()
 
-  private def read(extra: (String, String)*): DataFrame =
-    spark.read.format("milvus").options(options ++ extra).load()
+  private def read(binding: Map[String, String] = first): DataFrame =
+    spark.read.format("milvus").options(binding).load()
 
-  test("Read data using Storage V2 DataSource") {
-    val rows = read().orderBy("id").collect()
-    assert(rows.length == 30)
-    rows.zipWithIndex.foreach { case (row, id) =>
-      assert(row.getAs[Long]("id") == id.toLong)
-      assert(row.getAs[Long]("int64") == id % 10)
-      assert(row.getAs[Float]("float") == id.toFloat / 32)
-      assert(row.getAs[String]("varchar") == s"test_string_$id")
-      assert(
-        row.getSeq[Float](row.fieldIndex("vector")) == Seq(
-          id.toFloat,
-          id.toFloat + 1
-        )
+  private def actual(frame: DataFrame): Set[Long] =
+    frame.select("id").collect().map(_.getLong(0)).toSet
+
+  test("V3 projection, nullable fields and deletes match the fixed oracle") {
+    val frame = read()
+    assert(actual(frame) == ids)
+    assert(
+      frame.filter("category IS NULL").select("id").head().getLong(0) == 3001L
+    )
+    assert(frame.filter("category = 0").count() == 1)
+    val vectors = frame.select("id", "vector")
+    assert(vectors.columns.toSeq == Seq("id", "vector"))
+    vectors.collect().foreach { row =>
+      assert(row.getSeq[Float](1) == Seq((row.getLong(0) - 3000L).toFloat, 0f))
+    }
+    assert(frame.filter("id >= 3001 AND id < 3005").count() == 3)
+    assert(
+      actual(frame.select("id", "category").filter("category = 0")) == Set(
+        3000L
       )
+    )
+    assert(frame.filter("category IS NOT NULL").count() == 6)
+    assert(frame.filter("id IN (3000, 3002, 3105, 3107)").count() == 1)
+    val selected = read(first + (MilvusOption.ReaderFieldIDs -> "100,102"))
+    assert(selected.columns.toSet == Set("id", "category"))
+    assert(actual(selected) == ids)
+    frame.createOrReplaceTempView("v3_fixture")
+    assert(spark.sql("SELECT count(*) FROM v3_fixture").head().getLong(0) == 7)
+    assert(
+      spark
+        .sql("SELECT avg(category) FROM v3_fixture")
+        .head()
+        .getDouble(0) == 5.0 / 6.0
+    )
+  }
+
+  test(
+    "two explicit identities remain bound across actions and concurrent reads"
+  ) {
+    val config = spark.sparkContext.hadoopConfiguration
+    val before =
+      config.iterator().asScala.map(e => e.getKey -> e.getValue).toMap
+    val left = read(first)
+    val right = read(second)
+    assert(actual(left) == ids)
+    assert(actual(right) == otherIds)
+    assert(actual(left) == ids)
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+    val results = Await.result(
+      Future.sequence(
+        Seq(Future(actual(read(first))), Future(actual(read(second))))
+      ),
+      2.minutes
+    )
+    assert(results == Seq(ids, otherIds))
+    assert(
+      config.iterator().asScala.map(e => e.getKey -> e.getValue).toMap == before
+    )
+  }
+
+  test("task retries retain each input identity and fixed rows") {
+    Seq(first -> ids, second -> otherIds).foreach { case (binding, expected) =>
+      val rows = read(binding)
+        .select("id")
+        .rdd
+        .mapPartitions { input =>
+          val values = input.map(_.getLong(0)).toVector
+          val attempt = TaskContext.get().attemptNumber()
+          if (attempt == 0)
+            throw new IllegalStateException("intentional V3 read retry")
+          values.iterator.map(id => (id, attempt))
+        }
+        .collect()
+      assert(rows.map(_._1).toSet == expected)
+      assert(rows.forall(_._2 == 1))
     }
   }
 
-  test("Read specific fields using ReaderFieldIDs") {
-    val df = read(MilvusOption.ReaderFieldIDs -> "100,102")
-    assert(df.columns.toSet == Set("id", "float"))
-    assert(df.count() == 30)
-  }
-
-  test("Query data with Spark SQL") {
-    read().createOrReplaceTempView("milvus_data")
-    assert(
-      spark
-        .sql("SELECT id, int64, float FROM milvus_data WHERE int64 < 5")
-        .count() == 15
-    )
-    val aggregate = spark
-      .sql("SELECT COUNT(*) AS total, AVG(float) AS avg_float FROM milvus_data")
-      .head()
-    assert(aggregate.getLong(0) == 30)
-    assert(aggregate.getDouble(1) == 14.5 / 32)
-  }
-
-  test("Column pruning via select") {
-    val df = read().select("id", "int64", "float")
-    assert(df.columns.toSet == Set("id", "int64", "float"))
-    assert(df.count() == 30)
-  }
-
-  test("Column pruning via explicit ReaderFieldIDs") {
-    val df = read(MilvusOption.ReaderFieldIDs -> "100,101,102")
-    assert(df.columns.toSet == Set("id", "int64", "float"))
-    assert(df.count() == 30)
-  }
-
-  test("Filter pushdown - equality filter on int64") {
-    assert(
-      read()
-        .filter("int64 = 3")
-        .select("id")
-        .collect()
-        .map(_.getLong(0))
-        .toSet == Set(3L, 13L, 23L)
-    )
-  }
-
-  test("Filter pushdown - range filter on int64") {
-    assert(read().filter("int64 >= 5 AND int64 < 8").count() == 9)
-  }
-
-  test("Filter pushdown - IN filter on int64") {
-    assert(read().filter("int64 IN (1, 3, 5)").count() == 9)
-  }
-
-  test("Filter pushdown - combined with column pruning") {
-    val df = read().select("id", "int64").filter("int64 < 5")
-    assert(df.columns.toSet == Set("id", "int64"))
-    assert(df.count() == 15)
-  }
-
-  test("Filter pushdown - IS NULL and IS NOT NULL") {
-    val df = read()
-    assert(df.filter("int64 IS NOT NULL").count() == 30)
-    assert(df.filter("int64 IS NULL").count() == 0)
+  test(
+    "one identity cannot reuse the other identity's snapshot authorization"
+  ) {
+    // Warm both sessions first, so a filesystem cache keyed only by bucket fails this test.
+    assert(actual(read(first)) == ids)
+    assert(actual(read(second)) == otherIds)
+    Seq(first -> second, second -> first).foreach { case (identity, location) =>
+      val error = intercept[Exception] {
+        read(
+          identity + (MilvusOption.SnapshotPath -> location(
+            MilvusOption.SnapshotPath
+          ))
+        ).collect()
+      }
+      val messages = Iterator
+        .iterate[Throwable](error)(_.getCause)
+        .takeWhile(_ != null)
+        .map(e => Option(e.getMessage).getOrElse(""))
+        .mkString(" ")
+        .toLowerCase
+      assert(
+        messages.contains("accessdenied") || messages.contains(
+          "access denied"
+        ) ||
+          messages.contains("forbidden") || messages.contains("403"),
+        messages
+      )
+    }
+    assert(actual(read(first)) == ids)
+    assert(actual(read(second)) == otherIds)
   }
 }

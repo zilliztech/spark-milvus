@@ -26,8 +26,8 @@ import com.zilliz.milvus.jni.vector.NativeVectorLibrary
 import com.zilliz.spark.connector.extensions.{
   MilvusNearestByJoinExec,
   MilvusNearestByJoinFrameExec,
-  MilvusSparkPlugin,
-  MilvusSparkSessionExtensions
+  MilvusReadSparkSessionExtensions,
+  MilvusSparkPlugin
 }
 import com.zilliz.spark.connector.implicits._
 import com.zilliz.spark.connector.metrics.{NearestByMetrics, SearchMetrics}
@@ -191,7 +191,7 @@ class NearestByJoinTest
         .appName("nearest-by-takeover")
         .config(
           "spark.sql.extensions",
-          classOf[MilvusSparkSessionExtensions].getName
+          classOf[MilvusReadSparkSessionExtensions].getName
         )
         .config("spark.plugins", classOf[MilvusSparkPlugin].getName)
         .config("spark.ui.enabled", "false")

@@ -28,9 +28,5 @@
         {"os_version": "ubuntu-24.04", "runner": "ubuntu-24.04-arm"}
       ]
     }
-  ],
-  "jvm": [
-    {"line": "4.0", "project": "spark40", "spark": "4.0.1", "scala": "2.13.16", "java": "21"},
-    {"line": "4.2", "project": "spark42", "spark": "4.2.0", "scala": "2.13.16", "java": "21"}
   ]
 }
