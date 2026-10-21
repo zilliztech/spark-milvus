@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.{DeserializationFeature, ObjectMapper}
 import org.apache.arrow.memory.RootAllocator
 
 import com.zilliz.milvus.jni.vector.{NativeVectorIndex, NativeVectorLibrary}
+import com.zilliz.milvus.storage.codec.IndexFileFormat._
 import com.zilliz.milvus.storage.io.{ConcurrentRangeReads, ObjectStore}
 import com.zilliz.milvus.storage.schema.VectorLayout
 import com.zilliz.milvus.storage.snapshot.SegmentIndex
@@ -20,18 +21,15 @@ import io.knowhere.DType
   * restoring named Knowhere payloads.
   */
 private[storage] object IndexFileCodec extends Logging {
-  private[codec] val SliceMeta = "SLICE_META"
   private val CardinalFile = "_mem.index.bin"
   private val ValidData = "valid_data"
   private val ValidDataNames = Set(ValidData, "valid_data_count")
   private val MaxValidDataBytes = 256L * 1024 * 1024
-  private[codec] val MaxObjectBytes = 256L * 1024 * 1024
   // A payload has no size cap of its own: it streams into the native BinarySet
   // in 1 MiB chunks, and what is allocated for it is held against the bytes its
   // slice objects have on the store before anything is allocated. Only
   // SLICE_META and valid_data are materialized as Java arrays and have caps
   // (docs/design/projects/spark-milvus/architecture/search-resources.html section 3.4).
-  private[codec] val ChunkBytes = 1024 * 1024
   // One request for an unsliced object reads this much; several are in flight
   // at once (ConcurrentRangeReads).
   private val RangeBytes = 8 * 1024 * 1024
@@ -50,22 +48,6 @@ private[storage] object IndexFileCodec extends Logging {
       nanos: Long,
       validRows: Option[Array[Byte]] = None
   )
-
-  private[codec] final case class Slice(name: String, count: Int, length: Long)
-
-  /** Encodes the slice metadata the loader reads through [[parseSlices]]. */
-  private[codec] def sliceMeta(slices: Seq[Slice]): Array[Byte] = {
-    val root = mapper.createObjectNode()
-    val meta = root.putArray("meta")
-    slices.foreach { slice =>
-      meta
-        .addObject()
-        .put("name", slice.name)
-        .put("slice_num", slice.count)
-        .put("total_len", slice.length)
-    }
-    mapper.writeValueAsBytes(root)
-  }
 
   private[codec] def parseSlices(bytes: Array[Byte]): Vector[Slice] = {
     require(
@@ -121,9 +103,6 @@ private[storage] object IndexFileCodec extends Logging {
     )
     slices
   }
-
-  private[codec] def validName(name: String): Boolean =
-    name.matches("[A-Za-z0-9_+.-]+") && name != "." && name != ".."
 
   private[codec] def validateIdentity(
       index: SegmentIndex,

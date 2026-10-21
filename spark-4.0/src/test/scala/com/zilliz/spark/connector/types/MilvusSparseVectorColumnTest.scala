@@ -7,6 +7,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.codec.SparseFloatVectorConverter
+import com.zilliz.milvus.storage.write.codec.SparseFloatVectorEncoder
 
 /** Checked against `SparseFloatVectorConverter`, the decoder the row path uses,
   * so the two paths cannot read the same bytes differently.
@@ -43,7 +44,7 @@ class MilvusSparseVectorColumnTest extends AnyFunSuite with Matchers {
     // Milvus requires the values be finite and non-negative.
     val entries = Seq(3L -> 1.5f, 17L -> 2.25f, 900L -> 0.5f)
     val bytes =
-      SparseFloatVectorConverter.encodeSparseFloatVectorEntries(entries)
+      SparseFloatVectorEncoder.encodeSparseFloatVectorEntries(entries)
     withVector(Seq(bytes)) { vector =>
       val column = MilvusSparseVectorColumn(vector)
       column.dataType shouldBe MapType(
@@ -64,7 +65,7 @@ class MilvusSparseVectorColumnTest extends AnyFunSuite with Matchers {
     val second = Seq(10L -> 10.0f)
     val third = Seq(20L -> 20.0f, 21L -> 21.0f, 22L -> 22.0f)
     val rows = Seq(first, second, third).map(
-      SparseFloatVectorConverter.encodeSparseFloatVectorEntries
+      SparseFloatVectorEncoder.encodeSparseFloatVectorEntries
     )
     withVector(rows) { vector =>
       val column = MilvusSparseVectorColumn(vector)
@@ -86,7 +87,7 @@ class MilvusSparseVectorColumnTest extends AnyFunSuite with Matchers {
   // negative and the entry would be lost.
   test("an index above Int.MaxValue survives") {
     val big = 0xfffffff0L
-    val bytes = SparseFloatVectorConverter.encodeSparseFloatVectorEntries(
+    val bytes = SparseFloatVectorEncoder.encodeSparseFloatVectorEntries(
       Seq(big -> 7.5f)
     )
     withVector(Seq(bytes)) { vector =>
@@ -102,7 +103,7 @@ class MilvusSparseVectorColumnTest extends AnyFunSuite with Matchers {
       vector.setNull(0)
       vector.setSafe(
         1,
-        SparseFloatVectorConverter.encodeSparseFloatVectorEntries(
+        SparseFloatVectorEncoder.encodeSparseFloatVectorEntries(
           Seq(5L -> 5.5f)
         )
       )

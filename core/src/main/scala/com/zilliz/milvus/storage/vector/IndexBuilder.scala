@@ -6,7 +6,7 @@ import java.util.Locale
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.apache.arrow.memory.{ArrowBuf, BufferAllocator}
 
-import com.zilliz.milvus.jni.vector.NativeVectorIndex
+import com.zilliz.milvus.jni.vector.NativeVectorIndexBuilder
 import com.zilliz.milvus.storage.codec.VectorIndexFamilies
 import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
 import com.zilliz.milvus.storage.Logging
@@ -32,7 +32,7 @@ object IndexBuilder extends Logging {
   /** A built index, its payloads and what a segment record has to say about it.
     */
   final class Built private[vector] (
-      private[storage] val payloads: NativeVectorIndex.Built,
+      private val payloads: NativeVectorIndexBuilder.Built,
       val indexType: String,
       val metric: MetricType,
       val indexVersion: Int,
@@ -195,7 +195,7 @@ object IndexBuilder extends Logging {
         else vectors.capacity()} bytes; $rows rows of ${layout.dimension} dimensions need ${rows * layout.rowBytes}"
     )
     finish(
-      NativeVectorIndex.build(
+      NativeVectorIndexBuilder.build(
         name,
         layout.dtype,
         indexVersion,
@@ -235,7 +235,7 @@ object IndexBuilder extends Logging {
       s"The buffer holds $bytes bytes; $rows rows of ${layout.dimension} dimensions need ${rows * layout.rowBytes}"
     )
     finish(
-      NativeVectorIndex.build(
+      NativeVectorIndexBuilder.build(
         name,
         layout.dtype,
         indexVersion,
@@ -289,7 +289,7 @@ object IndexBuilder extends Logging {
   }
 
   private def finish(
-      built: NativeVectorIndex.Built,
+      built: NativeVectorIndexBuilder.Built,
       name: String,
       metric: MetricType,
       indexVersion: Int,

@@ -36,7 +36,7 @@ class SnapshotSegmentReaderTest extends AnyFunSuite with Matchers {
     "all manifest versions decode exact index ids, parameters and distinct versions"
   ) {
     val index = SnapshotSegmentFixture.index()
-    SnapshotSegmentReader.supportedSchemaVersions.foreach { version =>
+    SnapshotSegmentSchema.supportedVersions.foreach { version =>
       val bytes = SnapshotSegmentFixture.encode(
         version = version,
         indexes = Vector(index)
@@ -60,7 +60,7 @@ class SnapshotSegmentReaderTest extends AnyFunSuite with Matchers {
         )
       )
     )
-    SnapshotSegmentReader.supportedSchemaVersions.foreach { version =>
+    SnapshotSegmentSchema.supportedVersions.foreach { version =>
       val entry = SnapshotSegmentReader
         .parse(
           SnapshotSegmentFixture.encode(version = version, statsLogs = logs),

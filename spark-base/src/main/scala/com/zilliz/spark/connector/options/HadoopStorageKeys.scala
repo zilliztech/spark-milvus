@@ -597,7 +597,7 @@ object HadoopStorageKeys extends Logging {
     * added here is the IAM fallback, which cannot live there because it is a
     * statement about Hadoop-shaped configuration, not about `fs.*`.
     */
-  def storeFrom(properties: Map[String, String]): ObjectStore =
+  def storeFrom(properties: Map[String, String]): NativeObjectStore =
     NativeObjectStore
       .Factory(canonicalProperties(properties))
       .open()

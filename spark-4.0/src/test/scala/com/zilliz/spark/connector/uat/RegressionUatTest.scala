@@ -11,7 +11,6 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.storage.credential.StorageProperties
-import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.snapshot.{SnapshotCatalog, V2SegmentResolver}
 import com.zilliz.milvus.storage.snapshot.json.{
   ManifestItemJson,
@@ -20,6 +19,10 @@ import com.zilliz.milvus.storage.snapshot.json.{
 import com.zilliz.milvus.storage.stats.PrimaryKeyStats
 import com.zilliz.milvus.storage.write.commit.{Committer, JobManifest}
 import com.zilliz.milvus.storage.write.exec.StagingLayout
+import com.zilliz.milvus.storage.write.io.{
+  NativeWritableObjectStore,
+  WritableObjectStore
+}
 import com.zilliz.spark.connector.options.{
   HadoopStorageKeys,
   MilvusOption,
@@ -88,9 +91,11 @@ class RegressionUatTest
     sparkSession
   }
 
-  private def store(): ObjectStore =
-    HadoopStorageKeys.storeFrom(
-      storage() + (StorageProperties.UseIam -> "true")
+  private def store(): WritableObjectStore =
+    new NativeWritableObjectStore(
+      HadoopStorageKeys.storeFrom(
+        storage() + (StorageProperties.UseIam -> "true")
+      )
     )
 
   override protected def afterAll(): Unit = {

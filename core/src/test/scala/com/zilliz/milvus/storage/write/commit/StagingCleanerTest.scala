@@ -8,8 +8,9 @@ import java.util.Comparator
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.io.{FileInfo, LocalObjectStore, ObjectStore}
+import com.zilliz.milvus.storage.io.{FileInfo, LocalObjectStore}
 import com.zilliz.milvus.storage.write.exec.StagingLayout
+import com.zilliz.milvus.storage.write.io.WritableObjectStore
 
 class StagingCleanerTest extends AnyFunSuite with Matchers {
   private val target = JobOwner("analytics", "events")
@@ -40,7 +41,7 @@ class StagingCleanerTest extends AnyFunSuite with Matchers {
     JobDescriptor(owner, mode)
 
   private def start(
-      store: ObjectStore,
+      store: WritableObjectStore,
       job: StagingLayout,
       mode: JobWriteMode = JobWriteMode.Append,
       createdAt: Long = 1000L,
@@ -66,7 +67,7 @@ class StagingCleanerTest extends AnyFunSuite with Matchers {
   }
 
   private def clean(
-      store: ObjectStore,
+      store: WritableObjectStore,
       dryRun: Boolean
   ): Seq[StagingCleanupResult] =
     new StagingCleaner(store, "files")
@@ -319,7 +320,8 @@ class StagingCleanerTest extends AnyFunSuite with Matchers {
     }
   }
 
-  private class DelegatingStore(delegate: ObjectStore) extends ObjectStore {
+  private class DelegatingStore(delegate: WritableObjectStore)
+      extends WritableObjectStore {
     override def readAll(key: String): Array[Byte] = delegate.readAll(key)
     override def size(key: String): Long = delegate.size(key)
     override def list(key: String, recursive: Boolean): Seq[FileInfo] =

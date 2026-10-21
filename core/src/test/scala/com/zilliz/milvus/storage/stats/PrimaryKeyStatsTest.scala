@@ -6,6 +6,10 @@ import java.nio.file.{Files, Paths}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import com.zilliz.milvus.storage.write.stats.{
+  PrimaryKeyStatsBuilder,
+  PrimaryKeyStatsEncoder
+}
 import io.milvus.grpc.schema.DataType
 
 /** The stats a written segment carries, checked against the file Milvus wrote
@@ -23,12 +27,12 @@ class PrimaryKeyStatsTest extends AnyFunSuite with Matchers {
   )
 
   test("the same 3000 keys produce the byte-identical file Milvus wrote") {
-    val builder = new PrimaryKeyStats.Builder(100L, DataType.Int64)
+    val builder = new PrimaryKeyStatsBuilder(100L, DataType.Int64)
     (0L until 3000L).foreach(builder.addLong)
     val stats = builder.build()
     stats.filter.k shouldBe 12
     stats.filter.numBits shouldBe 51200L
-    stats.toJson shouldBe milvusFile
+    PrimaryKeyStatsEncoder.toJson(stats) shouldBe milvusFile
   }
 
   test("Milvus's file reads back and answers for its keys") {
@@ -43,18 +47,20 @@ class PrimaryKeyStatsTest extends AnyFunSuite with Matchers {
   }
 
   test("VarChar keys hash as UTF-8 and keep string bounds") {
-    val builder = new PrimaryKeyStats.Builder(101L, DataType.VarChar)
+    val builder = new PrimaryKeyStatsBuilder(101L, DataType.VarChar)
     Seq("row-7", "row-0", "row-99", "中文").foreach(builder.addString)
     val stats = builder.build()
     stats.minPk shouldBe "row-0"
     stats.maxPk shouldBe "中文"
     stats.mightContainString("row-99") shouldBe true
     stats.mightContainString("row-100") shouldBe false
-    val back = PrimaryKeyStats.fromJson(stats.toJson)
+    val back = PrimaryKeyStats.fromJson(PrimaryKeyStatsEncoder.toJson(stats))
     back.pkType shouldBe DataType.VarChar
     back.minPk shouldBe "row-0"
     back.mightContainString("中文") shouldBe true
-    back.toJson shouldBe stats.toJson
+    PrimaryKeyStatsEncoder.toJson(back) shouldBe PrimaryKeyStatsEncoder.toJson(
+      stats
+    )
   }
 
   // Milvus compares VarChar keys as Go strings, i.e. unsigned UTF-8 bytes;
@@ -62,7 +68,7 @@ class PrimaryKeyStatsTest extends AnyFunSuite with Matchers {
   test("VarChar bounds follow Milvus's UTF-8 byte order") {
     val pua = new String(Character.toChars(0xe000))
     val emoji = new String(Character.toChars(0x1f600))
-    val b = new PrimaryKeyStats.Builder(101L, DataType.VarChar)
+    val b = new PrimaryKeyStatsBuilder(101L, DataType.VarChar)
     Seq(emoji, pua).foreach(b.addString)
     val s = b.build()
     s.minPk shouldBe pua
@@ -70,7 +76,7 @@ class PrimaryKeyStatsTest extends AnyFunSuite with Matchers {
 
     def utf8(x: String) = x.getBytes(StandardCharsets.UTF_8)
     val keys = Seq("row-0", "中文", "Ａ", pua, emoji, "")
-    val mixed = new PrimaryKeyStats.Builder(101L, DataType.VarChar)
+    val mixed = new PrimaryKeyStatsBuilder(101L, DataType.VarChar)
     keys.foreach(mixed.addString)
     val m = mixed.build()
     keys.foreach { k =>
@@ -87,20 +93,23 @@ class PrimaryKeyStatsTest extends AnyFunSuite with Matchers {
     }
     m.maxPk shouldBe emoji
     m.minPk shouldBe ""
-    val back = PrimaryKeyStats.fromJson(m.toJson)
+    val back = PrimaryKeyStats.fromJson(PrimaryKeyStatsEncoder.toJson(m))
     back.minPk shouldBe m.minPk
     back.maxPk shouldBe m.maxPk
   }
 
   test("reader accepts both a generated object and a compound array") {
-    val first = new PrimaryKeyStats.Builder(100L, DataType.Int64)
+    val first = new PrimaryKeyStatsBuilder(100L, DataType.Int64)
     first.addLong(7L)
-    val second = new PrimaryKeyStats.Builder(100L, DataType.Int64)
+    val second = new PrimaryKeyStatsBuilder(100L, DataType.Int64)
     second.addLong(9L)
 
-    PrimaryKeyStats.fromBytes(first.build().toBytes) should have size 1
+    PrimaryKeyStats.fromBytes(
+      PrimaryKeyStatsEncoder.toBytes(first.build())
+    ) should have size 1
     val compound =
-      s"[${first.build().toJson},${second.build().toJson}]"
+      s"[${PrimaryKeyStatsEncoder.toJson(first.build())},${PrimaryKeyStatsEncoder
+          .toJson(second.build())}]"
         .getBytes(StandardCharsets.UTF_8)
     val parsed = PrimaryKeyStats.fromBytes(compound)
     parsed should have size 2
@@ -109,9 +118,9 @@ class PrimaryKeyStatsTest extends AnyFunSuite with Matchers {
   }
 
   test("damaged or weakly typed JSON is rejected instead of defaulted") {
-    val builder = new PrimaryKeyStats.Builder(100L, DataType.Int64)
+    val builder = new PrimaryKeyStatsBuilder(100L, DataType.Int64)
     builder.addLong(7L)
-    val valid = builder.build().toJson
+    val valid = PrimaryKeyStatsEncoder.toJson(builder.build())
 
     an[IllegalArgumentException] should be thrownBy PrimaryKeyStats.fromJson(
       valid.replace("\"fieldID\":100", "\"fieldID\":\"100\"")
@@ -128,10 +137,10 @@ class PrimaryKeyStatsTest extends AnyFunSuite with Matchers {
   }
 
   test("a key of the wrong type and an empty segment are refused") {
-    val builder = new PrimaryKeyStats.Builder(100L, DataType.Int64)
+    val builder = new PrimaryKeyStatsBuilder(100L, DataType.Int64)
     an[IllegalArgumentException] should be thrownBy builder.addString("x")
     an[IllegalArgumentException] should be thrownBy builder.build()
     an[IllegalArgumentException] should be thrownBy
-      new PrimaryKeyStats.Builder(100L, DataType.Float)
+      new PrimaryKeyStatsBuilder(100L, DataType.Float)
   }
 }

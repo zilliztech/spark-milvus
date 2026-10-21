@@ -11,7 +11,8 @@ package com.zilliz.milvus.storage
   * "manifest" in this package names the milvus-storage file only; the
   * snapshot's record is a snapshot segment record.
   *
-  * Main types: SnapshotSegmentReader (the snapshot's Avro segment record),
+  * Main types: SnapshotSegmentSchema (the shared full AVSC schemas),
+  * SnapshotSegmentReader (the snapshot's Avro segment record),
   * SnapshotSegmentWriter (the same record, encoded), SnapshotSegmentEntry and
   * IndexFileEntry (data files, index files, exact build ids, row counts and
   * separate index format/path versions), V3ManifestReader (milvus-storage's

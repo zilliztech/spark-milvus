@@ -16,9 +16,8 @@ final case class FileInfo(
   * layer wraps its backend in a subtree and appends whatever it is given, so a
   * full path arrives doubled. `StoragePath.key` is exactly what belongs here.
   *
-  * Writing does not create parent directories. Object storage has no
-  * directories, but the local backend does, so a caller that may run on either
-  * calls [[createDir]] first.
+  * This interface exposes reads only. Business writers use a separate adapter
+  * over the same native filesystem session.
   */
 trait ObjectStore extends AutoCloseable {
 
@@ -33,7 +32,7 @@ trait ObjectStore extends AutoCloseable {
 
   /** True when the key exists, false only when the backend confirms it does
     * not. Any other failure to find out (permission, network, throttling)
-    * throws: callers decide what to write from this answer.
+    * throws: a failed lookup must not be treated as an absent object.
     */
   def exists(key: String): Boolean
 
@@ -52,15 +51,6 @@ trait ObjectStore extends AutoCloseable {
       fileSize: Long
   ): Array[Byte]
 
-  def write(key: String, data: Array[Byte]): Unit
-
-  def createDir(key: String, recursive: Boolean = true): Unit
-
-  /** Deletes one file. Directories are not accepted by the current native
-    * binding, including object-store directory marker objects reported as
-    * directories by [[list]].
-    */
-  def delete(key: String): Unit
 }
 
 /** Opens stores on the executor.

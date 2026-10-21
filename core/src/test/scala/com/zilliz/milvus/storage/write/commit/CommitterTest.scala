@@ -7,8 +7,9 @@ import java.util.Comparator
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.io.{FileInfo, LocalObjectStore, ObjectStore}
+import com.zilliz.milvus.storage.io.{FileInfo, LocalObjectStore}
 import com.zilliz.milvus.storage.write.exec.StagingLayout
+import com.zilliz.milvus.storage.write.io.WritableObjectStore
 
 class CommitterTest extends AnyFunSuite with Matchers {
 
@@ -162,7 +163,7 @@ class CommitterTest extends AnyFunSuite with Matchers {
   test("a failed marker lookup stops the commit before anything is written") {
     withStore { (store, layout, _) =>
       val written = scala.collection.mutable.ListBuffer.empty[String]
-      val failing = new com.zilliz.milvus.storage.io.ObjectStore {
+      val failing = new WritableObjectStore {
         def readAll(key: String): Array[Byte] = store.readAll(key)
         def size(key: String): Long = store.size(key)
         def list(key: String, recursive: Boolean) = store.list(key, recursive)
@@ -270,8 +271,8 @@ class CommitterTest extends AnyFunSuite with Matchers {
   private def text(storeRoot: LocalObjectStore, path: String): String =
     new String(storeRoot.readAll(path), StandardCharsets.UTF_8)
 
-  private final class ParentCheckingStore(delegate: ObjectStore)
-      extends ObjectStore {
+  private final class ParentCheckingStore(delegate: WritableObjectStore)
+      extends WritableObjectStore {
     var created = Set.empty[String]
 
     override def readAll(key: String): Array[Byte] = delegate.readAll(key)

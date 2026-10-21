@@ -54,7 +54,7 @@ object SnapshotSegmentWriter {
       facts: SegmentFacts = SegmentFacts(),
       schemaVersion: Int = CurrentSchemaVersion
   ): Array[Byte] = {
-    val schema = schemaFor(schemaVersion)
+    val schema = SnapshotSegmentSchema.schemaFor(schemaVersion)
     val record = blank(schema).asInstanceOf[GenericRecord]
     record.put("segment_id", entry.segmentId)
     record.put("partition_id", entry.partitionId)
@@ -75,9 +75,6 @@ object SnapshotSegmentWriter {
     out.toByteArray
   }
 
-  def supportedSchemaVersions: Seq[Int] =
-    SnapshotSegmentReader.supportedSchemaVersions
-
   /** One segment's manifest as Milvus wrote it, with its index registrations
     * replaced.
     *
@@ -93,7 +90,7 @@ object SnapshotSegmentWriter {
       indexes: Vector[IndexFileEntry],
       schemaVersion: Int = CurrentSchemaVersion
   ): Array[Byte] = {
-    val schema = schemaFor(schemaVersion)
+    val schema = SnapshotSegmentSchema.schemaFor(schemaVersion)
     val decoder =
       DecoderFactory.get().binaryDecoder(new ByteArrayInputStream(source), null)
     val record =
@@ -178,19 +175,6 @@ object SnapshotSegmentWriter {
         value
       }.asJava
     )
-  }
-
-  private def schemaFor(version: Int): Schema = {
-    val resource = s"/milvus-segment-manifest-v$version.avsc"
-    val in = Option(getClass.getResourceAsStream(resource)).getOrElse {
-      throw new IllegalArgumentException(
-        s"Unsupported Milvus manifest schema version $version"
-      )
-    }
-    try
-      new Schema.Parser()
-        .parse(scala.io.Source.fromInputStream(in, "UTF-8").mkString)
-    finally in.close()
   }
 
   /** A record with every field present and empty, so that only what the caller

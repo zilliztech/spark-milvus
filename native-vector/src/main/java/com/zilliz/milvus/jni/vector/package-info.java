@@ -12,7 +12,7 @@
  * its element types, exclusions, output and thread behavior.
  *
  * NativeVectorIndex delegates BinarySet loading and persisted index search, and
- * NativeVectorIndex.build delegates index building and serialization (W6) to
+ * NativeVectorIndexBuilder delegates index building and serialization (W6) to
  * the upstream KnowhereIndex.build and serialize calls. File-format
  * interpretation and query planning belong to core and Spark.
  *

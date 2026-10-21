@@ -1,5 +1,7 @@
 package com.zilliz.spark.connector.apps.backfill
 
+import java.nio.charset.StandardCharsets
+
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.SparkSession
 import org.scalatest.funsuite.AnyFunSuite
@@ -7,7 +9,8 @@ import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.client.api.MilvusClient
 import com.zilliz.milvus.storage.credential.StorageProperties
-import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.milvus.storage.write.commit.JobManifest
+import com.zilliz.spark.connector.options.{HadoopStorageKeys, MilvusOption}
 import com.zilliz.spark.connector.procedure.Register
 import io.milvus.grpc.schema.{DataType, FieldSchema}
 
@@ -314,13 +317,14 @@ class BackfillRegisterUatTest extends AnyFunSuite with Matchers {
 
       // Each job's manifest names its own run's versions.
       Seq(first, second).foreach { r =>
-        val store = com.zilliz.spark.connector.options.HadoopStorageKeys
-          .storeFrom(options)
+        val store = HadoopStorageKeys.storeFrom(options)
         try {
-          val manifest = new com.zilliz.milvus.storage.write.commit.Committer(
-            store,
-            Register.layoutOf(r.stagingPrefix)
-          ).manifest()
+          val layout = Register.layoutOf(r.stagingPrefix)
+          val manifest = JobManifest
+            .fromJson(
+              new String(store.readAll(layout.manifest), StandardCharsets.UTF_8)
+            )
+            .fold(error => throw error, identity)
           manifest.segments
             .map(s => s.segmentId.getOrElse(-1L) -> s.manifestVersion)
             .toMap shouldBe versionOf(r)

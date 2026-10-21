@@ -15,6 +15,7 @@ import com.zilliz.milvus.storage.snapshot.json.{
 }
 import com.zilliz.milvus.storage.write.commit.{Committer, JobManifest}
 import com.zilliz.milvus.storage.write.exec.StagingLayout
+import com.zilliz.milvus.storage.write.io.NativeWritableObjectStore
 import com.zilliz.spark.connector.options.{
   HadoopStorageKeys,
   MilvusOption,
@@ -111,7 +112,8 @@ class ConnectorWriteReadUatTest extends AnyFunSuite with Matchers {
       .config("spark.ui.enabled", "false")
       .getOrCreate()
     try {
-      val store = HadoopStorageKeys.storeFrom(storage)
+      val store =
+        new NativeWritableObjectStore(HadoopStorageKeys.storeFrom(storage))
       scope.run(store, keep = env("MILVUS_UAT_KEEP_WRITE").isDefined) {
         val df = spark
           .range(rows)

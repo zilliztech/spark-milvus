@@ -27,6 +27,7 @@ import com.zilliz.milvus.storage.write.commit.{
   SourceSnapshot
 }
 import com.zilliz.milvus.storage.write.exec.StagingLayout
+import com.zilliz.milvus.storage.write.io.NativeWritableObjectStore
 import com.zilliz.spark.connector.options.{MilvusOption, StorageOptions}
 import com.zilliz.spark.connector.table.{MilvusTables, SnapshotReference}
 
@@ -148,7 +149,9 @@ object WriteSnapshotProcedure extends Procedure {
         )
         .getOrElse("")
     )
-    val store = NativeObjectStore.Factory(properties).open()
+    val store = new NativeWritableObjectStore(
+      NativeObjectStore.Factory(properties).open()
+    )
     try {
       val manifestKey = StagingLayout(input, jobId).manifest
       val manifest = jobManifest(store, manifestKey)

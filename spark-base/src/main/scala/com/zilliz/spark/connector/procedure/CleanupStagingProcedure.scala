@@ -12,11 +12,14 @@ import org.apache.spark.sql.types.{
 import org.apache.spark.sql.Row
 
 import com.zilliz.milvus.storage.credential.StorageProperties
-import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.write.commit.{
   JobOwner,
   StagingCleaner,
   StagingCleanupResult
+}
+import com.zilliz.milvus.storage.write.io.{
+  NativeWritableObjectStore,
+  WritableObjectStore
 }
 import com.zilliz.spark.connector.options.{HadoopStorageKeys, MilvusOption}
 
@@ -53,11 +56,16 @@ object CleanupStagingProcedure extends Procedure {
   )
 
   override def run(args: ProcedureArgs): Seq[Row] =
-    run(args, HadoopStorageKeys.storeFrom, System.currentTimeMillis())
+    run(
+      args,
+      properties =>
+        new NativeWritableObjectStore(HadoopStorageKeys.storeFrom(properties)),
+      System.currentTimeMillis()
+    )
 
   private[procedure] def run(
       args: ProcedureArgs,
-      openStore: Map[String, String] => ObjectStore,
+      openStore: Map[String, String] => WritableObjectStore,
       nowMillis: Long
   ): Seq[Row] = {
     val (database, collection) =
@@ -93,7 +101,7 @@ object CleanupStagingProcedure extends Procedure {
   }
 
   private[procedure] def run(
-      store: ObjectStore,
+      store: WritableObjectStore,
       rootPath: String,
       owner: JobOwner,
       retentionSeconds: Long,

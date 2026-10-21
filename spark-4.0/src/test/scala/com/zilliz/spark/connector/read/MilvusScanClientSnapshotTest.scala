@@ -48,6 +48,10 @@ import com.zilliz.milvus.storage.snapshot.json.{
 }
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
 import com.zilliz.milvus.storage.stats.PrimaryKeyStats
+import com.zilliz.milvus.storage.write.stats.{
+  PrimaryKeyStatsBuilder,
+  PrimaryKeyStatsEncoder
+}
 import com.zilliz.spark.connector.options.{MilvusOption, StorageOptions}
 import com.zilliz.spark.connector.table.MilvusTable
 import com.zilliz.spark.connector.table.OptionStringsSnapshotSource
@@ -1516,7 +1520,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     )
     val values = Seq(101L, 202L, 303L)
     val statistics = values.map { value =>
-      val builder = new PrimaryKeyStats.Builder(
+      val builder = new PrimaryKeyStatsBuilder(
         primaryKey.fieldID,
         primaryKey.dataType
       )
@@ -1530,7 +1534,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     }
     val stored = scala.collection.mutable.Map(
       statistics.map { case (value, stats) =>
-        s"stats/$value" -> stats.toBytes
+        s"stats/$value" -> PrimaryKeyStatsEncoder.toBytes(stats)
       }: _*
     )
     var storeOpens = 0
@@ -1582,11 +1586,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
               fileSize: Long
           ): Array[Byte] =
             stored(key).slice(offset.toInt, (offset + length).toInt)
-          override def write(key: String, data: Array[Byte]): Unit =
-            throw new UnsupportedOperationException("read-only test store")
-          override def createDir(key: String, recursive: Boolean): Unit =
-            throw new UnsupportedOperationException("read-only test store")
-          override def delete(key: String): Unit = stored.remove(key)
+
           override def close(): Unit = ()
         }
       }

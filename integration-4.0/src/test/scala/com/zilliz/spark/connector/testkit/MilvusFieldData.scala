@@ -4,10 +4,8 @@ import java.nio.{ByteBuffer, ByteOrder}
 
 import com.google.protobuf.ByteString
 
-import com.zilliz.milvus.storage.codec.{
-  FloatConverter,
-  SparseFloatVectorConverter
-}
+import com.zilliz.milvus.storage.codec.FloatConverter
+import com.zilliz.milvus.storage.write.codec.SparseFloatVectorEncoder
 import com.zilliz.milvus.storage.DataParseException
 import io.milvus.grpc.schema.{
   ArrayArray,
@@ -316,7 +314,7 @@ object MilvusFieldData {
   ): FieldData = {
     val sparseDim = fieldValues.map(_.size).max
     val allValues = fieldValues
-      .map(SparseFloatVectorConverter.encodeSparseFloatVector)
+      .map(SparseFloatVectorEncoder.encodeSparseFloatVector)
       .toArray
     FieldData(
       `type` = DataType.SparseFloatVector,

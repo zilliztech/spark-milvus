@@ -26,6 +26,7 @@ import com.zilliz.milvus.storage.write.commit.{
   JobWriteMode
 }
 import com.zilliz.milvus.storage.write.exec.StagingLayout
+import com.zilliz.milvus.storage.write.io.NativeWritableObjectStore
 import com.zilliz.spark.connector.metrics.WriteMetricsReport
 import com.zilliz.spark.connector.options.{
   HadoopStorageKeys,
@@ -172,7 +173,9 @@ class MilvusV3BatchWrite(
   }
 
   private def withCommitter[A](f: Committer => A): A = {
-    val store = HadoopStorageKeys.storeFrom(storage)
+    val store = new NativeWritableObjectStore(
+      HadoopStorageKeys.storeFrom(storage)
+    )
     try f(new Committer(store, layout))
     finally store.close()
   }

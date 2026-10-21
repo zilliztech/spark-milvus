@@ -31,6 +31,7 @@ import com.zilliz.milvus.storage.snapshot.json.{
 }
 import com.zilliz.milvus.storage.write.commit.{Committer, JobManifest}
 import com.zilliz.milvus.storage.write.exec.StagingLayout
+import com.zilliz.milvus.storage.write.io.NativeWritableObjectStore
 import com.zilliz.spark.connector.options.{HadoopStorageKeys, MilvusOption}
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
@@ -581,7 +582,8 @@ class DataFrameScenariosUatTest
         MilvusOption.MilvusCollectionName -> "uat_scenarios_rt",
         MilvusOption.MilvusInsertMaxBatchSize -> "1000"
       )
-      val store = HadoopStorageKeys.storeFrom(storage)
+      val store =
+        new NativeWritableObjectStore(HadoopStorageKeys.storeFrom(storage))
       scope.run(store) {
         val written = 500L
         val df = v3(columnar)
@@ -743,7 +745,8 @@ class DataFrameScenariosUatTest
     )
     val root = scope.root
     val storage = storageOptions() + (StorageProperties.RootPath -> root)
-    val store = HadoopStorageKeys.storeFrom(storage)
+    val store =
+      new NativeWritableObjectStore(HadoopStorageKeys.storeFrom(storage))
     scope.run(store) {
       val schema = CollectionSchema(
         name = "uat_scenarios_int8_array",

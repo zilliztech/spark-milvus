@@ -23,6 +23,7 @@ import com.zilliz.milvus.storage.write.commit.{
   SourceSnapshot
 }
 import com.zilliz.milvus.storage.write.exec.StagingLayout
+import com.zilliz.milvus.storage.write.io.NativeWritableObjectStore
 import com.zilliz.spark.connector.options.{
   MilvusOption,
   OptionParsing,
@@ -222,7 +223,9 @@ object BuildIndexProcedure extends Procedure {
       jobId: String,
       source: SourceSnapshot
   ): Unit = {
-    val store = NativeObjectStore.Factory(properties).open()
+    val store = new NativeWritableObjectStore(
+      NativeObjectStore.Factory(properties).open()
+    )
     try
       new Committer(store, StagingLayout(output, jobId))
         .commit(Seq.empty, indexes = indexes, sourceSnapshot = Some(source))

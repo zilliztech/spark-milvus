@@ -80,12 +80,6 @@ class IndexFileCodecTest extends AnyFunSuite {
       throw new UnsupportedOperationException
     override def exists(key: String): Boolean =
       throw new UnsupportedOperationException
-    override def write(key: String, data: Array[Byte]): Unit =
-      throw new UnsupportedOperationException
-    override def createDir(key: String, recursive: Boolean): Unit =
-      throw new UnsupportedOperationException
-    override def delete(key: String): Unit =
-      throw new UnsupportedOperationException
     override def close(): Unit = ()
   }
 
@@ -205,7 +199,7 @@ class IndexFileCodecTest extends AnyFunSuite {
       )
     assert(
       IndexFileCodec.parseSlices(bytes :+ 0.toByte) ==
-        Vector(IndexFileCodec.Slice("HNSW", 3, 19L))
+        Vector(IndexFileFormat.Slice("HNSW", 3, 19L))
     )
     // The HNSW payload of a 1 GiB segment (Milvus's default segment.maxSize) is
     // 1.035 GiB: 1,111,588,231 bytes measured on 262,144 x 1024-d vectors. A
@@ -215,13 +209,13 @@ class IndexFileCodecTest extends AnyFunSuite {
       IndexFileCodec.parseSlices(
         """{"meta":[{"name":"HNSW","slice_num":67,"total_len":1111588231}]}"""
           .getBytes(UTF_8)
-      ) == Vector(IndexFileCodec.Slice("HNSW", 67, 1111588231L))
+      ) == Vector(IndexFileFormat.Slice("HNSW", 67, 1111588231L))
     )
     assert(
       IndexFileCodec.parseSlices(
         """{"meta":[{"name":"HNSW","slice_num":600,"total_len":9663676416}]}"""
           .getBytes(UTF_8)
-      ) == Vector(IndexFileCodec.Slice("HNSW", 600, 9663676416L))
+      ) == Vector(IndexFileFormat.Slice("HNSW", 600, 9663676416L))
     )
     val invalid = Seq(
       """{"meta":[{"name":"../HNSW","slice_num":1,"total_len":19}]}""",

@@ -15,7 +15,6 @@ import org.apache.spark.sql.types._
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.write.exec.V2SegmentWriter
 import com.zilliz.spark.connector.options.{MilvusOption, OptionParsing}
-import com.zilliz.spark.connector.types.ArrowConverter
 import com.zilliz.spark.connector.types.SparkSchemaMapper
 
 /** Describes one parquet file produced by a backfill write into a StorageV2
@@ -148,7 +147,7 @@ class MilvusV2Writer(
     */
   def write(row: InternalRow): Unit = {
     if (closed) throw new IllegalStateException("writer already closed")
-    ArrowConverter.internalRowToArrow(root, currentBatchSize, row, targetSchema)
+    ArrowWriter.internalRowToArrow(root, currentBatchSize, row, targetSchema)
     currentBatchSize += 1
     root.setRowCount(currentBatchSize)
     if (currentBatchSize >= batchSize) {

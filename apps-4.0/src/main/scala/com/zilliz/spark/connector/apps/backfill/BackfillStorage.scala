@@ -10,8 +10,12 @@ import org.apache.spark.sql.SparkSession
 import org.slf4j.LoggerFactory
 
 import com.zilliz.milvus.storage.credential.StorageProperties
-import com.zilliz.milvus.storage.io.{NativeObjectStore, ObjectStore}
+import com.zilliz.milvus.storage.io.NativeObjectStore
 import com.zilliz.milvus.storage.path.StoragePath
+import com.zilliz.milvus.storage.write.io.{
+  NativeWritableObjectStore,
+  WritableObjectStore
+}
 import com.zilliz.spark.connector.options.HadoopStorageKeys
 
 /** Storage paths and access scopes used by the backfill application. Snapshot
@@ -24,12 +28,14 @@ object BackfillStorage {
 
   private[backfill] def stagingStore(
       config: BackfillConfig
-  ): ObjectStore = {
-    NativeObjectStore
-      .Factory(
-        StorageProperties.from(config.getS3WriteOptionsForBasePath(""))
-      )
-      .open()
+  ): WritableObjectStore = {
+    new NativeWritableObjectStore(
+      NativeObjectStore
+        .Factory(
+          StorageProperties.from(config.getS3WriteOptionsForBasePath(""))
+        )
+        .open()
+    )
   }
 
   /** Write backfill result JSON to the given output path (S3 or local). Uses

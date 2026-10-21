@@ -4,6 +4,8 @@ import java.io.IOException
 import java.nio.file.{Files, NoSuchFileException, Path, Paths}
 import scala.collection.mutable
 
+import com.zilliz.milvus.storage.write.io.WritableObjectStore
+
 /** An [[ObjectStore]] over the local filesystem, for tests only.
   *
   * Production has exactly one store, [[NativeObjectStore]], which reaches every
@@ -15,7 +17,7 @@ import scala.collection.mutable
   * Keys are paths. An absolute key is used as it stands; a relative one
   * resolves against `root`, which stands in for a bucket.
   */
-final class LocalObjectStore(root: String = "") extends ObjectStore {
+final class LocalObjectStore(root: String = "") extends WritableObjectStore {
 
   private var closed = false
 
@@ -109,7 +111,8 @@ final class LocalObjectStore(root: String = "") extends ObjectStore {
 /** A store whose every read fails, for the suites that assert an error reaches
   * the caller instead of turning into an empty result.
   */
-final class FailingObjectStore(failure: => Throwable) extends ObjectStore {
+final class FailingObjectStore(failure: => Throwable)
+    extends WritableObjectStore {
 
   override def readAll(key: String): Array[Byte] = throw failure
 

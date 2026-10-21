@@ -10,6 +10,7 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.jni.storage.NativeStorageLibrary
+import com.zilliz.milvus.storage.write.io.NativeWritableObjectStore
 import io.milvus.storage.{
   MilvusStorageException,
   MilvusStorageFileSystem,
@@ -118,11 +119,12 @@ class StorageNativeTest
     // The key is built the way a writer builds it: fs.root_path, then the
     // job's own path under it.
     val rootPath = root.resolve("files").toAbsolutePath.toString
-    val store = NativeObjectStore
+    val reader = NativeObjectStore
       .Factory(
         Map("fs.storage_type" -> "local", "fs.root_path" -> rootPath)
       )
       .open()
+    val store = new NativeWritableObjectStore(reader)
     try {
       val key = s"$rootPath/staging/job-1/segment/data.bin"
       val payload = "loon".getBytes(StandardCharsets.UTF_8)
@@ -132,7 +134,11 @@ class StorageNativeTest
       store.write(key, payload)
 
       store.exists(key) shouldBe true
-      store.readAll(key) shouldBe payload
+      reader.readAll(key) shouldBe payload
+      store.readAt(key, 1L, 2L, payload.length.toLong) shouldBe payload.slice(
+        1,
+        3
+      )
       store.size(key) shouldBe payload.length.toLong
       store.list(s"$rootPath/staging", recursive = true).map(_.path) should
         contain(key)
@@ -147,7 +153,14 @@ class StorageNativeTest
           .filter(path => path.getFileName.toString == "data.bin")
           .count() shouldBe 1L
       finally written.close()
+      store.delete(key)
+      reader.exists(key) shouldBe false
     } finally store.close()
+    reader.close() // Both views share one idempotent close lifecycle.
+    intercept[IllegalStateException](reader.exists("closed"))
+    intercept[IllegalStateException](store.write("closed", Array[Byte](1)))
+    intercept[IllegalStateException](store.createDir("closed"))
+    intercept[IllegalStateException](store.delete("closed"))
   }
 
   test("a failed C call arrives as an exception, not a return code") {
@@ -168,14 +181,16 @@ class StorageNativeTest
       System.getProperty("user.name") != "root",
       "root ignores directory permissions"
     )
-    val store = NativeObjectStore
-      .Factory(
-        Map(
-          "fs.storage_type" -> "local",
-          "fs.root_path" -> root.toAbsolutePath.toString
+    val store = new NativeWritableObjectStore(
+      NativeObjectStore
+        .Factory(
+          Map(
+            "fs.storage_type" -> "local",
+            "fs.root_path" -> root.toAbsolutePath.toString
+          )
         )
-      )
-      .open()
+        .open()
+    )
     val locked = root.resolve("locked")
     try {
       store.createDir("locked", recursive = true)

@@ -35,8 +35,12 @@ that in Scala is the stovepipe AGENTS.md forbids.
   `spark.hadoop.fs.s3a.*` and `fs.oss.*` into `fs.*` is the layer-3 shim
   `HadoopStorageKeys` in `spark.options`, not core. The key-name table is
   section 3.3 of the design.
-- `core.io` owns the upstream `MilvusStorageFileSystem` and offers `readAll`,
-  `readAt`, `size`, `list`, `exists`, `write`, `createDir` and `delete`.
+- `core.io` owns the upstream `MilvusStorageFileSystem` and exposes `readAll`,
+  `readAt`, `size`, `list` and `exists` through the read-only `ObjectStore`.
+  `core.write.io.NativeWritableObjectStore` adds `write`, `createDir` and
+  `delete` to the same session through `NativeObjectStore.withFileSystem`.
+  This public boundary supplies a normalized key and a borrowed filesystem;
+  the adapter must not open a second backend or resolve credentials itself.
 
 A format package asks for bytes at a path and gets bytes. If the words
 credential, endpoint, or FileSystem appear in a format package's signature, the

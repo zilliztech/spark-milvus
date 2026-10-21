@@ -17,6 +17,7 @@ import com.zilliz.milvus.storage.snapshot.{
   Snapshot,
   SnapshotOrigin
 }
+import com.zilliz.milvus.storage.write.io.WritableObjectStore
 import com.zilliz.milvus.storage.Logging
 import io.milvus.grpc.schema.{CollectionSchema => ProtoSchema, FieldSchema}
 
@@ -159,7 +160,7 @@ object SnapshotWriter extends Logging {
       snapshot: Snapshot,
       indexes: Seq[CommittedIndex],
       target: SnapshotTarget,
-      store: ObjectStore,
+      store: WritableObjectStore,
       sourceKey: String,
       restorable: Boolean
   ): WrittenSnapshot = {

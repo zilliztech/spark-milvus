@@ -3,6 +3,7 @@ package com.zilliz.milvus.storage.codec
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import com.zilliz.milvus.storage.write.codec.ArrayEncoder
 import io.milvus.grpc.schema.DataType
 
 /** Int8, Int16 and Int32 elements share `IntData`, so the element type is what
@@ -14,22 +15,22 @@ class ArrayCodecTest extends AnyFunSuite with Matchers {
   test("Int8 and Int16 elements outside their range are refused") {
     Seq(128, -129).foreach { bad =>
       intercept[IllegalArgumentException](
-        ArrayCodec.encode(DataType.Int8, Seq(bad))
+        ArrayEncoder.encode(DataType.Int8, Seq(bad))
       ).getMessage should include(bad.toString)
     }
     Seq(32768, -32769).foreach { bad =>
       intercept[IllegalArgumentException](
-        ArrayCodec.encode(DataType.Int16, Seq(bad))
+        ArrayEncoder.encode(DataType.Int16, Seq(bad))
       )
     }
     ArrayCodec.elements(
-      ArrayCodec.encode(DataType.Int8, Seq(-128, 127))
+      ArrayEncoder.encode(DataType.Int8, Seq(-128, 127))
     ) shouldBe Seq(-128, 127)
     ArrayCodec.elements(
-      ArrayCodec.encode(DataType.Int16, Seq(128, -32768, 32767))
+      ArrayEncoder.encode(DataType.Int16, Seq(128, -32768, 32767))
     ) shouldBe Seq(128, -32768, 32767)
     ArrayCodec.elements(
-      ArrayCodec.encode(DataType.Int32, Seq(Int.MaxValue))
+      ArrayEncoder.encode(DataType.Int32, Seq(Int.MaxValue))
     ) shouldBe Seq(Int.MaxValue)
   }
 }

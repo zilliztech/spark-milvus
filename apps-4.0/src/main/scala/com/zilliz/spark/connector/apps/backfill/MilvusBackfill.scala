@@ -15,6 +15,7 @@ import com.zilliz.milvus.storage.snapshot.json.{
   SnapshotJson
 }
 import com.zilliz.milvus.storage.snapshot.Segment
+import com.zilliz.milvus.storage.write.io.WritableObjectStore
 import com.zilliz.spark.connector.apps.backfill.BackfillSegmentWrite.{
   usedBfCol,
   usedSnapshotCol,
@@ -116,7 +117,7 @@ object MilvusBackfill {
     * an error, not a rerun (decided 2026-09-16).
     */
   private[backfill] def ensureJobIdUnused(
-      store: com.zilliz.milvus.storage.io.ObjectStore,
+      store: WritableObjectStore,
       layout: com.zilliz.milvus.storage.write.exec.StagingLayout
   ): Unit =
     if (
@@ -137,7 +138,7 @@ object MilvusBackfill {
     * to `register`.
     */
   private[backfill] def commitJobManifest(
-      store: com.zilliz.milvus.storage.io.ObjectStore,
+      store: WritableObjectStore,
       layout: com.zilliz.milvus.storage.write.exec.StagingLayout,
       segments: Seq[com.zilliz.milvus.storage.write.commit.CommittedSegment],
       descriptor: Option[

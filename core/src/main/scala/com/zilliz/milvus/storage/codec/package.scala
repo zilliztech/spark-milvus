@@ -8,8 +8,8 @@ package com.zilliz.milvus.storage
   * as. The split against the schema package: schema answers "what type is this
   * field", codec answers "what does one value of that type look like in bytes".
   *
-  * BinlogCodec owns the common event envelope and flat Parquet payload used by
-  * deletion files and persisted index files. It opens no storage itself.
+  * BinlogCodec decodes the common event envelope and flat Parquet payload used
+  * by deletion files and persisted index files. It opens no storage itself.
   * MilvusIndexFileDecoder takes one index object apart and IndexFileCodec
   * assembles the slices of a persisted index and hands the payload to the
   * vector library; both belong to the Milvus format side rather than to the
@@ -17,7 +17,9 @@ package com.zilliz.milvus.storage
   * (docs/design/projects/spark-milvus/architecture/vector-search.html section
   * 2.5). `SegmentIndexObjects` names, slices, encodes and writes what a build
   * produced into those files through `ObjectStore`. It shares the envelope and
-  * slice-metadata format with `IndexFileCodec` (W6).
+  * slice-metadata definitions in `IndexFileFormat` (W6); business encoders live
+  * in `core.write.codec`. FloatConverter also packs read-query vectors, so its
+  * encode methods remain part of this read-side package.
   *
   * `VectorIndexFamilies` is the one list of index types this connector reads
   * and writes, with the byte markers each family's persisted stream starts
@@ -26,8 +28,8 @@ package com.zilliz.milvus.storage
   * unreadable.
   *
   * Main types: FloatConverter, SparseFloatVectorConverter, ArrayCodec,
-  * BinlogCodec, MilvusIndexFileDecoder, IndexFileCodec, SegmentIndexObjects,
-  * VectorIndexFamilies. Capabilities: R15, W3, V2, W6 (see
-  * docs/design/projects/spark-milvus/capabilities.md).
+  * BinlogCodec, BinlogFormat, MilvusIndexFileDecoder, IndexFileCodec,
+  * IndexFileFormat, SegmentIndexObjects, VectorIndexFamilies. Capabilities:
+  * R15, W3, V2, W6 (see docs/design/projects/spark-milvus/capabilities.md).
   */
 package object codec

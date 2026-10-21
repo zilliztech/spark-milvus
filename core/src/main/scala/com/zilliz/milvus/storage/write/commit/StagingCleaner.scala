@@ -3,8 +3,9 @@ package com.zilliz.milvus.storage.write.commit
 import java.nio.charset.StandardCharsets
 import scala.util.control.NonFatal
 
-import com.zilliz.milvus.storage.io.{FileInfo, ObjectStore}
+import com.zilliz.milvus.storage.io.FileInfo
 import com.zilliz.milvus.storage.write.exec.StagingLayout
+import com.zilliz.milvus.storage.write.io.WritableObjectStore
 
 object CleanupAction {
   val Preserved = "preserved"
@@ -41,7 +42,7 @@ final case class StagingCleanupResult(
   * entries are counted and reported, but never passed to `deleteFile` and the
   * prefix is never reported as deleted.
   */
-final class StagingCleaner(store: ObjectStore, rootPath: String) {
+final class StagingCleaner(store: WritableObjectStore, rootPath: String) {
 
   def clean(
       target: JobOwner,

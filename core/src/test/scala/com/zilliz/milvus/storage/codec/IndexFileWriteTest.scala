@@ -120,7 +120,7 @@ class IndexFileWriteTest extends AnyFunSuite with Matchers {
         } finally meta.close()
 
       IndexFileCodec.parseSlices(json.getBytes(UTF_8)) shouldBe Vector(
-        IndexFileCodec.Slice("HNSW", 3, 2500L)
+        IndexFileFormat.Slice("HNSW", 3, 2500L)
       )
 
       // The three objects put the payload back together byte for byte.

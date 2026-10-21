@@ -2,7 +2,7 @@ package com.zilliz.spark.connector.uat
 
 import java.util.UUID
 
-import com.zilliz.milvus.storage.io.ObjectStore
+import com.zilliz.milvus.storage.write.io.WritableObjectStore
 
 /** Ownership and cleanup for mutable resources created by live-service tests.
   */
@@ -50,7 +50,7 @@ private[connector] final class UatWriteScope(base: String, caseName: String) {
   val root: String =
     s"${base.stripSuffix("/")}/${UatResources.uniqueName(caseName + "_")}"
 
-  def run[A](store: ObjectStore, keep: Boolean = false)(body: => A): A =
+  def run[A](store: WritableObjectStore, keep: Boolean = false)(body: => A): A =
     UatResources.withCleanup(body) {
       UatResources.withCleanup {
         if (!keep && store.exists(root)) {

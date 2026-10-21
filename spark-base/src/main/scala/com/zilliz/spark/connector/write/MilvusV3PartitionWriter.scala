@@ -27,7 +27,6 @@ import com.zilliz.milvus.storage.schema.{
   HybridTimestamp,
   SchemaMapper
 }
-import com.zilliz.milvus.storage.stats.PrimaryKeyStats
 import com.zilliz.milvus.storage.write.exec.{
   ColumnGroupSplit,
   ManifestTransaction,
@@ -35,9 +34,13 @@ import com.zilliz.milvus.storage.write.exec.{
   V3SegmentWriter,
   WriteMetrics
 }
+import com.zilliz.milvus.storage.write.io.NativeWritableObjectStore
+import com.zilliz.milvus.storage.write.stats.{
+  PrimaryKeyStatsBuilder,
+  PrimaryKeyStatsEncoder
+}
 import com.zilliz.spark.connector.metrics.WriteMetricsReport
 import com.zilliz.spark.connector.options.{MilvusOption, OptionParsing}
-import com.zilliz.spark.connector.types.ArrowConverter
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 /** Writer factory for creating partition writers
@@ -159,9 +162,9 @@ class MilvusV3PartitionWriter(
           )
         )
     }
-  private val primaryKeyStats: Option[PrimaryKeyStats.Builder] =
+  private val primaryKeyStats: Option[PrimaryKeyStatsBuilder] =
     primaryKey.map { case (_, id, dataType) =>
-      new PrimaryKeyStats.Builder(id, dataType)
+      new PrimaryKeyStatsBuilder(id, dataType)
     }
 
   private def collectPrimaryKeys(root: VectorSchemaRoot): Unit =
@@ -192,10 +195,12 @@ class MilvusV3PartitionWriter(
   private def writePrimaryKeyStats(): Seq[ManifestTransaction.Stat] =
     primaryKeyStats.filter(_.size > 0).toSeq.map { builder =>
       val stats = builder.build()
-      val bytes = stats.toBytes
+      val bytes = PrimaryKeyStatsEncoder.toBytes(stats)
       val directory = s"$basePath/_stats/bloom_filter.${stats.fieldId}"
       val path = s"$directory/${System.currentTimeMillis()}"
-      val store = NativeObjectStore.Factory(storageProperties).open()
+      val store = new NativeWritableObjectStore(
+        NativeObjectStore.Factory(storageProperties).open()
+      )
       try {
         // The store does not create parent directories: object storage has
         // none, the local backend needs them (io.ObjectStore).
@@ -258,7 +263,7 @@ class MilvusV3PartitionWriter(
   )
 
   override def write(record: InternalRow): Unit = {
-    ArrowConverter.internalRowToArrow(
+    ArrowWriter.internalRowToArrow(
       root,
       currentBatchSize,
       record,

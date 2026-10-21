@@ -4,14 +4,15 @@ import java.nio.ByteBuffer
 
 import com.fasterxml.jackson.databind.ObjectMapper
 
-import com.zilliz.milvus.storage.codec.IndexFileCodec.{
+import com.zilliz.milvus.storage.codec.IndexFileFormat.{
   validName,
   ChunkBytes,
   MaxObjectBytes,
   Slice,
   SliceMeta
 }
-import com.zilliz.milvus.storage.io.ObjectStore
+import com.zilliz.milvus.storage.write.codec.{BinlogEncoder, IndexFileEncoder}
+import com.zilliz.milvus.storage.write.io.WritableObjectStore
 import com.zilliz.milvus.storage.Logging
 
 /** Where a built index lands, and what a segment record will say about it.
@@ -96,7 +97,7 @@ object SegmentIndexObjects extends Logging {
       payloads: Seq[(String, Long)],
       read: (String, Long, ByteBuffer) => Unit,
       target: IndexObjectTarget,
-      store: ObjectStore,
+      store: WritableObjectStore,
       sliceBytes: Long = DefaultSliceBytes
   ): Seq[WrittenIndexObject] = {
     require(payloads.nonEmpty, "A built index has no payloads")
@@ -146,7 +147,7 @@ object SegmentIndexObjects extends Logging {
           view.get(bytes, copied, count)
           copied += count
         }
-        val envelope = BinlogCodec.envelope(
+        val envelope = BinlogEncoder.envelope(
           7,
           target.collectionId,
           target.partitionId,
@@ -177,8 +178,8 @@ object SegmentIndexObjects extends Logging {
     }
     val sliced = slices.result()
     if (sliced.nonEmpty) {
-      val bytes = IndexFileCodec.sliceMeta(sliced)
-      val envelope = BinlogCodec.envelope(
+      val bytes = IndexFileEncoder.sliceMeta(sliced)
+      val envelope = BinlogEncoder.envelope(
         7,
         target.collectionId,
         target.partitionId,

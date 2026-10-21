@@ -2,8 +2,8 @@ package com.zilliz.milvus.storage.write.commit
 
 import java.nio.charset.StandardCharsets
 
-import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.write.exec.StagingLayout
+import com.zilliz.milvus.storage.write.io.WritableObjectStore
 
 sealed trait CommitOutcome
 
@@ -29,17 +29,18 @@ object CommitOutcome {
   * The manifest is written first so the marker never exists without it.
   *
   * `abort` deletes every file under the staging prefix and leaves the directory
-  * entries: the loon C API behind `ObjectStore` has no directory delete and its
-  * `delete_file` refuses a directory, so on S3 the zero-byte marker objects
-  * milvus-storage's writer created (`…/_data/`, `…/_metadata/`) stay behind,
-  * and on a local filesystem the empty directories do. A backfill writes into
-  * existing segments outside the prefix, and their manifest versions have
-  * already advanced by the time the driver aborts; abort does not undo those.
+  * entries: the loon C API behind `WritableObjectStore` has no directory delete
+  * and its `delete_file` refuses a directory, so on S3 the zero-byte marker
+  * objects milvus-storage's writer created (`…/_data/`, `…/_metadata/`) stay
+  * behind, and on a local filesystem the empty directories do. A backfill
+  * writes into existing segments outside the prefix, and their manifest
+  * versions have already advanced by the time the driver aborts; abort does not
+  * undo those.
   *
   * Registration is not this class's job (capability A4): it stops at the
   * manifest, and the core layer never calls Milvus.
   */
-final class Committer(store: ObjectStore, layout: StagingLayout) {
+final class Committer(store: WritableObjectStore, layout: StagingLayout) {
 
   def isCommitted: Boolean = store.exists(layout.marker)
 

@@ -10,6 +10,10 @@ import com.zilliz.milvus.storage.expr._
 import com.zilliz.milvus.storage.io.{FileInfo, LocalObjectStore, ObjectStore}
 import com.zilliz.milvus.storage.snapshot._
 import com.zilliz.milvus.storage.stats.PrimaryKeyValue.LongValue
+import com.zilliz.milvus.storage.write.stats.{
+  PrimaryKeyStatsBuilder,
+  PrimaryKeyStatsEncoder
+}
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 class PrimaryKeyBloomPrunerTest extends AnyFunSuite with Matchers {
@@ -71,15 +75,19 @@ class PrimaryKeyBloomPrunerTest extends AnyFunSuite with Matchers {
 
   test("pruning keeps applicable partition and global L0 delete sources") {
     val root = Files.createTempDirectory("milvus-bloom-pruner")
-    val counting = new CountingObjectStore(new LocalObjectStore(root.toString))
+    val store = new LocalObjectStore(root.toString)
+    val counting = new CountingObjectStore(store)
     val first = stats(100L, 1L, 2L)
     val candidate = Iterator
       .from(1000)
       .map(_.toLong)
       .find(value => !first.mightContainLong(value))
       .get
-    counting.write("stats/30", first.toBytes)
-    counting.write("stats/31", stats(100L, candidate).toBytes)
+    store.write("stats/30", PrimaryKeyStatsEncoder.toBytes(first))
+    store.write(
+      "stats/31",
+      PrimaryKeyStatsEncoder.toBytes(stats(100L, candidate))
+    )
 
     val data20 = segment(30L, 20L, Seq("stats/30"))
     val data21 = segment(31L, 21L, Seq("stats/31"))
@@ -111,7 +119,8 @@ class PrimaryKeyBloomPrunerTest extends AnyFunSuite with Matchers {
 
   test("every relevant file must reliably prove a miss") {
     val root = Files.createTempDirectory("milvus-bloom-proof")
-    val counting = new CountingObjectStore(new LocalObjectStore(root.toString))
+    val store = new LocalObjectStore(root.toString)
+    val counting = new CountingObjectStore(store)
     val miss = stats(100L, 1L)
     val candidate = Iterator
       .from(1000)
@@ -121,20 +130,21 @@ class PrimaryKeyBloomPrunerTest extends AnyFunSuite with Matchers {
     val hit = stats(100L, candidate)
     val wrongField = stats(101L, 1L)
 
-    counting.write("stats/hit-a", miss.toBytes)
-    counting.write("stats/hit-b", hit.toBytes)
-    counting.write("stats/corrupt-a", miss.toBytes)
-    counting.write(
+    store.write("stats/hit-a", PrimaryKeyStatsEncoder.toBytes(miss))
+    store.write("stats/hit-b", PrimaryKeyStatsEncoder.toBytes(hit))
+    store.write("stats/corrupt-a", PrimaryKeyStatsEncoder.toBytes(miss))
+    store.write(
       "stats/corrupt-b",
       "not-json".getBytes(StandardCharsets.UTF_8)
     )
-    counting.write("stats/wrong", wrongField.toBytes)
-    counting.write("stats/miss", miss.toBytes)
-    counting.write(
+    store.write("stats/wrong", PrimaryKeyStatsEncoder.toBytes(wrongField))
+    store.write("stats/miss", PrimaryKeyStatsEncoder.toBytes(miss))
+    store.write(
       "stats/compound/1",
-      s"[${miss.toJson},${miss.toJson}]".getBytes(StandardCharsets.UTF_8)
+      s"[${PrimaryKeyStatsEncoder.toJson(miss)},${PrimaryKeyStatsEncoder.toJson(miss)}]"
+        .getBytes(StandardCharsets.UTF_8)
     )
-    counting.write("stats/compound/9", hit.toBytes)
+    store.write("stats/compound/9", PrimaryKeyStatsEncoder.toBytes(hit))
 
     val hitInSecondFile = segment(30L, 20L, Seq("stats/hit-a", "stats/hit-b"))
     val corruptFile =
@@ -177,7 +187,7 @@ class PrimaryKeyBloomPrunerTest extends AnyFunSuite with Matchers {
   }
 
   private def stats(fieldId: Long, values: Long*): PrimaryKeyStats = {
-    val builder = new PrimaryKeyStats.Builder(fieldId, DataType.Int64)
+    val builder = new PrimaryKeyStatsBuilder(fieldId, DataType.Int64)
     values.foreach(builder.addLong)
     builder.build()
   }
@@ -238,11 +248,6 @@ class PrimaryKeyBloomPrunerTest extends AnyFunSuite with Matchers {
         length: Long,
         fileSize: Long
     ): Array[Byte] = delegate.readAt(key, offset, length, fileSize)
-    override def write(key: String, data: Array[Byte]): Unit =
-      delegate.write(key, data)
-    override def createDir(key: String, recursive: Boolean): Unit =
-      delegate.createDir(key, recursive)
-    override def delete(key: String): Unit = delegate.delete(key)
     override def close(): Unit = delegate.close()
   }
 }

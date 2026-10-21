@@ -17,12 +17,11 @@ final class NativeObjectStore private (
 
   private var closed = false
 
-  /** A key is relative to the bucket, so it carries `fs.root_path`
-    * ([[com.zilliz.milvus.storage.write.commit.CommittedSegment]] states that).
-    * The C layer roots a remote backend at the bucket and a local one at
-    * `fs.root_path`, one level deeper, so on the local backend that segment is
-    * taken off on the way down and put back on the way up. Callers keep one
-    * convention whichever backend answers.
+  /** A key is relative to the bucket, so it carries `fs.root_path`. The C layer
+    * roots a remote backend at the bucket and a local one at `fs.root_path`,
+    * one level deeper, so on the local backend that segment is taken off on the
+    * way down and put back on the way up. Callers keep one convention whichever
+    * backend answers.
     */
   private def down(key: String): String =
     if (rootPath.isEmpty) key
@@ -59,21 +58,14 @@ final class NativeObjectStore private (
     finally reader.close()
   }
 
-  override def write(key: String, data: Array[Byte]): Unit = {
-    val target = down(key)
-    // Object storage has no directories and a filesystem will not open a file
-    // whose parents are missing; which one is behind the store is not the
-    // caller's business.
-    val parent = target.lastIndexOf('/')
-    if (parent > 0) active.createDir(target.substring(0, parent), true)
-    active.writeFile(target, data)
-  }
-
-  override def createDir(key: String, recursive: Boolean): Unit =
-    active.createDir(down(key), recursive)
-
-  override def delete(key: String): Unit =
-    active.deleteFile(down(key))
+  /** Runs a low-level operation with this session and its normalized key. The
+    * callback borrows the filesystem: it must not close or retain it. Adapters
+    * share the store's identity, path rules and lifetime through this boundary;
+    * they must not open another backend or resolve credentials.
+    */
+  def withFileSystem[A](key: String)(
+      operation: (MilvusStorageFileSystem, String) => A
+  ): A = operation(active, down(key))
 
   override def close(): Unit = synchronized {
     if (!closed) {
@@ -117,7 +109,7 @@ object NativeObjectStore {
           .getOrElse("")
       else ""
 
-    override def open(path: String): ObjectStore = {
+    override def open(path: String): NativeObjectStore = {
       NativeStorageLibrary.load()
       val nativeProperties = new MilvusStorageProperties()
       var filesystem: MilvusStorageFileSystem = null

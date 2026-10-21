@@ -923,15 +923,6 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
           fileSize: Long
       ): Array[Byte] = throw new UnsupportedOperationException
 
-      override def write(key: String, data: Array[Byte]): Unit =
-        throw new UnsupportedOperationException
-
-      override def createDir(key: String, recursive: Boolean): Unit =
-        throw new UnsupportedOperationException
-
-      override def delete(key: String): Unit =
-        throw new UnsupportedOperationException
-
       override def close(): Unit =
         if (activeReads.get() > 0) closedWhileReading.set(true)
     }

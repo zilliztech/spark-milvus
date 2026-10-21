@@ -94,37 +94,14 @@ object SnapshotSegmentReader extends com.zilliz.milvus.storage.Logging {
 
   private val LastNeededField = "index_files"
 
-  private val SchemaResources: Map[Int, String] = Map(
-    1 -> "/milvus-segment-manifest-v1.avsc",
-    2 -> "/milvus-segment-manifest-v2.avsc",
-    3 -> "/milvus-segment-manifest-v3.avsc",
-    4 -> "/milvus-segment-manifest-v4.avsc",
-    5 -> "/milvus-segment-manifest-v5.avsc"
-  )
-
-  private lazy val schemas: Map[Int, Schema] = SchemaResources.map {
-    case (version, resource) =>
+  private lazy val schemas: Map[Int, Schema] =
+    SnapshotSegmentSchema.supportedVersions.map { version =>
       version -> truncatedSchema(
-        loadSchema(resource),
+        SnapshotSegmentSchema.schemaFor(version),
         LastNeededField,
-        resource
+        version
       )
-  }
-
-  private def loadSchema(resource: String): Schema = {
-    val in = Option(getClass.getResourceAsStream(resource)).getOrElse {
-      throw new IllegalStateException(
-        s"bundled AVSC resource $resource not found on classpath"
-      )
-    }
-    try {
-      val schemaText =
-        scala.io.Source.fromInputStream(in, "UTF-8").mkString
-      new Schema.Parser().parse(schemaText)
-    } finally {
-      in.close()
-    }
-  }
+    }.toMap
 
   private def schemaFor(version: Int): Schema =
     schemas.getOrElse(
@@ -141,12 +118,12 @@ object SnapshotSegmentReader extends com.zilliz.milvus.storage.Logging {
   private def truncatedSchema(
       full: Schema,
       lastField: String,
-      resource: String
+      version: Int
   ): Schema = {
     val idx = full.getFields.asScala.indexWhere(_.name == lastField)
     if (idx < 0) {
       throw new IllegalStateException(
-        s"bundled AVSC $resource is missing required field '$lastField'"
+        s"bundled Milvus manifest schema version $version is missing required field '$lastField'"
       )
     }
     val truncated = Schema.createRecord(
@@ -187,8 +164,6 @@ object SnapshotSegmentReader extends com.zilliz.milvus.storage.Logging {
       case e: Throwable => Left(e)
     }
   }
-
-  def supportedSchemaVersions: Seq[Int] = SchemaResources.keys.toSeq.sorted
 
   /** Join a snapshot segment record with the segment's `group_field_id_list`
     * kv-metadata (read from any one of the segment's parquet files) to produce

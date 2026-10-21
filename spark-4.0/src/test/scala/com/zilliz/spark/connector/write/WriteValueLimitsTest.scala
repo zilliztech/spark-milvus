@@ -9,7 +9,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.codec.ArrayCodec
-import com.zilliz.spark.connector.types.{ArrowConverter, SparkSchemaMapper}
+import com.zilliz.spark.connector.types.SparkSchemaMapper
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{
   CollectionSchema,
@@ -22,8 +22,7 @@ import io.milvus.grpc.schema.{
   * validate_util.go verifyOverflowByRange). The three integer element types
   * share one Spark and one physical form, so the write schema has to carry the
   * collection's element type. These run the write path a task runs:
-  * WriteSchema.resolve, the Arrow schema, then
-  * ArrowConverter.internalRowToArrow.
+  * WriteSchema.resolve, the Arrow schema, then ArrowWriter.internalRowToArrow.
   */
 class WriteValueLimitsTest extends AnyFunSuite with Matchers {
 
@@ -67,7 +66,7 @@ class WriteValueLimitsTest extends AnyFunSuite with Matchers {
       val root = VectorSchemaRoot.create(arrow, allocator)
       try {
         root.allocateNew()
-        ArrowConverter.internalRowToArrow(
+        ArrowWriter.internalRowToArrow(
           root,
           0,
           InternalRow(1L, value),

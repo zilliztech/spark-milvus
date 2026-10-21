@@ -32,10 +32,12 @@ import com.zilliz.milvus.storage.schema.{
   VectorLayout
 }
 import com.zilliz.milvus.storage.vector.IndexBuilder
+import com.zilliz.milvus.storage.write.codec.ArrayEncoder
 import com.zilliz.milvus.storage.write.exec.{
   ManifestTransaction,
   V3SegmentWriter
 }
+import com.zilliz.milvus.storage.write.io.NativeWritableObjectStore
 import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
@@ -201,7 +203,7 @@ object LocalMilvusCollection {
                 case Some(array) =>
                   values.setSafe(
                     row,
-                    ArrayCodec.encode(DataType.Float, array.toSeq)
+                    ArrayEncoder.encode(DataType.Float, array.toSeq)
                   )
                 case None => values.setNull(row)
               }
@@ -325,7 +327,9 @@ object LocalMilvusCollection {
         parameters = Map("M" -> "4", "efConstruction" -> "32")
       )
       try {
-        val store = NativeObjectStore.Factory(properties).open()
+        val store = new NativeWritableObjectStore(
+          NativeObjectStore.Factory(properties).open()
+        )
         val objects =
           try
             SegmentIndexObjects.write(

@@ -30,12 +30,11 @@ import org.apache.spark.unsafe.types.UTF8String
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.codec.{
-  FloatConverter,
-  SparseFloatVectorConverter
-}
+import com.zilliz.milvus.storage.codec.FloatConverter
 import com.zilliz.milvus.storage.schema.FieldMetadata
+import com.zilliz.milvus.storage.write.codec.SparseFloatVectorEncoder
 import com.zilliz.spark.connector.types.SparkSchemaMapper
+import com.zilliz.spark.connector.write.ArrowWriter
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 class ArrowConverterTest extends AnyFunSuite with Matchers {
@@ -69,7 +68,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
         )
         try {
           root.allocateNew()
-          ArrowConverter.internalRowToArrow(
+          ArrowWriter.internalRowToArrow(
             root,
             0,
             InternalRow(
@@ -84,7 +83,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
           val row = ArrowConverter.arrowToInternalRow(root, 0, schema)
           root.clear()
           root.allocateNew()
-          ArrowConverter.internalRowToArrow(
+          ArrowWriter.internalRowToArrow(
             root,
             0,
             InternalRow(
@@ -238,7 +237,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
         val root = VectorSchemaRoot.create(schema, allocator)
         try {
           root.allocateNew()
-          ArrowConverter.internalRowToArrow(
+          ArrowWriter.internalRowToArrow(
             root,
             0,
             InternalRow(bytes),
@@ -268,13 +267,13 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
         val root = VectorSchemaRoot.create(arrowSchema, allocator)
         try {
           root.allocateNew()
-          ArrowConverter.internalRowToArrow(
+          ArrowWriter.internalRowToArrow(
             root,
             0,
             InternalRow.fromSeq(Seq(value)),
             sparkSchema
           )
-          ArrowConverter.internalRowToArrow(
+          ArrowWriter.internalRowToArrow(
             root,
             1,
             InternalRow.fromSeq(Seq(null)),
@@ -355,7 +354,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
         try {
           root.allocateNew()
           val error = intercept[IllegalArgumentException] {
-            ArrowConverter.internalRowToArrow(
+            ArrowWriter.internalRowToArrow(
               root,
               0,
               InternalRow.fromSeq(Seq(value)),
@@ -455,7 +454,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
       try {
         root.allocateNew()
         val error = intercept[IllegalArgumentException] {
-          ArrowConverter.internalRowToArrow(
+          ArrowWriter.internalRowToArrow(
             root,
             0,
             InternalRow(Array[Byte](1, 2)),
@@ -477,7 +476,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
         try {
           root.allocateNew()
           val error = intercept[IllegalArgumentException] {
-            ArrowConverter.internalRowToArrow(
+            ArrowWriter.internalRowToArrow(
               root,
               0,
               InternalRow(value),
@@ -596,7 +595,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
       val root = VectorSchemaRoot.create(arrowSchema, allocator)
       try {
         root.allocateNew()
-        ArrowConverter.internalRowToArrow(
+        ArrowWriter.internalRowToArrow(
           root,
           0,
           InternalRow(mapData),
@@ -606,7 +605,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
         vector.setValueCount(1)
         root.setRowCount(1)
 
-        vector.get(0) shouldBe SparseFloatVectorConverter
+        vector.get(0) shouldBe SparseFloatVectorEncoder
           .encodeSparseFloatVector(Map(1L -> 1.25f, 3L -> 2.5f))
 
         val decoded = ArrowConverter
@@ -644,7 +643,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
       try {
         root.allocateNew()
         val error = intercept[com.zilliz.milvus.storage.DataParseException] {
-          ArrowConverter.internalRowToArrow(
+          ArrowWriter.internalRowToArrow(
             root,
             0,
             InternalRow(
@@ -1082,14 +1081,14 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
         root.allocateNew()
         val values = Seq[Byte](-128, 0, 7, 127)
         values.zipWithIndex.foreach { case (v, i) =>
-          ArrowConverter.internalRowToArrow(
+          ArrowWriter.internalRowToArrow(
             root,
             i,
             InternalRow(v),
             sparkSchema
           )
         }
-        ArrowConverter.internalRowToArrow(
+        ArrowWriter.internalRowToArrow(
           root,
           values.size,
           InternalRow(null),
@@ -1129,7 +1128,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
       try {
         root.allocateNew()
         an[IllegalArgumentException] should be thrownBy
-          ArrowConverter.internalRowToArrow(
+          ArrowWriter.internalRowToArrow(
             root,
             0,
             InternalRow(org.apache.spark.sql.types.Decimal(1)),
@@ -1236,19 +1235,19 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
           val root = VectorSchemaRoot.create(arrowSchema, allocator)
           try {
             root.allocateNew()
-            ArrowConverter.internalRowToArrow(
+            ArrowWriter.internalRowToArrow(
               root,
               0,
               InternalRow(ArrayData.toArrayData(sparkValues.toArray)),
               sparkSchema
             )
-            ArrowConverter.internalRowToArrow(
+            ArrowWriter.internalRowToArrow(
               root,
               1,
               InternalRow(ArrayData.toArrayData(Array.empty[Any])),
               sparkSchema
             )
-            ArrowConverter.internalRowToArrow(
+            ArrowWriter.internalRowToArrow(
               root,
               2,
               InternalRow(null),
@@ -1297,7 +1296,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
       try {
         root.allocateNew()
         val json = """{"k":1,"tag":"中"}"""
-        ArrowConverter.internalRowToArrow(
+        ArrowWriter.internalRowToArrow(
           root,
           0,
           InternalRow(

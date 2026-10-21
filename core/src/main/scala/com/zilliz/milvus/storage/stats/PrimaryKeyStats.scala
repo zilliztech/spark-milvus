@@ -16,10 +16,9 @@ import net.openhft.hashing.LongHashFunction
   *
   * An Int64 key is hashed as its 8 little-endian bytes, a VarChar key as its
   * UTF-8 bytes, both with xxh3 (seed 0), as `stats.Update` does. The filter is
-  * sized for the number of keys at Milvus's default rate, so keys are collected
-  * first and the filter built at the end.
+  * decoded from the stored bytes; this model contains no mutable builder state.
   */
-final class PrimaryKeyStats private (
+final class PrimaryKeyStats(
     val fieldId: Long,
     val pkType: DataType,
     val filter: BlockedBloomFilter,
@@ -27,6 +26,17 @@ final class PrimaryKeyStats private (
     val maxPk: Any,
     val keys: Long
 ) {
+  require(
+    pkType == DataType.Int64 || pkType == DataType.VarChar,
+    s"a primary key is Int64 or VarChar, not $pkType"
+  )
+  require(filter != null, "primary-key stats must contain a filter")
+  require(
+    if (pkType == DataType.Int64)
+      minPk.isInstanceOf[Long] && maxPk.isInstanceOf[Long]
+    else minPk.isInstanceOf[String] && maxPk.isInstanceOf[String],
+    s"primary-key bounds must match $pkType"
+  )
 
   def mightContainLong(pk: Long): Boolean =
     filter.mightContain(PrimaryKeyStats.hashLong(pk))
@@ -34,20 +44,6 @@ final class PrimaryKeyStats private (
   def mightContainString(pk: String): Boolean =
     filter.mightContain(PrimaryKeyStats.hashString(pk))
 
-  /** The JSON Milvus writes, field for field and in its order. `max` and `min`
-    * are the legacy Int64 fields Milvus writes as 0.
-    */
-  def toJson: String = {
-    val pk: Any => String = {
-      case s: String => PrimaryKeyStats.mapper.writeValueAsString(s)
-      case other     => other.toString
-    }
-    s"""{"fieldID":$fieldId,"max":0,"min":0,"bfType":${PrimaryKeyStats.BlockedBfType},"bf":${filter.toJson},"pkType":${pkType.value},"maxPk":${pk(
-        maxPk
-      )},"minPk":${pk(minPk)}}"""
-  }
-
-  def toBytes: Array[Byte] = toJson.getBytes(StandardCharsets.UTF_8)
 }
 
 object PrimaryKeyStats {
@@ -84,83 +80,7 @@ object PrimaryKeyStats {
       b.getBytes(StandardCharsets.UTF_8)
     )
 
-  /** Collects the keys of one segment and builds the stats once they are all
-    * in, because the filter's size depends on their number.
-    */
-  final class Builder(fieldId: Long, pkType: DataType) {
-    require(
-      pkType == DataType.Int64 || pkType == DataType.VarChar,
-      s"a primary key is Int64 or VarChar, not $pkType"
-    )
-    private var hashes = new Array[Long](1024)
-    private var count = 0
-    private var minLong = Long.MaxValue
-    private var maxLong = Long.MinValue
-    private var minString: String = null
-    private var maxString: String = null
-    private var minUtf8: Array[Byte] = null
-    private var maxUtf8: Array[Byte] = null
-
-    private def push(hash: Long): Unit = {
-      if (count == hashes.length)
-        hashes = java.util.Arrays.copyOf(hashes, hashes.length * 2)
-      hashes(count) = hash
-      count += 1
-    }
-
-    def addLong(pk: Long): Unit = {
-      require(pkType == DataType.Int64, s"an Int64 key on a $pkType field")
-      if (pk < minLong) minLong = pk
-      if (pk > maxLong) maxLong = pk
-      push(hashLong(pk))
-    }
-
-    def addString(pk: String): Unit = {
-      require(pkType == DataType.VarChar, s"a VarChar key on a $pkType field")
-      val utf8 = pk.getBytes(StandardCharsets.UTF_8)
-      if (minUtf8 == null || compareVarChar(utf8, minUtf8) < 0) {
-        minUtf8 = utf8; minString = pk
-      }
-      if (maxUtf8 == null || compareVarChar(utf8, maxUtf8) > 0) {
-        maxUtf8 = utf8; maxString = pk
-      }
-      push(xxh3.hashBytes(utf8))
-    }
-
-    def size: Int = count
-
-    def build(): PrimaryKeyStats = {
-      require(
-        count > 0,
-        "no primary key was added; a segment with no rows has no stats"
-      )
-      val filter = BlockedBloomFilter.sized(count.toLong)
-      var i = 0
-      while (i < count) { filter.add(hashes(i)); i += 1 }
-      pkType match {
-        case DataType.Int64 =>
-          new PrimaryKeyStats(
-            fieldId,
-            pkType,
-            filter,
-            minLong,
-            maxLong,
-            count.toLong
-          )
-        case _ =>
-          new PrimaryKeyStats(
-            fieldId,
-            pkType,
-            filter,
-            minString,
-            maxString,
-            count.toLong
-          )
-      }
-    }
-  }
-
-  /** Reads what Milvus (or this class) wrote. */
+  /** Reads the primary-key statistics stored by Milvus or a segment writer. */
   def fromJson(json: String): PrimaryKeyStats = {
     val node = mapper.readTree(json)
     require(

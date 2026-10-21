@@ -13,6 +13,7 @@ import com.zilliz.milvus.storage.read.plan.{DeleteSource, SegmentReadTask}
 import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
 import com.zilliz.milvus.storage.vector.IndexBuilder
 import com.zilliz.milvus.storage.write.commit.CommittedIndex
+import com.zilliz.milvus.storage.write.io.NativeWritableObjectStore
 import com.zilliz.spark.connector.read.{ColumnBinding, MilvusInputPartition}
 import com.zilliz.spark.connector.types.ArrowAllocator
 import io.milvus.grpc.schema.CollectionSchema
@@ -130,7 +131,9 @@ private[procedure] object SegmentIndexBuild extends Logging {
       built.validData.nonEmpty,
       request.output
     )
-    val store = NativeObjectStore.Factory(task.properties).open()
+    val store = new NativeWritableObjectStore(
+      NativeObjectStore.Factory(task.properties).open()
+    )
     val objects =
       try SegmentIndexObjects.write(payloads, read, target, store)
       finally store.close()

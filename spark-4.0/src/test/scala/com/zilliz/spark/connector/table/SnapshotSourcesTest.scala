@@ -36,9 +36,7 @@ class SnapshotSourcesTest extends AnyFunSuite {
         length: Long,
         fileSize: Long
     ): Array[Byte] = Array.emptyByteArray
-    override def write(key: String, data: Array[Byte]): Unit = ()
-    override def createDir(key: String, recursive: Boolean): Unit = ()
-    override def delete(key: String): Unit = ()
+
   }
 
   private val snapshot = Snapshot(

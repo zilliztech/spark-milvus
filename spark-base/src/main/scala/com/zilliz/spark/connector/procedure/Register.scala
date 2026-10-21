@@ -5,9 +5,10 @@ import scala.util.Try
 import org.apache.spark.internal.Logging
 
 import com.zilliz.milvus.client.api.MilvusClient
-import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.write.commit.{Committer, Registration}
 import com.zilliz.milvus.storage.write.exec.StagingLayout
+import com.zilliz.milvus.storage.write.io.NativeWritableObjectStore
+import com.zilliz.milvus.storage.write.io.WritableObjectStore
 import com.zilliz.spark.connector.options.{HadoopStorageKeys, MilvusOption}
 import io.milvus.grpc.common.Status
 
@@ -39,7 +40,9 @@ object Register extends Logging {
     */
   def run(options: Map[String, String], stagingPrefix: String): Outcome = {
     val milvusOption = MilvusOption(options)
-    val store = HadoopStorageKeys.storeFrom(options)
+    val store = new NativeWritableObjectStore(
+      HadoopStorageKeys.storeFrom(options)
+    )
     try {
       val client = MilvusClient(milvusOption.connectionParams)
       try
@@ -76,7 +79,7 @@ object Register extends Logging {
   }
 
   private[procedure] def run(
-      store: ObjectStore,
+      store: WritableObjectStore,
       layout: StagingLayout,
       register: Seq[Registration.Item] => Try[Status]
   ): Outcome = {

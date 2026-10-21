@@ -20,17 +20,9 @@ import org.apache.parquet.VersionParser
   * receives bytes only; opening objects belongs to core.io.
   */
 object BinlogCodec {
+  import BinlogFormat._
   private val mapper = new ObjectMapper()
   private val ParquetMagic = "PAR1".getBytes(StandardCharsets.US_ASCII)
-  private val EventHeaderBytes = 17
-  private val BaseEventBytes = 16
-
-  /** What Milvus records as each event type's fixed part: the descriptor's four
-    * ids, two timestamps and data type, and two timestamps for every other
-    * event (internal/core/src/storage/Event.cpp `GetEventFixPartSize`).
-    */
-  private val PostHeaderLengths: Array[Byte] =
-    Array[Byte](52, 16, 16, 16, 16, 16, 16, 16)
   final case class Event(kind: Int, payload: Array[Byte])
   final case class Container(
       collectionId: Long,
@@ -53,12 +45,14 @@ object BinlogCodec {
       throw new IllegalArgumentException(s"Invalid binlog $path: $message")
     def header(): (Int, Int) = {
       val start = b.position()
-      requireBytes(17)
+      requireBytes(EventHeaderBytes)
       b.getLong()
       val kind = b.get() & 0xff
       val length = b.getInt()
       val next = b.getInt()
-      if (length < 17 || length.toLong > bytes.length.toLong - start)
+      if (
+        length < EventHeaderBytes || length.toLong > bytes.length.toLong - start
+      )
         fail(s"event length $length at $start")
       val end = start + length
       // Milvus's serde writers leave NextPosition at newEventHeader's -1
@@ -69,7 +63,7 @@ object BinlogCodec {
       (kind, end)
     }
     requireBytes(4)
-    if (b.getInt() != 0xfffabc) fail("magic is not 0xfffabc")
+    if (b.getInt() != Magic) fail("magic is not 0xfffabc")
     val (kind, descriptorEnd) = header()
     if (kind != 0) fail("first event is not a descriptor")
     requireBytes(64)
@@ -101,7 +95,7 @@ object BinlogCodec {
       if (eventType <= 0 || eventType >= post.length)
         fail(s"event type $eventType")
       val fixed = post(eventType)
-      if (fixed < 16 || fixed > end - b.position())
+      if (fixed < BaseEventBytes || fixed > end - b.position())
         fail(s"event post-header length $fixed")
       b.position(b.position() + fixed)
       val payload = new Array[Byte](end - b.position())
@@ -117,67 +111,6 @@ object BinlogCodec {
       extras,
       events.result()
     )
-  }
-
-  /** Wraps one payload in the envelope Milvus reads back.
-    *
-    * The layout is the one `parse` walks: the magic, a descriptor event naming
-    * the object's collection, partition, segment and field, and one more event
-    * carrying the bytes. `postHeaderLengths` is what Milvus writes for every
-    * event type it knows, so a reader can skip an event it does not handle
-    * (internal/core/src/storage/Event.cpp).
-    */
-  def envelope(
-      kind: Int,
-      collectionId: Long,
-      partitionId: Long,
-      segmentId: Long,
-      fieldId: Long,
-      dataType: Int,
-      extras: JsonNode,
-      payload: Array[Byte]
-  ): Array[Byte] = {
-    require(kind > 0 && kind < 8, s"Event type $kind is outside the envelope")
-    require(payload != null, "An event carries a payload")
-    require(
-      extras != null && extras.isObject,
-      "Descriptor extras are a JSON object"
-    )
-    val extraBytes =
-      if (extras.isEmpty) Array.emptyByteArray
-      else mapper.writeValueAsBytes(extras)
-    // Descriptor: four ids, two timestamps and the payload's data type, then
-    // one byte per event type, then the extras.
-    val descriptorData = 8 * 4 + 8 + 8 + 4 + PostHeaderLengths.length + 4
-    val descriptorLength = EventHeaderBytes + descriptorData + extraBytes.length
-    val eventLength = EventHeaderBytes + BaseEventBytes + payload.length
-    val total = 4 + descriptorLength + eventLength
-    val out = ByteBuffer.allocate(total).order(ByteOrder.LITTLE_ENDIAN)
-    out.putInt(0xfffabc)
-    def header(eventKind: Int, length: Int): Unit = {
-      val start = out.position()
-      out.putLong(0L)
-      out.put(eventKind.toByte)
-      out.putInt(length)
-      out.putInt(start + length)
-    }
-    header(0, descriptorLength)
-    out.putLong(collectionId)
-    out.putLong(partitionId)
-    out.putLong(segmentId)
-    out.putLong(fieldId)
-    out.putLong(0L)
-    out.putLong(0L)
-    out.putInt(dataType)
-    PostHeaderLengths.foreach(out.put)
-    out.putInt(extraBytes.length)
-    out.put(extraBytes)
-    header(kind, eventLength)
-    out.putLong(0L)
-    out.putLong(0L)
-    out.put(payload)
-    require(!out.hasRemaining, "The envelope was sized wrong")
-    out.array()
   }
 
   /** Walks every row of a parquet payload, one row group at a time.

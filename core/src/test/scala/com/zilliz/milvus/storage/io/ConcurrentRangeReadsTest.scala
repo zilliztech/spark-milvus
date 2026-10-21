@@ -53,12 +53,7 @@ class ConcurrentRangeReadsTest extends AnyFunSuite {
       throw new UnsupportedOperationException
     override def exists(key: String): Boolean =
       throw new UnsupportedOperationException
-    override def write(key: String, data: Array[Byte]): Unit =
-      throw new UnsupportedOperationException
-    override def createDir(key: String, recursive: Boolean): Unit =
-      throw new UnsupportedOperationException
-    override def delete(key: String): Unit =
-      throw new UnsupportedOperationException
+
     override def close(): Unit = ()
   }
 
