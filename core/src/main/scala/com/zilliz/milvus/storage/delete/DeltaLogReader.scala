@@ -19,6 +19,26 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
 
   private val mapper = new ObjectMapper()
 
+  /** Decodes a bare Parquet file containing primary-key and timestamp columns.
+    * Input formats that wrap these bytes in another container must unwrap it
+    * themselves. This entry point never interprets a legacy binlog envelope.
+    */
+  def decodeParquet(
+      bytes: Array[Byte],
+      pkField: FieldSchema,
+      path: String
+  ): Either[Throwable, DeletePlan] =
+    try {
+      validatePkType(pkField)
+      require(
+        isParquet(bytes),
+        s"delete payload in $path must be bare Parquet (PAR1)"
+      )
+      Right(decodePayloadPlan(bytes, multiField = true, pkField, path))
+    } catch {
+      case NonFatal(e) => Left(e)
+    }
+
   def loadDeletePlan(
       deltaLogs: Seq[DeltaLogFile],
       pkField: FieldSchema,
@@ -49,7 +69,7 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
   ): Either[Throwable, DeletePlan] = {
     try {
       if (isParquet(bytes)) {
-        Right(decodePayloadPlan(bytes, multiField = true, pkField, path))
+        decodeParquet(bytes, pkField, path)
       } else {
         val container = parseContainer(bytes, path)
         val plans = container.payloads.map { payload =>
@@ -65,7 +85,7 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
   private val ParquetMagic = "PAR1".getBytes(StandardCharsets.US_ASCII)
 
   private def isParquet(bytes: Array[Byte]): Boolean =
-    bytes.length >= 4 && java.util.Arrays.equals(
+    bytes != null && bytes.length >= 4 && java.util.Arrays.equals(
       java.util.Arrays.copyOfRange(bytes, 0, 4),
       ParquetMagic
     )
@@ -259,7 +279,7 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
       case DataType.Int64 | DataType.VarChar =>
       case other =>
         throw new IllegalArgumentException(
-          s"StorageV2 delete logs only support Int64/VarChar PKs, got $other"
+          s"delete logs only support Int64/VarChar PKs, got $other"
         )
     }
   }

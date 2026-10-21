@@ -4,9 +4,6 @@ import org.apache.arrow.vector.VectorSchemaRoot
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.read.plan.SegmentReadTask
-import com.zilliz.milvus.storage.snapshot.{SegmentLayout, V2ColumnGroup}
-
 class ExpectedRowsSegmentReaderTest extends AnyFunSuite with Matchers {
 
   private final class StubReader(
@@ -34,26 +31,10 @@ class ExpectedRowsSegmentReaderTest extends AnyFunSuite with Matchers {
     override def close(): Unit = closed = true
   }
 
-  private def v2Task(expectedRows: Long): SegmentReadTask =
-    SegmentReadTask(
-      segmentId = 31L,
-      partitionId = 7L,
-      layout = SegmentLayout.ColumnGroups(
-        Seq(
-          V2ColumnGroup(
-            fieldIds = Seq(100L),
-            filePaths = Seq("files/100/1"),
-            fileRowCounts = Seq(expectedRows)
-          )
-        )
-      ),
-      schemaBytes = Array.emptyByteArray,
-      properties = Map.empty
-    )
-
-  test("a V2 reader accepts its declared physical row count at EOF") {
+  test("a reader accepts its declared physical row count at EOF") {
     val guarded = SegmentReader.withExpectedRows(
-      v2Task(expectedRows = 3L),
+      31L,
+      Some(3L),
       new StubReader(rows = 3L)
     )
 
@@ -62,10 +43,11 @@ class ExpectedRowsSegmentReaderTest extends AnyFunSuite with Matchers {
     guarded.deliveredRows shouldBe 3L
   }
 
-  test("a V2 reader refuses both short and excess results at EOF") {
+  test("a reader refuses both short and excess results at EOF") {
     Seq(2L, 4L).foreach { delivered =>
       val guarded = SegmentReader.withExpectedRows(
-        v2Task(expectedRows = 3L),
+        31L,
+        Some(3L),
         new StubReader(rows = delivered)
       )
 
@@ -79,7 +61,8 @@ class ExpectedRowsSegmentReaderTest extends AnyFunSuite with Matchers {
   test("closing before EOF delegates without checking a partial read") {
     val delegate = new StubReader(rows = 1L)
     val guarded = SegmentReader.withExpectedRows(
-      v2Task(expectedRows = 3L),
+      31L,
+      Some(3L),
       delegate
     )
 
@@ -91,7 +74,8 @@ class ExpectedRowsSegmentReaderTest extends AnyFunSuite with Matchers {
   test("the expected-row wrapper preserves read metrics") {
     val metrics = ReadMetrics(1L, 2L, 3L, 4L, 5L, 6L, 7L)
     val guarded = SegmentReader.withExpectedRows(
-      v2Task(expectedRows = 3L),
+      31L,
+      Some(3L),
       new StubReader(rows = 3L, readMetrics = metrics)
     )
 
@@ -101,7 +85,8 @@ class ExpectedRowsSegmentReaderTest extends AnyFunSuite with Matchers {
   test("take delegates physical offsets without verifying sequential EOF") {
     val delegate = new StubReader(rows = 0L)
     val guarded = SegmentReader.withExpectedRows(
-      v2Task(expectedRows = 3L),
+      31L,
+      Some(3L),
       delegate
     )
     val result = guarded.take(Array(1L, 2L), Seq("100"), parallelism = 2)
@@ -113,12 +98,9 @@ class ExpectedRowsSegmentReaderTest extends AnyFunSuite with Matchers {
     delegate.closed shouldBe true
   }
 
-  test("a manifest reader is unchanged when its row count is unknown") {
-    val task = v2Task(expectedRows = 3L).copy(
-      layout = SegmentLayout.Manifest("files/segment", readVersion = 2L)
-    )
+  test("a reader is unchanged when its row count is unknown") {
     val delegate = new StubReader(rows = 0L)
-    val unchanged = SegmentReader.withExpectedRows(task, delegate)
+    val unchanged = SegmentReader.withExpectedRows(31L, None, delegate)
 
     unchanged should be theSameInstanceAs delegate
   }

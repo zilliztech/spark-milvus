@@ -12,6 +12,59 @@ import io.milvus.grpc.schema.{DataType, FieldSchema}
 
 class DeltaLogReaderTest extends AnyFunSuite with Matchers {
   test(
+    "bare Parquet decoder shares the delete plan without a storage session"
+  ) {
+    val payload = Files.readAllBytes(
+      Paths.get("core/src/test/data/v3-delta-469093182140298464.parquet")
+    )
+    val pkField = FieldSchema(name = "id", dataType = DataType.Int64)
+    val plan = DeltaLogReader
+      .decodeParquet(payload, pkField, "delta.parquet")
+      .fold(throw _, identity)
+    val deleteTs = 469093213902995459L
+    (0L until 10L).foreach { id =>
+      plan.containsLongPk(id, deleteTs - 1L) shouldBe true
+      plan.containsLongPk(id, deleteTs + 1L) shouldBe false
+    }
+    plan.containsLongPk(10L, deleteTs - 1L) shouldBe false
+    DeltaLogReader
+      .decodeParquet(
+        payload,
+        pkField.copy(dataType = DataType.Float),
+        "delta.parquet"
+      )
+      .left
+      .toOption
+      .get shouldBe a[IllegalArgumentException]
+  }
+
+  test(
+    "bare Parquet decoder rejects legacy binlog envelopes instead of unwrapping them"
+  ) {
+    val payload = Files.readAllBytes(
+      Paths.get("core/src/test/data/v3-delta-469093182140298464.parquet")
+    )
+    val envelope = BinlogFixture.encode(
+      payload,
+      dataType = 5,
+      extras = """{"version":"MULTI_FIELD"}""",
+      eventType = 2
+    )
+    val error = DeltaLogReader
+      .decodeParquet(
+        envelope,
+        FieldSchema(name = "id", dataType = DataType.Int64),
+        "legacy.binlog"
+      )
+      .left
+      .toOption
+      .get
+    error shouldBe a[IllegalArgumentException]
+    error.getMessage should include("legacy.binlog")
+    error.getMessage should include("bare Parquet")
+  }
+
+  test(
     "a V2 delete event reuses the common binlog envelope and Parquet decoder"
   ) {
     val payload = Files.readAllBytes(

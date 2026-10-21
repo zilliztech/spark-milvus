@@ -521,24 +521,7 @@ object MilvusOption {
       OptionParsing.positiveInt(getOption, MilvusRetryInterval, 1000)
     val fieldIDs = options.getOrDefault(ReaderFieldIDs, "")
     val extraColumns = MilvusOption.extraColumns(options)
-    val readLimits = ReadLimits(
-      OptionParsing.positiveInt(
-        getOption,
-        ReadBatchMaxRows,
-        ReadLimits.DefaultBatchMaxRows
-      ),
-      OptionParsing.positiveLong(
-        getOption,
-        ReadBatchMaxBytes,
-        ReadLimits.DefaultBatchMaxBytes,
-        ReadLimits.MaxBatchBytes
-      ),
-      OptionParsing.positiveLong(
-        getOption,
-        ReadArrowMaxBytes,
-        ReadLimits.DefaultArrowMaxBytes
-      )
-    )
+    val limits = readLimits(options)
     val writeFileRollingBytes = OptionParsing.positiveLong(
       getOption,
       WriteFileRollingBytes,
@@ -574,13 +557,36 @@ object MilvusOption {
       fieldIDs = fieldIDs,
       extraColumns = extraColumns,
       options = optionsMap,
-      readLimits = readLimits,
+      readLimits = limits,
       writeFileRollingBytes = writeFileRollingBytes,
       milvusFilter = milvusFilter
     )
   }
 
-  private def parseMilvusFilter(
+  /** Resource limits shared by public and private storage readers. */
+  def readLimits(options: CaseInsensitiveStringMap): ReadLimits = {
+    val getOption = (key: String) => OptionParsing.value(options, key)
+    ReadLimits(
+      OptionParsing.positiveInt(
+        getOption,
+        ReadBatchMaxRows,
+        ReadLimits.DefaultBatchMaxRows
+      ),
+      OptionParsing.positiveLong(
+        getOption,
+        ReadBatchMaxBytes,
+        ReadLimits.DefaultBatchMaxBytes,
+        ReadLimits.MaxBatchBytes
+      ),
+      OptionParsing.positiveLong(
+        getOption,
+        ReadArrowMaxBytes,
+        ReadLimits.DefaultArrowMaxBytes
+      )
+    )
+  }
+
+  def parseMilvusFilter(
       options: CaseInsensitiveStringMap
   ): Option[FilterExpr] = {
     if (!options.containsKey(MilvusFilter)) return None

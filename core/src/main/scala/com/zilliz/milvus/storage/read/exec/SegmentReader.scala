@@ -7,7 +7,7 @@ import org.apache.arrow.vector.VectorSchemaRoot
 
 import com.zilliz.milvus.jni.storage.NativeStorageLibrary
 import com.zilliz.milvus.storage.{Logging, NativeCalls}
-import com.zilliz.milvus.storage.read.plan.SegmentReadTask
+import com.zilliz.milvus.storage.read.plan.{ReadLimits, SegmentReadTask}
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
 import io.milvus.storage.{
   MilvusStorageColumnGroups,
@@ -57,6 +57,15 @@ trait SegmentReader extends AutoCloseable {
 }
 
 object SegmentReader {
+
+  private[exec] sealed trait Source
+  private[exec] final case class ManifestSource(
+      basePath: String,
+      readVersion: Long
+  ) extends Source
+  private[exec] final case class ColumnGroupsSource(
+      groups: Seq[PhysicalColumnGroup]
+  ) extends Source
 
   /** Selected Arrow batches. `next` transfers one root to the caller; `close`
     * releases only the batches still owned by this result and is idempotent.
@@ -176,13 +185,14 @@ object SegmentReader {
     * settings: every range of a batch is requested when the read call starts.
     */
   private[exec] def nativeProperties(
-      task: SegmentReadTask
+      properties: Map[String, String],
+      limits: ReadLimits
   ): Map[String, String] =
-    task.properties ++ Map(
-      RecordBatchMaxRows -> task.limits.batchMaxRows.toString,
-      RecordBatchMaxSize -> task.limits.batchMaxBytes.toString,
+    properties ++ Map(
+      RecordBatchMaxRows -> limits.batchMaxRows.toString,
+      RecordBatchMaxSize -> limits.batchMaxBytes.toString,
       PrebufferLazy -> "false",
-      PrebufferRangeSizeLimit -> rangeBytes(task.limits.batchMaxBytes).toString
+      PrebufferRangeSizeLimit -> rangeBytes(limits.batchMaxBytes).toString
     )
 
   /** Threads Arrow's IO pool needs so that every task of this executor has all
@@ -218,19 +228,101 @@ object SegmentReader {
       neededColumns: Seq[String],
       columnNameFor: Long => Option[String],
       allocator: BufferAllocator
+  ): SegmentReader = task.layout match {
+    case SegmentLayout.Manifest(basePath, readVersion) =>
+      openNative(
+        ManifestSource(basePath, readVersion),
+        arrowSchema,
+        neededColumns,
+        task.properties,
+        task.limits,
+        task.expectedRows,
+        task.segmentId,
+        allocator
+      )
+    case SegmentLayout.ColumnGroups(groups) =>
+      openColumnGroups(
+        groups.map { group =>
+          PhysicalColumnGroup(
+            group.fieldIds.flatMap(id => columnNameFor(id).toList),
+            group.filePaths,
+            group.fileRowCounts
+          )
+        },
+        arrowSchema,
+        neededColumns,
+        task.properties,
+        task.limits,
+        task.expectedRows,
+        task.segmentId,
+        allocator
+      )
+  }
+
+  /** Opens physical column groups resolved by an input format. The same native
+    * reader serves manifest reads, including projection, take, resource
+    * ownership, EOF validation and metrics. The caller supplies Arrow column
+    * names and validated storage properties; this method interprets no snapshot
+    * or compatibility metadata.
+    */
+  def openColumnGroups(
+      groups: Seq[PhysicalColumnGroup],
+      arrowSchema: Schema,
+      neededColumns: Seq[String],
+      properties: Map[String, String],
+      limits: ReadLimits,
+      expectedRows: Option[Long],
+      segmentId: Long,
+      allocator: BufferAllocator
   ): SegmentReader = {
+    require(
+      groups != null && groups.nonEmpty,
+      "physical column groups must not be empty"
+    )
+    require(
+      groups.forall(_ != null),
+      "physical column groups must not contain null"
+    )
+    openNative(
+      ColumnGroupsSource(groups),
+      arrowSchema,
+      neededColumns,
+      properties,
+      limits,
+      expectedRows,
+      segmentId,
+      allocator
+    )
+  }
+
+  private def openNative(
+      source: Source,
+      arrowSchema: Schema,
+      neededColumns: Seq[String],
+      properties: Map[String, String],
+      limits: ReadLimits,
+      expectedRows: Option[Long],
+      segmentId: Long,
+      allocator: BufferAllocator
+  ): SegmentReader = {
+    require(
+      expectedRows.forall(_ >= 0L),
+      "expected physical row count must be nonnegative"
+    )
     NativeStorageLibrary.load()
     // Cheap, and a failure fails this read rather than leaving it at one
     // request at a time.
     raiseIoThreads(ioThreads(Runtime.getRuntime.availableProcessors()))
     val reader = new NativeSegmentReader(
-      task,
+      source,
       arrowSchema,
       neededColumns,
-      columnNameFor,
+      nativeProperties(properties, limits),
+      expectedRows,
+      segmentId,
       allocator
     )
-    withExpectedRows(task, reader)
+    withExpectedRows(segmentId, expectedRows, reader)
   }
 
   /** Apply the task's EOF row-count contract to any reader implementation. Kept
@@ -238,12 +330,13 @@ object SegmentReader {
     * the same check, and so the contract is testable without JNI.
     */
   private[exec] def withExpectedRows(
-      task: SegmentReadTask,
+      segmentId: Long,
+      expectedRows: Option[Long],
       reader: SegmentReader
   ): SegmentReader =
-    task.expectedRows match {
+    expectedRows match {
       case Some(expected) =>
-        new ExpectedRowsSegmentReader(reader, task.segmentId, expected)
+        new ExpectedRowsSegmentReader(reader, segmentId, expected)
       case None => reader
     }
 }
@@ -353,16 +446,18 @@ private[exec] final class ExpectedRowsSegmentReader(
   * section 3):
   *
   *   - A handle never crosses a serialization boundary. It is opened here, on
-  *     the executor, from the description in `task`.
+  *     the executor, from a physical source description.
   *   - A constructor that throws releases what it already took. Nothing calls
   *     `close()` on an object that never finished being built.
   *   - `close()` is idempotent, because an error path may call it twice.
   */
 private[exec] final class NativeSegmentReader(
-    task: SegmentReadTask,
+    source: SegmentReader.Source,
     arrowSchema: Schema,
     neededColumns: Seq[String],
-    columnNameFor: Long => Option[String],
+    nativeProperties: Map[String, String],
+    expectedRows: Option[Long],
+    segmentId: Long,
     allocator: BufferAllocator
 ) extends SegmentReader
     with Logging {
@@ -391,12 +486,12 @@ private[exec] final class NativeSegmentReader(
     schemaStruct.save(new ArrowSchema.Snapshot())
     Data.exportSchema(allocator, arrowSchema, null, schemaStruct)
     properties = calls.timed(new MilvusStorageProperties())
-    calls.timed(properties.create(SegmentReader.nativeProperties(task)))
+    calls.timed(properties.create(nativeProperties))
     reader = new MilvusStorageReader()
     val columns = neededColumns.toArray
 
-    task.layout match {
-      case SegmentLayout.Manifest(basePath, readVersion) =>
+    source match {
+      case SegmentReader.ManifestSource(basePath, readVersion) =>
         manifest = calls.timed(
           MilvusStorageManifest.open(basePath, properties, readVersion)
         )
@@ -407,33 +502,10 @@ private[exec] final class NativeSegmentReader(
               "into the milvus-storage format"
           )
         }
-        calls.timed(
-          reader.create(
-            columnGroupsHandle,
-            schemaStruct.memoryAddress(),
-            columns,
-            properties
-          )
-        )
-
-      case SegmentLayout.ColumnGroups(groups) =>
-        val columnNames =
-          // `.toList` rather than passing columnNameFor straight to flatMap:
-          // Scala 2.12 does not convert an Option result of a function value,
-          // and the 3.5 line cross-compiles for 2.12.
-          groups
-            .map(_.fieldIds.flatMap(id => columnNameFor(id).toList).toArray)
-            .toArray
+      case SegmentReader.ColumnGroupsSource(groups) =>
+        val columnNames = groups.map(_.columnNames.toArray).toArray
         val files = groups.map(_.filePaths.toArray).toArray
-        val rowCounts = groups.map { group =>
-          require(
-            group.fileRowCounts.size == group.filePaths.size,
-            s"column group with fields ${group.fieldIds} has " +
-              s"${group.filePaths.size} files but " +
-              s"${group.fileRowCounts.size} row counts"
-          )
-          group.fileRowCounts.toArray
-        }.toArray
+        val rowCounts = groups.map(_.fileRowCounts.toArray).toArray
         columnGroupsHandle = calls.timed(
           MilvusStorageColumnGroups.createFromGroups(
             columnNames,
@@ -442,19 +514,20 @@ private[exec] final class NativeSegmentReader(
           )
         )
         ownsColumnGroups = true
-        calls.timed(
-          reader.create(
-            columnGroupsHandle,
-            schemaStruct.memoryAddress(),
-            columns,
-            properties
-          )
-        )
     }
+
+    calls.timed(
+      reader.create(
+        columnGroupsHandle,
+        schemaStruct.memoryAddress(),
+        columns,
+        properties
+      )
+    )
 
     if (!reader.isValid) {
       throw new IllegalStateException(
-        s"could not open a native reader for segment ${task.segmentId}"
+        s"could not open a native reader for segment $segmentId"
       )
     }
   } catch {
@@ -503,7 +576,7 @@ private[exec] final class NativeSegmentReader(
       previous = index
     }
     if (rowIndices.isEmpty) return SegmentReader.EmptyTakeResult
-    task.expectedRows.foreach { rows =>
+    expectedRows.foreach { rows =>
       require(
         rowIndices.last < rows,
         s"row index ${rowIndices.last} is outside segment row count $rows"
@@ -518,7 +591,7 @@ private[exec] final class NativeSegmentReader(
     )
     if (handle == 0L) {
       throw new IllegalStateException(
-        s"take returned no reader for segment ${task.segmentId}"
+        s"take returned no reader for segment $segmentId"
       )
     }
     try

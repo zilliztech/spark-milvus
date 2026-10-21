@@ -4,14 +4,18 @@ package com.zilliz.milvus.storage.read
   *
   * `SegmentReader` hands over one Arrow `VectorSchemaRoot` at a time and
   * `SegmentReader.open` opens the right one for a segment's layout, so the two
-  * layouts have one entry point instead of a branch per call site. The three
-  * ownership rules — a handle never crosses serialization, a constructor that
-  * throws releases what it took, `close()` is idempotent — are kept by
-  * `NativeSegmentReader` and explained in
-  * docs/design/projects/spark-milvus/architecture/storage-io.html section 3.
-  * The reader keeps MilvusStorageProperties alive until it is destroyed, and
-  * closes an owned manifest only after the reader has released its borrowed
-  * column groups. JNI and native library loading belong to milvus-storage.
+  * layouts have one entry point instead of a branch per call site.
+  * `SegmentReader.openColumnGroups` takes resolved `PhysicalColumnGroup`
+  * descriptions (Arrow column names, file paths and per-file row counts) and
+  * shares the same native reader. Compatibility metadata is interpreted by the
+  * caller, outside this physical read boundary. The three ownership rules — a
+  * handle never crosses serialization, a constructor that throws releases what
+  * it took, `close()` is idempotent — are kept by `NativeSegmentReader` and
+  * explained in docs/design/projects/spark-milvus/architecture/storage-io.html
+  * section 3. The reader keeps MilvusStorageProperties alive until it is
+  * destroyed, and closes an owned manifest only after the reader has released
+  * its borrowed column groups. JNI and native library loading belong to
+  * milvus-storage.
   *
   * `SegmentReader.take` retrieves sorted, unique physical row indices with a
   * per-call projection through the upstream reader's takeRecordBatchReaderScala
@@ -52,9 +56,9 @@ package com.zilliz.milvus.storage.read
   * allocator's peak (G5;
   * docs/design/projects/spark-milvus/architecture/storage-io.html section 5).
   *
-  * Main types: SegmentReader, DeletePlans, ReadMetrics, RowExclusions,
-  * SegmentVectors, SegmentIndexHandle, IndexRowMapping. Capabilities: R3, R4,
-  * R8, R14, R17, V2, G3, G5 (see
+  * Main types: SegmentReader, PhysicalColumnGroup, DeletePlans, ReadMetrics,
+  * RowExclusions, SegmentVectors, SegmentIndexHandle, IndexRowMapping.
+  * Capabilities: R3, R4, R8, R14, R17, V2, G3, G5 (see
   * docs/design/projects/spark-milvus/capabilities.md). R4 and R17 name the
   * columnar outlet; R17 is partial: batches leave as `VectorSchemaRoot` and
   * become Spark `ColumnarBatch` in layer 3, while the raw-address signature for

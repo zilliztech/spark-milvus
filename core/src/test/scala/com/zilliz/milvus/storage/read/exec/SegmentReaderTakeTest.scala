@@ -17,7 +17,7 @@ import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.jni.storage.NativeStorageLibrary
 import com.zilliz.milvus.storage.io.ReadFixtures
-import com.zilliz.milvus.storage.read.plan.SegmentReadTask
+import com.zilliz.milvus.storage.read.plan.{ReadLimits, SegmentReadTask}
 import com.zilliz.milvus.storage.snapshot.{SegmentLayout, V2ColumnGroup}
 import io.milvus.storage.{
   MilvusStorageColumnGroups,
@@ -260,6 +260,66 @@ class SegmentReaderTakeTest extends AnyFunSuite with Matchers {
         reader.close()
         intercept[IllegalStateException](reader.take(Array(0L), Seq("100")))
       } finally reader.close()
+    }
+  }
+
+  test(
+    "physical column groups share take projection, batch limits and EOF validation"
+  ) {
+    withFixture { (directory, allocator, properties) =>
+      val (_, groups) = fixture(directory, "take-10", properties)
+      val reader = SegmentReader.openColumnGroups(
+        groups.map { group =>
+          PhysicalColumnGroup(
+            group.fieldIds.map(_.toString),
+            group.filePaths,
+            group.fileRowCounts
+          )
+        },
+        schema,
+        Seq("100"),
+        properties + (SegmentReader.RecordBatchMaxRows -> "1"),
+        ReadLimits(3, ReadLimits.DefaultBatchMaxBytes, Long.MaxValue),
+        Some(11L),
+        42L,
+        allocator
+      )
+      try {
+        val selected = reader.take(Array[Long](0, 9), Seq("101", "100"))
+        try {
+          val root = selected.next().get
+          try {
+            root.getSchema.getFields.asScala.map(_.getName).toSeq shouldBe Seq(
+              "101",
+              "100"
+            )
+            val ids = root.getVector("100").asInstanceOf[BigIntVector]
+            ids.get(0) shouldBe 0L
+            ids.get(1) shouldBe 99L
+          } finally root.close()
+          selected.next() shouldBe None
+        } finally selected.close()
+        reader.deliveredRows shouldBe 0L
+
+        val failure = intercept[IllegalStateException] {
+          var batch = reader.next()
+          while (batch.nonEmpty) {
+            val root = batch.get
+            try {
+              root.getSchema.getFields.asScala
+                .map(_.getName)
+                .toSeq shouldBe Seq("100")
+              root.getRowCount should be <= 3
+            } finally root.close()
+            batch = reader.next()
+          }
+        }
+        failure.getMessage should include("segment 42")
+        failure.getMessage should include("expected 11")
+        reader.deliveredRows shouldBe 10L
+        reader.metrics.batches should be > 1L
+      } finally reader.close()
+      allocator.getAllocatedMemory shouldBe 0L
     }
   }
 

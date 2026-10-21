@@ -25,7 +25,7 @@ object StorageOptions extends Logging {
   /** Owns a driver-side store until its operation completes, preserving the
     * primary failure if releasing the store also fails.
     */
-  private[connector] def withStore[A](
+  def withStore[A](
       open: => ObjectStore
   )(use: ObjectStore => A): A = {
     val store = open
@@ -188,7 +188,7 @@ object StorageOptions extends Logging {
     * Keys handed to the store are bucket-relative: the C filesystem appends
     * them to a subtree rooted at `fs.bucket_name`.
     */
-  private[connector] def storeFor(
+  def storeFor(
       conf: Configuration,
       bucket: String,
       options: CollectionMap[String, String] = Map.empty
@@ -200,7 +200,7 @@ object StorageOptions extends Logging {
   /** The exact native `fs.*` bag for a bucket, exposed separately from the live
     * store so alias translation stays unit-testable without loading JNI.
     */
-  private[connector] def storagePropertiesFor(
+  def storagePropertiesFor(
       conf: Configuration,
       bucket: String,
       options: CollectionMap[String, String]
@@ -244,7 +244,7 @@ object StorageOptions extends Logging {
     * form is recognized against this value, so an endpoint that reaches the
     * store only through the session's Hadoop keys is recognized too.
     */
-  private[connector] def storeEndpoint(
+  def storeEndpoint(
       conf: org.apache.hadoop.conf.Configuration,
       bucket: String,
       options: scala.collection.Map[String, String]
@@ -308,7 +308,7 @@ object StorageOptions extends Logging {
     }
   }
 
-  private[connector] def snapshotS3BucketForRelativePaths(
+  def snapshotS3BucketForRelativePaths(
       snapshotPath: String,
       options: CollectionMap[String, String]
   ): Option[String] = {
@@ -343,7 +343,7 @@ object StorageOptions extends Logging {
     * per-bucket S3A configuration. Extracted as a companion method so both the
     * scan planner and table-level schema rehydration (backup mode) share it.
     */
-  private[connector] def buildHadoopConfForOptions(
+  def buildHadoopConfForOptions(
       rawOptions: CollectionMap[String, String],
       path: String
   ): Configuration = {

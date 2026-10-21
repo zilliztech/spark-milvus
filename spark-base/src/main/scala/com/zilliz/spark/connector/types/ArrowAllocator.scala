@@ -7,7 +7,7 @@ import org.apache.arrow.memory.{BufferAllocator, RootAllocator}
   * The final Spark partition reader owns this object. Closing it never closes
   * the process-wide root, and a repeated close is a no-op.
   */
-private[connector] final class TaskArrowAllocator private[types] (
+final class TaskArrowAllocator private[types] (
     val allocator: BufferAllocator
 ) extends AutoCloseable {
   private var closed = false
@@ -65,7 +65,7 @@ object ArrowAllocator {
     )
   }
 
-  private[connector] def forReadTask(
+  def forReadTask(
       segmentId: Long,
       maxBytes: Long
   ): TaskArrowAllocator = {

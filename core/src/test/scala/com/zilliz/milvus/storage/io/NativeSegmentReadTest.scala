@@ -13,10 +13,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.jni.storage.NativeStorageLibrary
-import com.zilliz.milvus.storage.read.exec.SegmentReader
-import com.zilliz.milvus.storage.read.plan.SegmentReadTask
-import com.zilliz.milvus.storage.snapshot.SegmentLayout
-import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
+import com.zilliz.milvus.storage.read.exec.{PhysicalColumnGroup, SegmentReader}
+import com.zilliz.milvus.storage.read.plan.ReadLimits
 import io.milvus.storage.{
   MilvusStorageColumnGroups,
   MilvusStorageProperties,
@@ -64,32 +62,24 @@ class NativeSegmentReadTest extends AnyFunSuite with Matchers {
     val allocator = new RootAllocator(Long.MaxValue)
     var segmentReader: SegmentReader = null
     try {
-      val task = SegmentReadTask(
-        segmentId = 1L,
-        partitionId = 1L,
-        layout = SegmentLayout.ColumnGroups(
-          Seq(
-            V2ColumnGroup(
-              fieldIds = Seq(0L, 1L),
-              filePaths = Seq("segment.parquet"),
-              fileRowCounts = Seq(rows.toLong)
-            )
+      segmentReader = SegmentReader.openColumnGroups(
+        Seq(
+          PhysicalColumnGroup(
+            columnNames = Seq("id", "name"),
+            filePaths = Seq("segment.parquet"),
+            fileRowCounts = Seq(rows.toLong)
           )
         ),
-        schemaBytes = Array.emptyByteArray,
+        schema,
+        Seq("id", "name"),
         properties = Map(
           "fs.storage_type" -> "local",
           "fs.root_path" -> dir.toAbsolutePath.toString
-        )
-      )
-      // Field ids 0 and 1 stand for the two columns, in schema order.
-      val nameFor = Map(0L -> "id", 1L -> "name")
-      segmentReader = SegmentReader.open(
-        task,
-        schema,
-        Seq("id", "name"),
-        nameFor.get,
-        allocator
+        ),
+        limits = ReadLimits.Default,
+        expectedRows = Some(rows.toLong),
+        segmentId = 1L,
+        allocator = allocator
       )
 
       var seen = 0

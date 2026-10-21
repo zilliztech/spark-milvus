@@ -12,7 +12,7 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
   * removed. The helpers report both the option name and the supplied value,
   * including empty, overflowing and non-positive inputs.
   */
-private[connector] object OptionParsing {
+object OptionParsing {
   private val PositiveDecimal = "[1-9][0-9]*".r
   private val NonNegativeDecimal = "(?:0|[1-9][0-9]*)".r
 

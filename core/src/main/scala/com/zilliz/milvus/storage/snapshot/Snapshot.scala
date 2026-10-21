@@ -85,63 +85,24 @@ final case class Snapshot(
       selectedPartitionIds: Seq[Long],
       selectedSegmentIds: Seq[Long]
   ): Snapshot = {
-    val partitionSelection = selectedPartitionIds.distinct
-    val segmentSelection = selectedSegmentIds.distinct
-    if (partitionSelection.isEmpty && segmentSelection.isEmpty) return this
-
-    val availablePartitionIds =
-      (partitionIds ++ segments.filter(_.hasData).map(_.partitionId)).distinct
-    val missingPartitions =
-      partitionSelection.filterNot(availablePartitionIds.contains)
-    if (missingPartitions.nonEmpty) {
-      throw new IllegalArgumentException(
-        s"Partition id(s) ${missingPartitions.mkString(", ")} not found in snapshot $name"
-      )
-    }
-
-    val partitionSet = partitionSelection.toSet
-    val withinPartitions =
-      if (partitionSet.isEmpty) segments
-      else
-        segments.filter(segment =>
-          partitionSet.contains(segment.partitionId) ||
-            (!segment.hasData && segment.partitionId == -1L)
-        )
-
-    val selected =
-      if (segmentSelection.isEmpty) withinPartitions
-      else {
-        val segmentSet = segmentSelection.toSet
-        val data = withinPartitions.filter(segment =>
-          segment.hasData && segmentSet.contains(segment.id)
-        )
-        val found = data.iterator.map(_.id).toSet
-        val missing = segmentSelection.filterNot(found.contains)
-        if (missing.nonEmpty) {
-          val partitionContext =
-            if (partitionSelection.isEmpty) ""
-            else s" in partition id(s) ${partitionSelection.mkString(", ")}"
-          throw new IllegalArgumentException(
-            s"Segment id(s) ${missing.mkString(", ")} not found$partitionContext in snapshot $name"
-          )
-        }
-        val dataPartitions = data.iterator.map(_.partitionId).toSet
-        withinPartitions.filter(segment =>
-          (segment.hasData && segmentSet.contains(segment.id)) ||
-            (!segment.hasData &&
-              (segment.partitionId == -1L || dataPartitions.contains(
-                segment.partitionId
-              )))
-        )
+    if (selectedPartitionIds.isEmpty && selectedSegmentIds.isEmpty) return this
+    val selected = SnapshotSelection.select(
+      name,
+      partitionIds,
+      segments.map(segment =>
+        SnapshotSelection
+          .Segment(segment.id, segment.partitionId, segment.hasData)
+      ),
+      selectedPartitionIds,
+      selectedSegmentIds
+    )
+    copy(
+      partitionIds = selected.partitionIds,
+      segments = segments.zipWithIndex.collect {
+        case (segment, position) if selected.segmentPositions(position) =>
+          segment
       }
-
-    val retainedPartitionSet =
-      selected.iterator.filter(_.hasData).map(_.partitionId).toSet
-    val orderedPartitionIds =
-      (partitionIds ++ selected.map(_.partitionId)).distinct.filter(
-        retainedPartitionSet.contains
-      )
-    copy(partitionIds = orderedPartitionIds, segments = selected)
+    )
   }
 
   /** Single-id compatibility entry point. */

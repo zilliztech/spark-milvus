@@ -11,10 +11,11 @@ package com.zilliz.milvus.storage
   * V2SegmentResolver (the hook through which compat materializes V2 packed
   * segments, since core does not depend on compat). SnapshotSource is the
   * common read entry point. The catalog decodes each snapshot Avro once and
-  * shares its records with V2 footer recovery. `Snapshot.narrow` validates and
-  * intersects the common partition and segment selectors; `retainDataSegments`
-  * applies optimizer output. Both retain the applicable partition and
-  * collection-wide L0 delete segments. See
+  * shares its records with V2 footer recovery. `SnapshotSelection` validates
+  * and intersects partition and segment selectors from neutral identity/data
+  * descriptors; public and private `Snapshot.narrow` share these rules.
+  * `retainDataSegments` applies optimizer output. Both retain the applicable
+  * partition and collection-wide L0 delete segments. See
   * docs/design/projects/spark-milvus/architecture/snapshot.html and
   * vector-search.html section 2.4.
   *

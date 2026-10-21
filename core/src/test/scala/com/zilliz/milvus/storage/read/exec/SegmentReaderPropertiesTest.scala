@@ -22,7 +22,10 @@ class SegmentReaderPropertiesTest extends AnyFunSuite with Matchers {
       limits = ReadLimits(2048, 16777216L, 67108864L)
     )
 
-    SegmentReader.nativeProperties(task) should contain allOf (
+    SegmentReader.nativeProperties(
+      task.properties,
+      task.limits
+    ) should contain allOf (
       "fs.storage_type" -> "local",
       SegmentReader.RecordBatchMaxRows -> "2048",
       SegmentReader.RecordBatchMaxSize -> "16777216"
@@ -40,14 +43,16 @@ class SegmentReaderPropertiesTest extends AnyFunSuite with Matchers {
         limits = ReadLimits(2048, batchMaxBytes, 67108864L)
       )
 
-    SegmentReader.nativeProperties(
-      task(
-        32L << 20,
-        Map(
-          SegmentReader.PrebufferLazy -> "true",
-          SegmentReader.PrebufferRangeSizeLimit -> "1"
-        )
+    val bounded = task(
+      32L << 20,
+      Map(
+        SegmentReader.PrebufferLazy -> "true",
+        SegmentReader.PrebufferRangeSizeLimit -> "1"
       )
+    )
+    SegmentReader.nativeProperties(
+      bounded.properties,
+      bounded.limits
     ) should contain allOf (
       SegmentReader.PrebufferLazy -> "false",
       SegmentReader.PrebufferRangeSizeLimit -> (4L << 20).toString
