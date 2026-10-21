@@ -27,6 +27,14 @@ their columns. See [NEAREST BY](docs/reference-en.md#nearest-by-on-spark-42).
 Cardinal index files require a Cardinal-enabled build of the pinned Knowhere
 revision; the plain upstream CI artifact does not contain that engine.
 
+Read a prepared snapshot with `milvus.snapshot.path`, or a backup with
+`milvus.backup.dir`, plus its storage access configuration. These paths do not
+contact Milvus and need no Milvus Java SDK. The caller prepares the input and
+keeps its metadata, data and indexes available for the entire job. See
+[Reading with DataFrames](docs/reference-en.md#1-reading-with-dataframes).
+
+The existing service-connected client, Catalog and CALL interfaces remain
+during migration; the final public reader will use offline inputs only.
 `MilvusCatalog` exposes databases and collections as Spark namespaces and
 tables, loads latest or time-travel snapshots, and implements collection
 `CREATE TABLE` / `DROP TABLE` with validated Milvus field and index properties.

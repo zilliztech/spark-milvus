@@ -501,16 +501,14 @@ transforms.
 
 ## 1. Reading with DataFrames
 
-Use Spark's DataFrame reader and the current option constants:
+Read an existing snapshot without connecting to the Milvus service:
 
 ```scala
 import com.zilliz.spark.connector.options.MilvusOption
 
-val collectionOptions = Map(
-  MilvusOption.MilvusUri -> "http://localhost:19530",
-  MilvusOption.MilvusToken -> "your-token",
-  MilvusOption.MilvusDatabaseName -> "default",
-  MilvusOption.MilvusCollectionName -> "your_collection",
+val snapshotOptions = Map(
+  MilvusOption.SnapshotPath ->
+    "s3a://your-milvus-bucket/files/snapshots/123/metadata/snapshot.json",
   "fs.address" -> "s3.us-west-2.amazonaws.com",
   "fs.bucket_name" -> "your-milvus-bucket",
   "fs.root_path" -> "files",
@@ -520,22 +518,33 @@ val collectionOptions = Map(
   "fs.use_iam" -> "true"
 )
 
-val milvusDF = spark.read.format("milvus").options(collectionOptions).load()
+val milvusDF = spark.read.format("milvus").options(snapshotOptions).load()
 milvusDF.show(false)
 ```
 
-Replace the connection and storage values with those of your deployment.
-`fs.root_path` must match Milvus's storage root, and a snapshot must already
-exist: a read does not create one. This AWS example uses the process credential
-chain on both the driver and executors; the Milvus token does not grant access
-to object storage. The native libraries must be available as described in
+Replace the snapshot path and storage values with your prepared input. Schema
+and segments come from the snapshot; no Milvus URI, token or Java SDK is needed.
+The caller owns snapshot preparation, version selection and retention of all
+referenced files until the job finishes. The reader does not create snapshots,
+acquire or renew service pins, or delete snapshots. This AWS example uses the
+process credential chain on both the driver and executors. The native libraries
+must be available as described in
 [Native dependency bundle](#native-dependency-bundle).
 
-Once the catalog above is configured, the equivalent entry is
-`spark.table("milvus.default.your_collection")`. Apply ordinary DataFrame
-`select` and `where` operations to either result. Optional partition and
-segment selectors take numeric IDs; see [Data Operation
-Parameters](#23-data-operation-parameters).
+For a backup, use `milvus.backup.dir` and the selection rules under
+[Offline Backup Read Parameters](#25-offline-backup-read-parameters).
+Apply ordinary DataFrame `select` and `where`, or create a temporary view for
+SQL. Optional partition and segment selectors take numeric IDs; see
+[Data Operation Parameters](#23-data-operation-parameters).
+
+The legacy `milvus.uri` plus database/collection entry and
+`spark.table("milvus.default.your_collection")` remain during migration. They use
+the existing custom client to resolve the collection and read an existing
+snapshot from storage; they do not use the official SDK or acquire pins. The
+client and its creation methods will move to the private project before the
+public copies and old entry points are removed. The final public reader will
+accept offline inputs; database and collection names alone will not locate an
+online snapshot.
 
 ### 1.1 How It Works
 
@@ -544,7 +553,11 @@ snapshot. That same `Snapshot` supplies
 the schema, selected segments, statistics, and scan plan; a scan never asks the
 service or storage for a newer view. The driver closes every object store used
 to materialize snapshot metadata on both success and failure, before executor
-tasks are serialized. Each Spark partition then reads one data segment. For
+tasks are serialized. Executor reader factories carry only presentation options;
+storage identity is bound in each segment task, and Milvus service credentials
+remain on the driver. A valid empty snapshot keeps its schema and returns zero
+rows; missing identity, timestamp or schema, or declared segments without
+manifests, are rejected. Each Spark partition then reads one data segment. For
 `storage_version = 3`, the executor opens the pinned segment
 manifest; for `storage_version = 2`, it opens the column-group parquet files
 listed by the task; both storage lines share the same row reader. The driver

@@ -1,5 +1,12 @@
 package com.zilliz.spark.connector.read
 
+import java.io.{
+  ByteArrayInputStream,
+  ByteArrayOutputStream,
+  ObjectInputStream,
+  ObjectOutputStream
+}
+import java.nio.charset.StandardCharsets
 import scala.jdk.CollectionConverters._
 
 import org.apache.spark.sql.types.{LongType, StructField, StructType}
@@ -15,6 +22,47 @@ import com.zilliz.spark.connector.types.ArrowAllocator
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
+  test(
+    "serialized reader factories retain read options without service or storage identities"
+  ) {
+    val input = Map(
+      "MILVUS.READ.COLUMNAR" -> "false",
+      MilvusOption.ReadVectorRaw -> "true",
+      MilvusOption.MilvusExtraColumns -> "_segment_id",
+      MilvusOption.MilvusToken -> "driver-only-test-token",
+      MilvusOption.MilvusClientKeyPath -> "driver-only-client-key",
+      MilvusOption.MilvusUri -> "https://driver-only-service",
+      "fs.secret_access_key" -> "partition-only-storage-secret"
+    )
+    val retained = MilvusPartitionReaderFactory.readerOptions(input)
+    assert(!MilvusOption.readColumnar(retained))
+    assert(MilvusOption.readVectorRaw(retained))
+    assert(MilvusOption.extraColumns(retained) == Seq("_segment_id"))
+    val factory = new MilvusPartitionReaderFactory(StructType(Nil), retained)
+    val bytes = new ByteArrayOutputStream()
+    val output = new ObjectOutputStream(bytes)
+    try output.writeObject(factory)
+    finally output.close()
+    val encoded = new String(
+      bytes.toByteArray,
+      StandardCharsets.ISO_8859_1
+    )
+    Seq(
+      "driver-only",
+      "partition-only-storage-secret"
+    ).foreach { forbidden =>
+      assert(!encoded.contains(forbidden))
+    }
+    val serialized = new ObjectInputStream(
+      new ByteArrayInputStream(bytes.toByteArray)
+    )
+    val restored =
+      try serialized.readObject().asInstanceOf[MilvusPartitionReaderFactory]
+      finally serialized.close()
+    assert(!restored.supportColumnarReads(v3()))
+    assert(!restored.supportColumnarReads(v2()))
+  }
+
   test("requestedExtraColumns normalizes legacy aliases") {
     val requested = MilvusPartitionReaderFactory.requestedExtraColumns(
       Map(

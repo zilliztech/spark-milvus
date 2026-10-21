@@ -17,6 +17,22 @@ import com.zilliz.spark.connector.types.ArrowAllocator
 import io.milvus.grpc.schema.CollectionSchema
 
 object MilvusPartitionReaderFactory {
+
+  /** Storage access is already bound in SegmentReadTask. The factory only needs
+    * these presentation choices, never service credentials or SDK state.
+    */
+  private[read] def readerOptions(
+      options: Map[String, String]
+  ): Map[String, String] = {
+    val keys = Set(
+      MilvusOption.MilvusExtraColumns.toLowerCase(java.util.Locale.ROOT),
+      MilvusOption.ReadColumnar.toLowerCase(java.util.Locale.ROOT),
+      MilvusOption.ReadVectorRaw.toLowerCase(java.util.Locale.ROOT)
+    )
+    options.filter { case (key, _) =>
+      keys(key.toLowerCase(java.util.Locale.ROOT))
+    }
+  }
   private[read] def requestedExtraColumns(
       optionsMap: Map[String, String]
   ): Set[String] = MilvusOption.extraColumns(optionsMap).toSet

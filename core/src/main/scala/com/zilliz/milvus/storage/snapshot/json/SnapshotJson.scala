@@ -150,8 +150,11 @@ case class SnapshotJson(
     @JsonProperty("segment_infos") @JsonAlias(
       Array("segment-infos", "segmentInfos")
     ) segmentInfos: Seq[SegmentJson] = Seq.empty,
-    @JsonProperty("build_ids") rawBuildIds: Option[JsonNode] = None
+    @JsonProperty("build_ids") rawBuildIds: Option[JsonNode] = None,
+    @JsonProperty("segment_ids") rawSegmentIds: Option[JsonNode] = None
 ) {
+  def segmentIds: Option[Vector[Long]] =
+    rawSegmentIds.map(JsonValues.toLongSeq(_).toVector)
   def buildIds: Option[Vector[Long]] =
     rawBuildIds.map(JsonValues.toLongSeq(_).toVector)
   def allSegments: Seq[SegmentJson] =

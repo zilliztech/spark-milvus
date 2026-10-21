@@ -302,7 +302,7 @@ class MilvusScan(
   override def createReaderFactory(): PartitionReaderFactory =
     new MilvusPartitionReaderFactory(
       schema,
-      options.asScala.toMap,
+      MilvusPartitionReaderFactory.readerOptions(options.asScala.toMap),
       pushedExpression,
       pushedLimit
     )

@@ -788,16 +788,46 @@ class SnapshotCatalogTest extends AnyFunSuite {
         )
       ).contains("collection.schema")
     )
-    val empty = bad(
-      SnapshotJson(
-        snapshotInfo = SnapshotInfoJson("s"),
-        collection =
-          CollectionJson(CollectionSchemaJson("c", fields = Seq.empty)),
-        manifestList = Seq.empty,
-        storageV2ManifestList = Some(Seq.empty)
+  }
+
+  test(
+    "an empty collection snapshot retains its schema and produces no read tasks"
+  ) {
+    withDir { dir =>
+      val explicitLists = snapshotJson("empty", 100L, Seq.empty)
+      // Milvus format 5 exports omit both manifest lists for an empty collection.
+      val omittedLists = explicitLists
+        .replace("\"manifest_list\": [],", "")
+        .replace("\"storagev2_manifest_list\": []", "\"format_version\": 5")
+      Seq(explicitLists, omittedLists).foreach { json =>
+        write(dir, "empty.json", json)
+        val snapshot = catalog(dir).read("empty.json")
+        assert(snapshot.name == "empty")
+        assert(snapshot.collectionId == 10L)
+        assert(snapshot.createdAt.contains(100L))
+        assert(snapshot.schema.fields.map(_.name) == Seq("id", "v"))
+        assert(snapshot.segments.isEmpty)
+        assert(
+          ReadPlan
+            .of(snapshot, _ => Map.empty, applyDeletes = true)
+            .specs
+            .isEmpty
+        )
+      }
+      write(
+        dir,
+        "incomplete.json",
+        snapshotJson("incomplete", 100L, Seq.empty)
+          .replace(
+            "\"manifest_list\": []",
+            "\"manifest_list\": [], \"segment_ids\": [30]"
+          )
       )
-    )
-    assert(empty.contains("no manifests and no V2 segments"))
+      val error = intercept[IllegalArgumentException](
+        catalog(dir).read("incomplete.json")
+      )
+      assert(error.getMessage.contains("declares segments"))
+    }
   }
 
   test(

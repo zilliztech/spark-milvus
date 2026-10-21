@@ -321,7 +321,8 @@ object SnapshotCatalog extends Logging {
 
   /** The snapshot JSON's shape becomes the model. Validation that used to sit
     * in the client planner lives here: a snapshot missing its info, collection
-    * or schema, or listing no segments at all, is rejected.
+    * or schema is rejected. A valid empty collection has no manifests and
+    * produces an empty snapshot with its collection schema intact.
     */
   def fromMetadata(
       metadata: SnapshotJson,
@@ -341,7 +342,22 @@ object SnapshotCatalog extends Logging {
       return bad("snapshot is missing collection.schema")
     val v3Items = metadata.storageV2ManifestList.getOrElse(Seq.empty)
     if (metadata.manifestList.isEmpty && v3Items.isEmpty) {
-      return bad("snapshot is empty: no manifests and no V2 segments")
+      if (
+        metadata.segmentIds.exists(_.nonEmpty) || metadata.allSegments.nonEmpty
+      )
+        return bad(
+          "snapshot declares segments but contains no segment manifests"
+        )
+      if (
+        metadata.snapshotInfo.collectionId <= 0L ||
+        Option(metadata.snapshotInfo.name).forall(_.trim.isEmpty) ||
+        metadata.snapshotInfo.rawCreateTs.isEmpty ||
+        metadata.snapshotInfo.createTs <= 0L ||
+        metadata.collection.schema.fields.isEmpty
+      )
+        return bad(
+          "empty snapshot requires collection identity, creation timestamp and a nonempty schema"
+        )
     }
     val entries =
       try {
