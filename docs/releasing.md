@@ -230,8 +230,23 @@ local fallback. The thin run adds its matching native bundle via `--jars`.
 Resolved JAR digests and native platform sets must
 match the manifest. No implementation source is compiled into the fixture JAR.
 
-The workload exercises real Storage and Knowhere code: write, read, deletes,
-exact vector search, index building, approximate search and output writes.
+The workload reads checked-in, SHA-256-verified files through real Storage and
+Knowhere code. It covers V3 projection, nullable fields, deletes and exact and
+approximate vector search over existing HNSW indexes. Approximate searches must
+report index loads, so an exact fallback cannot satisfy that gate. Fixed V2
+fixtures exercise snapshot, advanced option and backup inputs, including Long
+and String primary keys whose row timestamp equals the delete timestamp.
+Expected rows and the L2 oracle are independent of the reader under test.
+`consumer-result.json` records the hashes of all packaged fixture resources.
+The consumer compiles only `ReadOnlyConsumerSmoke` and the fixture integrity
+helper; its JAR is rejected if it contains production classes or references
+writers, procedures or the online client. No normal consumer command generates
+segments, builds indexes, publishes snapshots or calls Milvus.
+
+The previous `LocalEndToEndSmoke` remains in the source tree with its write,
+index-build and output-write assertions for later private-repository migration.
+It is no longer the public release consumer entry point.
+
 `local-cluster` starts an independent executor JVM, and the smoke checks its PID
 is different from the driver's. Both processes preload their JRE's `libjsig`.
 Missing native libraries or canceled native tests cannot satisfy this gate.
@@ -244,8 +259,9 @@ code alone does not identify the native failure; inspect these reports. CI also
 records the consumer CPU, operating system and exact JDK version.
 
 This is an **offline native end-to-end test on local files**, not a live Milvus
-service test. The separate `integration40/test` suites require live Milvus and
-MinIO; this release workflow does not run them. Registration and online service
+service test. The separate `integration40/test` suites use live object storage; their write
+and backfill cases also require Milvus. The read-only DataSource suite consumes
+pre-uploaded fixed inputs. This release workflow does not run those suites. Registration and online service
 behavior therefore remain outside this gate.
 
 | Event | Required work |

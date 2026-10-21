@@ -1,19 +1,20 @@
 package com.zilliz.milvus.storage.stats
 
 import java.nio.charset.StandardCharsets
-import java.nio.file.Files
+import java.nio.file.{Files, Path}
 
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.expr._
-import com.zilliz.milvus.storage.io.{FileInfo, LocalObjectStore, ObjectStore}
+import com.zilliz.milvus.storage.io.{
+  FileInfo,
+  LocalObjectStore,
+  ObjectStore,
+  ReadFixtures
+}
 import com.zilliz.milvus.storage.snapshot._
 import com.zilliz.milvus.storage.stats.PrimaryKeyValue.LongValue
-import com.zilliz.milvus.storage.write.stats.{
-  PrimaryKeyStatsBuilder,
-  PrimaryKeyStatsEncoder
-}
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 class PrimaryKeyBloomPrunerTest extends AnyFunSuite with Matchers {
@@ -77,17 +78,18 @@ class PrimaryKeyBloomPrunerTest extends AnyFunSuite with Matchers {
     val root = Files.createTempDirectory("milvus-bloom-pruner")
     val store = new LocalObjectStore(root.toString)
     val counting = new CountingObjectStore(store)
-    val first = stats(100L, 1L, 2L)
-    val candidate = Iterator
-      .from(1000)
-      .map(_.toLong)
-      .find(value => !first.mightContainLong(value))
-      .get
-    store.write("stats/30", PrimaryKeyStatsEncoder.toBytes(first))
-    store.write(
-      "stats/31",
-      PrimaryKeyStatsEncoder.toBytes(stats(100L, candidate))
-    )
+    ReadFixtures.copyTo("stats/primary-key", root.resolve("fixture"))
+    val candidate = 1000L
+    val first = PrimaryKeyStats
+      .fromBytes(
+        Files.readAllBytes(
+          root.resolve("fixture/long-1-2.json")
+        )
+      )
+      .head
+    first.mightContainLong(candidate) shouldBe false
+    copy(root, "long-1-2.json", "stats/30")
+    copy(root, "long-1000.json", "stats/31")
 
     val data20 = segment(30L, 20L, Seq("stats/30"))
     val data21 = segment(31L, 21L, Seq("stats/31"))
@@ -121,30 +123,29 @@ class PrimaryKeyBloomPrunerTest extends AnyFunSuite with Matchers {
     val root = Files.createTempDirectory("milvus-bloom-proof")
     val store = new LocalObjectStore(root.toString)
     val counting = new CountingObjectStore(store)
-    val miss = stats(100L, 1L)
-    val candidate = Iterator
-      .from(1000)
-      .map(_.toLong)
-      .find(value => !miss.mightContainLong(value))
-      .get
-    val hit = stats(100L, candidate)
-    val wrongField = stats(101L, 1L)
-
-    store.write("stats/hit-a", PrimaryKeyStatsEncoder.toBytes(miss))
-    store.write("stats/hit-b", PrimaryKeyStatsEncoder.toBytes(hit))
-    store.write("stats/corrupt-a", PrimaryKeyStatsEncoder.toBytes(miss))
-    store.write(
-      "stats/corrupt-b",
+    ReadFixtures.copyTo("stats/primary-key", root.resolve("fixture"))
+    val candidate = 1000L
+    val miss = Files.readAllBytes(root.resolve("fixture/long-1.json"))
+    PrimaryKeyStats
+      .fromBytes(miss)
+      .head
+      .mightContainLong(candidate) shouldBe false
+    copy(root, "long-1.json", "stats/hit-a")
+    copy(root, "long-1000.json", "stats/hit-b")
+    copy(root, "long-1.json", "stats/corrupt-a")
+    Files.write(
+      root.resolve("stats/corrupt-b"),
       "not-json".getBytes(StandardCharsets.UTF_8)
     )
-    store.write("stats/wrong", PrimaryKeyStatsEncoder.toBytes(wrongField))
-    store.write("stats/miss", PrimaryKeyStatsEncoder.toBytes(miss))
-    store.write(
-      "stats/compound/1",
-      s"[${PrimaryKeyStatsEncoder.toJson(miss)},${PrimaryKeyStatsEncoder.toJson(miss)}]"
-        .getBytes(StandardCharsets.UTF_8)
+    copy(root, "wrong-field.json", "stats/wrong")
+    copy(root, "long-1.json", "stats/miss")
+    Files.createDirectories(root.resolve("stats/compound"))
+    val missJson = new String(miss, StandardCharsets.UTF_8)
+    Files.write(
+      root.resolve("stats/compound/1"),
+      s"[$missJson,$missJson]".getBytes(StandardCharsets.UTF_8)
     )
-    store.write("stats/compound/9", PrimaryKeyStatsEncoder.toBytes(hit))
+    copy(root, "long-1000.json", "stats/compound/9")
 
     val hitInSecondFile = segment(30L, 20L, Seq("stats/hit-a", "stats/hit-b"))
     val corruptFile =
@@ -186,10 +187,10 @@ class PrimaryKeyBloomPrunerTest extends AnyFunSuite with Matchers {
     counting.keys should not contain "stats/compound/9"
   }
 
-  private def stats(fieldId: Long, values: Long*): PrimaryKeyStats = {
-    val builder = new PrimaryKeyStatsBuilder(fieldId, DataType.Int64)
-    values.foreach(builder.addLong)
-    builder.build()
+  private def copy(root: Path, source: String, destination: String): Unit = {
+    val target = root.resolve(destination)
+    Files.createDirectories(target.getParent)
+    Files.copy(root.resolve("fixture").resolve(source), target)
   }
 
   private def segment(

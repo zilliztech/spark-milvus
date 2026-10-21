@@ -10,7 +10,6 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.jni.storage.NativeStorageLibrary
-import com.zilliz.milvus.storage.write.io.NativeWritableObjectStore
 import io.milvus.storage.{
   MilvusStorageException,
   MilvusStorageFileSystem,
@@ -63,35 +62,24 @@ class StorageNativeTest
   // Paths are keys relative to fs.root_path. The C layer wraps the backend in a
   // subtree, so an absolute path is appended to the root and lands nowhere —
   // the same doubling that produces a-bucket/a-bucket/files/... on S3.
-  test("write, read, size, list and delete go through the C filesystem") {
+  test("read, size and list go through the C filesystem") {
     withFs { fs =>
       val key = "seg/data.bin"
       val payload = "loon".getBytes(StandardCharsets.UTF_8)
-
-      // writeFile does not create parents. Object storage has no directories so
-      // this only shows on the local backend, but core.io has to be explicit
-      // about it rather than let the difference leak upward.
-      fs.createDir("seg", true)
-      fs.writeFile(key, payload)
+      Files.createDirectories(root.resolve("seg"))
+      Files.write(root.resolve(key), payload)
       fs.readFileAll(key) shouldBe payload
       fs.fileSize(key) shouldBe payload.length.toLong
       fs.exists(key) shouldBe true
-      Files.exists(root.resolve(key)) shouldBe true
-
-      val entries = fs.list("seg", false)
-      entries.map(_.path) should not be empty
-
-      fs.deleteFile(key)
-      fs.exists(key) shouldBe false
-      Files.exists(root.resolve(key)) shouldBe false
+      fs.list("seg", false).map(_.path) should not be empty
     }
   }
 
   test("an absolute path is appended to fs.root_path, not honoured") {
     withFs { fs =>
-      an[MilvusStorageException] should be thrownBy fs.writeFile(
-        root.resolve("absolute.bin").toString,
-        Array[Byte](1)
+      Files.write(root.resolve("absolute.bin"), Array[Byte](1))
+      an[MilvusStorageException] should be thrownBy fs.readFileAll(
+        root.resolve("absolute.bin").toString
       )
     }
   }
@@ -100,7 +88,7 @@ class StorageNativeTest
     withFs { fs =>
       val key = "ranged.bin"
       val payload = "0123456789".getBytes(StandardCharsets.UTF_8)
-      fs.writeFile(key, payload)
+      Files.write(root.resolve(key), payload)
 
       val reader = fs.openReader(key, payload.length.toLong)
       try {
@@ -124,14 +112,13 @@ class StorageNativeTest
         Map("fs.storage_type" -> "local", "fs.root_path" -> rootPath)
       )
       .open()
-    val store = new NativeWritableObjectStore(reader)
+    val store = reader
     try {
       val key = s"$rootPath/staging/job-1/segment/data.bin"
       val payload = "loon".getBytes(StandardCharsets.UTF_8)
 
-      // The parents do not exist: object storage has none, a filesystem does,
-      // and which of the two is behind the store is not the caller's business.
-      store.write(key, payload)
+      Files.createDirectories(root.resolve("files/staging/job-1/segment"))
+      Files.write(root.resolve("files/staging/job-1/segment/data.bin"), payload)
 
       store.exists(key) shouldBe true
       reader.readAll(key) shouldBe payload
@@ -142,25 +129,9 @@ class StorageNativeTest
       store.size(key) shouldBe payload.length.toLong
       store.list(s"$rootPath/staging", recursive = true).map(_.path) should
         contain(key)
-      // Written once, at the key's own place: a root counted twice would put
-      // a second copy somewhere below it.
-      Files.exists(
-        root.resolve("files").resolve("staging/job-1/segment/data.bin")
-      ) shouldBe true
-      val written = Files.walk(root)
-      try
-        written
-          .filter(path => path.getFileName.toString == "data.bin")
-          .count() shouldBe 1L
-      finally written.close()
-      store.delete(key)
-      reader.exists(key) shouldBe false
     } finally store.close()
-    reader.close() // Both views share one idempotent close lifecycle.
+    reader.close()
     intercept[IllegalStateException](reader.exists("closed"))
-    intercept[IllegalStateException](store.write("closed", Array[Byte](1)))
-    intercept[IllegalStateException](store.createDir("closed"))
-    intercept[IllegalStateException](store.delete("closed"))
   }
 
   test("a failed C call arrives as an exception, not a return code") {
@@ -181,20 +152,21 @@ class StorageNativeTest
       System.getProperty("user.name") != "root",
       "root ignores directory permissions"
     )
-    val store = new NativeWritableObjectStore(
-      NativeObjectStore
-        .Factory(
-          Map(
-            "fs.storage_type" -> "local",
-            "fs.root_path" -> root.toAbsolutePath.toString
-          )
+    val store = NativeObjectStore
+      .Factory(
+        Map(
+          "fs.storage_type" -> "local",
+          "fs.root_path" -> root.toAbsolutePath.toString
         )
-        .open()
-    )
+      )
+      .open()
     val locked = root.resolve("locked")
     try {
-      store.createDir("locked", recursive = true)
-      store.write("locked/_committed", "job-1".getBytes(StandardCharsets.UTF_8))
+      Files.createDirectories(locked)
+      Files.write(
+        locked.resolve("_committed"),
+        "job-1".getBytes(StandardCharsets.UTF_8)
+      )
       store.exists("locked/_committed") shouldBe true
       store.exists("absent") shouldBe false
       intercept[MilvusStorageException](

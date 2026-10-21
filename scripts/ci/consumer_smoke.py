@@ -3,7 +3,8 @@
 
 Production classes come exclusively from the candidate's published coordinates.
 The compiler and spark-submit use separate, fresh dependency caches. Entries
-and thin modules run the same native read/write/search workload with a worker JVM.
+and thin modules read fixed, checksummed data with a worker JVM. No connector
+writer, index builder, snapshot publisher or online client prepares the input.
 """
 
 import argparse
@@ -12,6 +13,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -23,10 +25,22 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = (
-    "spark-4.0/src/test/scala/com/zilliz/spark/connector/read/LocalEndToEndSmoke.scala",
-    "core/src/test/scala/com/zilliz/milvus/storage/manifest/SnapshotSegmentFixture.scala",
+    "spark-4.0/src/test/scala/com/zilliz/spark/connector/read/ReadOnlyConsumerSmoke.scala",
+    "core/src/test/scala/com/zilliz/milvus/storage/io/ReadFixtures.scala",
 )
-MAIN = "com.zilliz.spark.connector.read.LocalEndToEndSmoke"
+MAIN = "com.zilliz.spark.connector.read.ReadOnlyConsumerSmoke"
+FIXTURE_ROOT = ROOT / "core/src/test/resources/read-fixtures"
+FIXTURE_GROUPS = ("collections/nearest", "consumer/long-v2", "consumer/string-v2")
+FIXTURE_CLASSES = (
+    MAIN.replace(".", "/"), "com/zilliz/milvus/storage/io/ReadFixtures",
+)
+FORBIDDEN_REFERENCES = (
+    b"com/zilliz/milvus/storage/write/", b"com/zilliz/milvus/client/",
+    b"com/zilliz/milvus/storage/vector/IndexBuilder",
+    b"com/zilliz/milvus/jni/vector/NativeVectorIndexBuilder",
+    b"com/zilliz/spark/connector/procedure/", b"org/apache/spark/sql/DataFrameWriter",
+    b"io/milvus/storage/MilvusStorageWriter", b"io/milvus/storage/MilvusStorageTransaction",
+)
 GROUP = "com.zilliz"
 CENTRAL = "https://repo.maven.apache.org/maven2"
 
@@ -34,6 +48,61 @@ CENTRAL = "https://repo.maven.apache.org/maven2"
 def digest(path):
     with Path(path).open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def fixture_resources(root=FIXTURE_ROOT, groups=FIXTURE_GROUPS):
+    """Use the same SHA256SUMS as the JVM reader, without generating any data."""
+    resources = {}
+    for group in groups:
+        directory = root / group
+        manifests = sorted(directory.rglob("SHA256SUMS"))
+        if not manifests:
+            raise ValueError("Missing fixed read fixture checksums: " + str(directory))
+        for manifest in manifests:
+            names = set()
+            for line in manifest.read_text().splitlines():
+                if not line:
+                    continue
+                match = re.fullmatch(r"([a-f0-9]{64})  (.+)", line)
+                if not match:
+                    raise ValueError("Invalid fixture checksum line: " + str(manifest))
+                checksum, relative = match.groups()
+                path = Path(relative)
+                if path.is_absolute() or ".." in path.parts or path.as_posix() != relative:
+                    raise ValueError("Unsafe fixture path: " + relative)
+                if relative in names or relative == "SHA256SUMS":
+                    raise ValueError("Duplicate or recursive fixture checksum: " + relative)
+                names.add(relative)
+                source = manifest.parent / path
+                if not source.is_file() or source.is_symlink() or digest(source) != checksum:
+                    raise ValueError("Fixed read fixture is missing or changed: " + str(source))
+                resources["read-fixtures/" + source.relative_to(root).as_posix()] = checksum
+            if not names:
+                raise ValueError("Empty fixture checksums: " + str(manifest))
+            resources["read-fixtures/" + manifest.relative_to(root).as_posix()] = digest(manifest)
+    return resources
+
+
+def verify_fixture_jar(jar, resources):
+    """The consumer contains only its test entry, integrity helper and fixed data."""
+    with zipfile.ZipFile(jar) as archive:
+        names = archive.namelist()
+        if len(set(names)) != len(names):
+            raise RuntimeError("Smoke JAR contains duplicate entries")
+        classes = [name for name in names if name.endswith(".class")]
+        if any(base + ".class" not in classes for base in FIXTURE_CLASSES):
+            raise RuntimeError("Smoke JAR is missing its read-only entry or integrity helper")
+        for name in classes:
+            if not any(name == base + ".class" or name.startswith(base + "$")
+                       for base in FIXTURE_CLASSES):
+                raise RuntimeError("Smoke JAR contains production classes: " + name)
+            data = archive.read(name)
+            if any(reference in data for reference in FORBIDDEN_REFERENCES):
+                raise RuntimeError("Read-only smoke references a writer or online client: " + name)
+        actual = {name: hashlib.sha256(archive.read(name)).hexdigest() for name in names
+                  if name.startswith("read-fixtures/") and not name.endswith("/")}
+        if actual != resources:
+            raise RuntimeError("Smoke JAR fixed fixtures differ from their checked input")
 
 
 def main_jars(manifest):
@@ -196,6 +265,11 @@ def compile_fixture(work, repository, version, row, entry_id, env):
     sources.mkdir(parents=True)
     for relative in FIXTURES:
         shutil.copyfile(ROOT / relative, sources / Path(relative).name)
+    resources = fixture_resources()
+    for relative in resources:
+        destination = project / "src/main/resources" / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(FIXTURE_ROOT.parent / relative, destination)
     (project / "project/build.properties").write_text("sbt.version=1.11.1\n")
     scala = row["scala"]
     # JSON strings are valid Scala string literals; no text is evaluated by a shell.
@@ -215,15 +289,7 @@ def compile_fixture(work, repository, version, row, entry_id, env):
         cwd=project, env={**env, "COURSIER_CACHE": str(work / "compile-coursier")},
     )
     jar = project / "target/scala-2.13/smoke.jar"
-    with zipfile.ZipFile(jar) as archive:
-        unexpected = [
-            name for name in archive.namelist()
-            if name.endswith(".class")
-            and not (name.startswith("com/zilliz/spark/connector/read/LocalEndToEndSmoke")
-                     or name.startswith("com/zilliz/milvus/storage/manifest/SnapshotSegmentFixture"))
-        ]
-        if unexpected:
-            raise RuntimeError("Smoke JAR contains production classes: " + str(unexpected))
+    verify_fixture_jar(jar, resources)
     return jar
 
 
@@ -246,6 +312,7 @@ def smoke(candidate, line, platform, output, *, central=False, entry=None, nativ
     if sys.platform != "linux" or os.uname().machine != expected_machine:
         raise ValueError("Consumer runner does not match " + platform)
     output.mkdir(parents=True, exist_ok=True)
+    resources = fixture_resources()
     env = os.environ.copy()
     # The native package must work without engine libraries installed on the host.
     for name in ("CLASSPATH", "SPARK_CLASSPATH", "SPARK_DIST_CLASSPATH", "SPARK_SUBMIT_OPTS",
@@ -327,6 +394,7 @@ def smoke(candidate, line, platform, output, *, central=False, entry=None, nativ
         (output / "consumer-result.json").write_text(json.dumps({
             "version": version, "platform": platform, "line": line,
             "manifest_sha256": digest(candidate / "release-manifest.json"), "entries": reports,
+            "read_fixture_sha256": resources,
         }, indent=2) + "\n")
 
 

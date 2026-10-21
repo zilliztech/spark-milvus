@@ -15,7 +15,7 @@ import static org.junit.Assert.assertThrows;
 public class NativeVectorIndexBoundaryTest {
     @Test
     public void persistedIndexReaderLoadsWithoutTheBuilder() throws Exception {
-        String builderName = NativeVectorIndexBuilder.class.getName();
+        String builderName = "com.zilliz.milvus.jni.vector.NativeVectorIndexBuilder";
         URL[] classpath = {
             NativeVectorIndex.class.getProtectionDomain().getCodeSource().getLocation(),
             Knowhere.class.getProtectionDomain().getCodeSource().getLocation(),

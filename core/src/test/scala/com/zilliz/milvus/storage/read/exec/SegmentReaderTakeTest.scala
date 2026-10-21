@@ -3,31 +3,28 @@ package com.zilliz.milvus.storage.read.exec
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.{Files, Path}
 import java.util.{Collections, Comparator}
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 import org.apache.arrow.memory.{
   BufferAllocator,
   OutOfMemoryException,
   RootAllocator
 }
-import org.apache.arrow.vector.{
-  BigIntVector,
-  FixedSizeBinaryVector,
-  VarCharVector,
-  VectorSchemaRoot
-}
+import org.apache.arrow.vector.{BigIntVector, VarCharVector, VectorSchemaRoot}
 import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.jni.storage.NativeStorageLibrary
+import com.zilliz.milvus.storage.io.ReadFixtures
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.snapshot.{SegmentLayout, V2ColumnGroup}
-import com.zilliz.milvus.storage.write.exec.{
-  ManifestTransaction,
-  V3SegmentWriter
+import io.milvus.storage.{
+  MilvusStorageColumnGroups,
+  MilvusStorageException,
+  MilvusStorageManifest,
+  MilvusStorageProperties
 }
-import io.milvus.storage.MilvusStorageException
 
 /** Native random row retrieval over real local parquet files. */
 class SegmentReaderTakeTest extends AnyFunSuite with Matchers {
@@ -80,65 +77,42 @@ class SegmentReaderTakeTest extends AnyFunSuite with Matchers {
     }
   }
 
-  private def write(
-      base: String,
-      from: Int,
-      count: Int,
-      allocator: BufferAllocator,
+  private def fixture(
+      directory: Path,
+      name: String,
       properties: Map[String, String],
-      split: Boolean = false
+      base: String = "segment"
   ): (SegmentReadTask, Seq[V2ColumnGroup]) = {
-    val writer = new V3SegmentWriter(
-      base,
-      schema,
-      properties,
-      allocator,
-      if (split) Seq("^102$") else Seq.empty
-    )
+    ReadFixtures.copyTo(s"segments/$name", directory)
+    val nativeProperties = new MilvusStorageProperties()
     try {
-      val root = VectorSchemaRoot.create(schema, allocator)
+      nativeProperties.create(properties)
+      val manifest = MilvusStorageManifest.open(base, nativeProperties, 1L)
       try {
-        root.allocateNew()
-        val id = root.getVector("100").asInstanceOf[BigIntVector]
-        val name = root.getVector("101").asInstanceOf[VarCharVector]
-        val vector = root.getVector("102").asInstanceOf[FixedSizeBinaryVector]
-        (0 until count).foreach { index =>
-          val physical = from + index
-          id.setSafe(index, physical.toLong * 11)
-          if (physical % 7 == 0) name.setNull(index)
-          else name.setSafe(index, s"row-$physical".getBytes(UTF_8))
-          vector.setSafe(index, Array.fill[Byte](8)(physical.toByte))
-        }
-        root.setRowCount(count)
-        writer.write(root)
-      } finally root.close()
-      val groups = writer.finish()
-      try {
-        val descriptors = (0 until groups.size).map { index =>
-          V2ColumnGroup(
-            groups.columns(index).map(_.toLong),
-            groups.files(index),
-            groups.rowCounts(index)
-          )
-        }
-        val version = ManifestTransaction.commit(
-          base,
-          properties,
-          groups,
-          ManifestTransaction.AppendFiles
-        )
+        val groups = manifest.columnGroupsPtr
+        val descriptors =
+          (0 until MilvusStorageColumnGroups.count(groups)).map { index =>
+            V2ColumnGroup(
+              MilvusStorageColumnGroups
+                .columns(groups, index)
+                .map(_.toLong)
+                .toSeq,
+              MilvusStorageColumnGroups.files(groups, index).toSeq,
+              MilvusStorageColumnGroups.fileRowCounts(groups, index).toSeq
+            )
+          }
         (
           SegmentReadTask(
             1L,
             1L,
-            SegmentLayout.Manifest(base, version),
+            SegmentLayout.Manifest(base, 1L),
             Array.emptyByteArray,
             properties
           ),
           descriptors
         )
-      } finally groups.close()
-    } finally writer.close()
+      } finally manifest.close()
+    } finally nativeProperties.free()
   }
 
   private def open(
@@ -174,7 +148,7 @@ class SegmentReaderTakeTest extends AnyFunSuite with Matchers {
   ) {
     withFixture { (directory, allocator, properties) =>
       val (task, groups) =
-        write("segment", 0, 18000, allocator, properties, split = true)
+        fixture(directory, "take-split", properties)
       val vectors = groups.find(_.fieldIds == Seq(102L)).get
       vectors.filePaths.foreach(path => Files.delete(directory.resolve(path)))
       val reader = open(task, allocator)
@@ -216,9 +190,9 @@ class SegmentReaderTakeTest extends AnyFunSuite with Matchers {
   test(
     "column group take preserves global row order across multiple files and batches"
   ) {
-    withFixture { (_, allocator, properties) =>
+    withFixture { (directory, allocator, properties) =>
       val files = (0 until 3).map { part =>
-        write(s"part-$part", part * 5000, 5000, allocator, properties)._2.head
+        fixture(directory, "take-parts", properties, s"part-$part")._2.head
       }
       val task = SegmentReadTask(
         1L,
@@ -253,9 +227,9 @@ class SegmentReaderTakeTest extends AnyFunSuite with Matchers {
   }
 
   test("take validates offsets and empty selections before native access") {
-    withFixture { (_, allocator, properties) =>
+    withFixture { (directory, allocator, properties) =>
       val (manifestTask, groups) =
-        write("segment", 0, 10, allocator, properties)
+        fixture(directory, "take-10", properties)
       val task = manifestTask.copy(layout = SegmentLayout.ColumnGroups(groups))
       val reader = open(task, allocator)
       try {
@@ -292,8 +266,8 @@ class SegmentReaderTakeTest extends AnyFunSuite with Matchers {
   test(
     "selected batches outlive the source reader and returned roots outlive the result"
   ) {
-    withFixture { (_, allocator, properties) =>
-      val (task, _) = write("segment", 0, 100, allocator, properties)
+    withFixture { (directory, allocator, properties) =>
+      val (task, _) = fixture(directory, "take-100", properties)
       val reader = open(task, allocator)
       val result = reader.take(Array[Long](2, 17, 99), Seq("100"))
       reader.close()
@@ -317,8 +291,8 @@ class SegmentReaderTakeTest extends AnyFunSuite with Matchers {
   }
 
   test("an import allocation failure closes the take result") {
-    withFixture { (_, allocator, properties) =>
-      val (task, _) = write("segment", 0, 100, allocator, properties)
+    withFixture { (directory, allocator, properties) =>
+      val (task, _) = fixture(directory, "take-100", properties)
       val child =
         allocator.newChildAllocator("take-import-failure", 0, 1024 * 1024)
       try {
@@ -338,7 +312,7 @@ class SegmentReaderTakeTest extends AnyFunSuite with Matchers {
 
   test("native take failures propagate and leave the reader usable") {
     withFixture { (directory, allocator, properties) =>
-      val (task, groups) = write("segment", 0, 10, allocator, properties)
+      val (task, groups) = fixture(directory, "take-10", properties)
       val file = directory.resolve(groups.head.filePaths.head)
       val hidden = file.resolveSibling(file.getFileName.toString + ".hidden")
       val reader = open(task, allocator)

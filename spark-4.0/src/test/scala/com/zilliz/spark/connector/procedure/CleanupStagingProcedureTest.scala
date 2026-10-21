@@ -7,7 +7,6 @@ import java.util.Comparator
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.io.LocalObjectStore
 import com.zilliz.milvus.storage.write.commit.{
   CleanupAction,
   Committer,
@@ -16,12 +15,13 @@ import com.zilliz.milvus.storage.write.commit.{
   JobWriteMode
 }
 import com.zilliz.milvus.storage.write.exec.StagingLayout
+import com.zilliz.milvus.storage.write.io.LocalWritableObjectStore
 
 class CleanupStagingProcedureTest extends AnyFunSuite with Matchers {
 
   test("cleanup_staging defaults to seven-day dry run and closes its store") {
     val dir = Files.createTempDirectory("cleanup-staging-defaults")
-    val store = new LocalObjectStore(dir.toString)
+    val store = new LocalWritableObjectStore(dir.toString)
     val layout = StagingLayout("files", "job-defaults")
     try {
       val owner = JobOwner("default", "events")
@@ -60,7 +60,7 @@ class CleanupStagingProcedureTest extends AnyFunSuite with Matchers {
     "cleanup_staging defaults to an auditable dry run and reports file-only deletion"
   ) {
     val dir = Files.createTempDirectory("cleanup-staging-procedure")
-    val store = new LocalObjectStore(dir.toString)
+    val store = new LocalWritableObjectStore(dir.toString)
     val layout = StagingLayout("files", "job-1")
     try {
       val owner = JobOwner("analytics", "events")
@@ -118,7 +118,7 @@ class CleanupStagingProcedureTest extends AnyFunSuite with Matchers {
     "cleanup_staging enforces a five minute retention floor and overflow bound"
   ) {
     val dir = Files.createTempDirectory("cleanup-staging-retention")
-    val store = new LocalObjectStore(dir.toString)
+    val store = new LocalWritableObjectStore(dir.toString)
     val owner = JobOwner("default", "events")
     try {
       intercept[IllegalArgumentException](

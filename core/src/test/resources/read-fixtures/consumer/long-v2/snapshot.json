@@ -1,0 +1,44 @@
+{
+  "format_version": 4,
+  "snapshot_info": {
+    "name": "fixed_read",
+    "id": 1,
+    "collection_id": 444,
+    "partition_ids": [
+      555
+    ],
+    "create_ts": 1000
+  },
+  "collection": {
+    "schema": {
+      "name": "fixed_read",
+      "fields": [
+        {
+          "fieldID": 100,
+          "name": "id",
+          "data_type": 5,
+          "nullable": false,
+          "is_primary_key": true,
+          "type_params": []
+        },
+        {
+          "fieldID": 101,
+          "name": "label",
+          "data_type": 21,
+          "nullable": true,
+          "type_params": [
+            {
+              "key": "max_length",
+              "value": "64"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "manifest_list": [
+    "segment.avro"
+  ],
+  "storagev2_manifest_list": [],
+  "indexes": []
+}

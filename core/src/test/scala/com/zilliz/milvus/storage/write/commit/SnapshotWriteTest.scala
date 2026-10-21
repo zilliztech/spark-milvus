@@ -8,7 +8,6 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.Inside
 
-import com.zilliz.milvus.storage.io.LocalObjectStore
 import com.zilliz.milvus.storage.manifest.SnapshotSegmentFixture
 import com.zilliz.milvus.storage.snapshot.{
   CollectionIndex,
@@ -17,6 +16,7 @@ import com.zilliz.milvus.storage.snapshot.{
   SnapshotOrigin,
   V2SegmentResolver
 }
+import com.zilliz.milvus.storage.write.io.LocalWritableObjectStore
 
 /** W8: what a snapshot write produces is the snapshot it copied, carrying the
   * indexes a build job made
@@ -109,14 +109,14 @@ class SnapshotWriteTest extends AnyFunSuite with Matchers with Inside {
   )
 
   private def catalog(directory: Path) = new SnapshotCatalog(
-    new LocalObjectStore(directory.toString),
+    new LocalWritableObjectStore(directory.toString),
     bucket = "",
     V2SegmentResolver.Unavailable
   )
 
-  private def withStore(f: (Path, LocalObjectStore) => Unit): Unit = {
+  private def withStore(f: (Path, LocalWritableObjectStore) => Unit): Unit = {
     val directory = Files.createTempDirectory("snapshot-write-")
-    val store = new LocalObjectStore(directory.toString)
+    val store = new LocalWritableObjectStore(directory.toString)
     try {
       source(directory)
       f(directory, store)

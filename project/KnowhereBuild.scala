@@ -32,6 +32,7 @@ object KnowhereBuild {
     Compile / unmanagedJars += Attributed.blank(knowhereApiJar.value),
     knowhereSmoke := {
       (Test / compile).value
+      (Test / copyResources).value
       val bundle = NativeBundle.validatedNativeBundle.value.getOrElse(
         sys.error(
           "Select the unified native bundle with -Dmilvus.native.bundle=/absolute/path/to/milvus-native-<platform>.jar"

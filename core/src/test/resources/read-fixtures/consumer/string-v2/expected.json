@@ -1,0 +1,17 @@
+{
+  "columns": [
+    "id",
+    "label"
+  ],
+  "rows": [
+    [
+      "dup",
+      null
+    ],
+    [
+      "活着",
+      "alive"
+    ]
+  ],
+  "rawRows": 4
+}

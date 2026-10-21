@@ -1,0 +1,7 @@
+{
+  "milvus.snapshot.mode": "true",
+  "milvus.snapshot.collection.id": "444",
+  "milvus.snapshot.partition.ids": "555",
+  "milvus.snapshot.schema.json": "{\"format_version\": 4, \"snapshot_info\": {\"name\": \"fixed_read\", \"id\": 1, \"collection_id\": 444, \"partition_ids\": [555], \"create_ts\": 1000}, \"collection\": {\"schema\": {\"name\": \"fixed_read\", \"fields\": [{\"fieldID\": 100, \"name\": \"id\", \"data_type\": 5, \"nullable\": false, \"is_primary_key\": true, \"type_params\": []}, {\"fieldID\": 101, \"name\": \"label\", \"data_type\": 21, \"nullable\": true, \"type_params\": [{\"key\": \"max_length\", \"value\": \"64\"}]}]}}, \"manifest_list\": [\"segment.avro\"], \"storagev2_manifest_list\": [], \"indexes\": []}",
+  "milvus.snapshot.v2.segments": "[{\"segment_id\": 777, \"partition_id\": 555, \"num_of_rows\": 4, \"storage_version\": 2, \"column_groups\": [{\"field_ids\": [0, 1, 100, 101], \"file_paths\": [\"data.parquet\"], \"file_row_counts\": [4], \"slot_field_id\": 103}], \"delta_logs\": [{\"log_id\": 1, \"log_path\": \"delete.parquet\", \"entries_num\": 2}]}]"
+}

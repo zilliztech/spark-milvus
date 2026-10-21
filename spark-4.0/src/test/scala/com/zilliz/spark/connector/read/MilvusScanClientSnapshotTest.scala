@@ -2,6 +2,8 @@ package com.zilliz.spark.connector.read
 
 import java.{util => ju}
 import java.io.IOException
+import java.nio.file.{Files, Path}
+import java.util.Comparator
 
 import org.apache.spark.sql.types.{
   ArrayType,
@@ -18,12 +20,16 @@ import org.apache.spark.sql.types.{
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 
-import com.zilliz.milvus.client.api.MilvusCollectionInfo
 import com.zilliz.milvus.storage.compat.backup.BackupMetaReader
 import com.zilliz.milvus.storage.compat.backup.BackupSnapshotSource
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.delete.DeletePlan
-import com.zilliz.milvus.storage.io.{FailingObjectStore, FileInfo, ObjectStore}
+import com.zilliz.milvus.storage.io.{
+  FailingObjectStore,
+  FileInfo,
+  ObjectStore,
+  ReadFixtures
+}
 import com.zilliz.milvus.storage.read.plan.{
   DeleteFileListing,
   DeleteSource,
@@ -48,10 +54,6 @@ import com.zilliz.milvus.storage.snapshot.json.{
 }
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
 import com.zilliz.milvus.storage.stats.PrimaryKeyStats
-import com.zilliz.milvus.storage.write.stats.{
-  PrimaryKeyStatsBuilder,
-  PrimaryKeyStatsEncoder
-}
 import com.zilliz.spark.connector.options.{MilvusOption, StorageOptions}
 import com.zilliz.spark.connector.table.MilvusTable
 import com.zilliz.spark.connector.table.OptionStringsSnapshotSource
@@ -1173,7 +1175,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
   }
 
   test(
-    "client-derived schema allows user fields named legacy metadata aliases"
+    "snapshot schema allows user fields named legacy metadata aliases"
   ) {
     val options = Map(
       MilvusOption.SnapshotMode -> "true",
@@ -1519,24 +1521,29 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       fields = Seq(primaryKey)
     )
     val values = Seq(101L, 202L, 303L)
-    val statistics = values.map { value =>
-      val builder = new PrimaryKeyStatsBuilder(
-        primaryKey.fieldID,
-        primaryKey.dataType
-      )
-      builder.addLong(value)
-      value -> builder.build()
-    }
-    statistics.foreach { case (value, stats) =>
+    val directory = Files.createTempDirectory("scan-bloom-fixtures-")
+    val stored =
+      try {
+        ReadFixtures.copyTo("stats/primary-key", directory)
+        scala.collection.mutable.Map(values.map { value =>
+          s"stats/$value" -> Files.readAllBytes(
+            directory.resolve(s"long-$value.json")
+          )
+        }: _*)
+      } finally {
+        val paths = Files.walk(directory)
+        try
+          paths
+            .sorted(Comparator.reverseOrder[Path]())
+            .forEach(path => Files.delete(path))
+        finally paths.close()
+      }
+    values.foreach { value =>
+      val stats = PrimaryKeyStats.fromBytes(stored(s"stats/$value")).head
       values.filterNot(_ == value).foreach { other =>
         assert(!stats.mightContainLong(other))
       }
     }
-    val stored = scala.collection.mutable.Map(
-      statistics.map { case (value, stats) =>
-        s"stats/$value" -> PrimaryKeyStatsEncoder.toBytes(stats)
-      }: _*
-    )
     var storeOpens = 0
     var statisticsReads = 0
 

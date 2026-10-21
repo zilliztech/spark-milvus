@@ -3,34 +3,17 @@ package com.zilliz.milvus.storage.codec
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.write.codec.ArrayEncoder
-import io.milvus.grpc.schema.DataType
+import io.milvus.grpc.schema.{IntArray, ScalarField}
 
-/** Int8, Int16 and Int32 elements share `IntData`, so the element type is what
-  * bounds them, as the Milvus proxy checks on insert
-  * (internal/proxy/fieldvalidator/validate_util.go verifyOverflowByRange).
-  */
 class ArrayCodecTest extends AnyFunSuite with Matchers {
-
-  test("Int8 and Int16 elements outside their range are refused") {
-    Seq(128, -129).foreach { bad =>
-      intercept[IllegalArgumentException](
-        ArrayEncoder.encode(DataType.Int8, Seq(bad))
-      ).getMessage should include(bad.toString)
+  test(
+    "integer array payloads preserve Int8, Int16 and Int32 boundary values"
+  ) {
+    Seq(Seq(-128, 127), Seq(128, -32768, 32767), Seq(Int.MaxValue)).foreach {
+      values =>
+        val field =
+          ScalarField(data = ScalarField.Data.IntData(IntArray(data = values)))
+        ArrayCodec.elements(field.toByteArray) shouldBe values
     }
-    Seq(32768, -32769).foreach { bad =>
-      intercept[IllegalArgumentException](
-        ArrayEncoder.encode(DataType.Int16, Seq(bad))
-      )
-    }
-    ArrayCodec.elements(
-      ArrayEncoder.encode(DataType.Int8, Seq(-128, 127))
-    ) shouldBe Seq(-128, 127)
-    ArrayCodec.elements(
-      ArrayEncoder.encode(DataType.Int16, Seq(128, -32768, 32767))
-    ) shouldBe Seq(128, -32768, 32767)
-    ArrayCodec.elements(
-      ArrayEncoder.encode(DataType.Int32, Seq(Int.MaxValue))
-    ) shouldBe Seq(Int.MaxValue)
   }
 }

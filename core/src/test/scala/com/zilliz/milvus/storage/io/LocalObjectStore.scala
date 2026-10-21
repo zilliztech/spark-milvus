@@ -4,8 +4,6 @@ import java.io.IOException
 import java.nio.file.{Files, NoSuchFileException, Path, Paths}
 import scala.collection.mutable
 
-import com.zilliz.milvus.storage.write.io.WritableObjectStore
-
 /** An [[ObjectStore]] over the local filesystem, for tests only.
   *
   * Production has exactly one store, [[NativeObjectStore]], which reaches every
@@ -17,7 +15,7 @@ import com.zilliz.milvus.storage.write.io.WritableObjectStore
   * Keys are paths. An absolute key is used as it stands; a relative one
   * resolves against `root`, which stands in for a bucket.
   */
-final class LocalObjectStore(root: String = "") extends WritableObjectStore {
+class LocalObjectStore(root: String = "") extends ObjectStore {
 
   private var closed = false
 
@@ -78,24 +76,12 @@ final class LocalObjectStore(root: String = "") extends WritableObjectStore {
     } finally channel.close()
   }
 
-  override def write(key: String, data: Array[Byte]): Unit = {
-    val target = resolve(key)
-    Option(target.getParent).foreach(Files.createDirectories(_))
-    Files.write(target, data)
-  }
-
-  override def createDir(key: String, recursive: Boolean): Unit =
-    Files.createDirectories(resolve(key))
-
-  override def delete(key: String): Unit =
-    Files.deleteIfExists(resolve(key))
-
   override def close(): Unit = closed = true
 
   /** Exposed so a test can assert the store was released. */
   def isClosed: Boolean = closed
 
-  private def resolve(key: String): Path = {
+  protected def resolve(key: String): Path = {
     val stripped = stripScheme(key)
     val path = Paths.get(stripped)
     if (path.isAbsolute || root.isEmpty) path else Paths.get(root, stripped)
@@ -111,8 +97,7 @@ final class LocalObjectStore(root: String = "") extends WritableObjectStore {
 /** A store whose every read fails, for the suites that assert an error reaches
   * the caller instead of turning into an empty result.
   */
-final class FailingObjectStore(failure: => Throwable)
-    extends WritableObjectStore {
+final class FailingObjectStore(failure: => Throwable) extends ObjectStore {
 
   override def readAll(key: String): Array[Byte] = throw failure
 
@@ -129,12 +114,6 @@ final class FailingObjectStore(failure: => Throwable)
       length: Long,
       fileSize: Long
   ): Array[Byte] = throw failure
-
-  override def write(key: String, data: Array[Byte]): Unit = throw failure
-
-  override def createDir(key: String, recursive: Boolean): Unit = throw failure
-
-  override def delete(key: String): Unit = throw failure
 
   override def close(): Unit = ()
 }

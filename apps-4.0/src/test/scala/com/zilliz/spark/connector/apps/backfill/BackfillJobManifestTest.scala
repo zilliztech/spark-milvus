@@ -8,9 +8,9 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
-import com.zilliz.milvus.storage.io.LocalObjectStore
 import com.zilliz.milvus.storage.write.commit.{CommittedSegment, JobManifest}
 import com.zilliz.milvus.storage.write.exec.StagingLayout
+import com.zilliz.milvus.storage.write.io.LocalWritableObjectStore
 
 /** Two backfills in one application shared a job id, and the second one's
   * manifest versions were silently dropped.
@@ -47,9 +47,9 @@ class BackfillJobManifestTest
     segmentId = Some(30L)
   )
 
-  private def withStore(f: (LocalObjectStore, Path) => Unit): Unit = {
+  private def withStore(f: (LocalWritableObjectStore, Path) => Unit): Unit = {
     val dir = Files.createTempDirectory("backfill-job-manifest")
-    try f(new LocalObjectStore(dir.toString), dir)
+    try f(new LocalWritableObjectStore(dir.toString), dir)
     finally
       Files
         .walk(dir)

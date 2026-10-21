@@ -7,12 +7,15 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.codec.SparseFloatVectorConverter
-import com.zilliz.milvus.storage.write.codec.SparseFloatVectorEncoder
 
 /** Checked against `SparseFloatVectorConverter`, the decoder the row path uses,
   * so the two paths cannot read the same bytes differently.
   */
 class MilvusSparseVectorColumnTest extends AnyFunSuite with Matchers {
+
+  // Golden uint32/float32 little-endian pairs, independent of the writer.
+  private def bytes(hex: String): Array[Byte] =
+    hex.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
 
   private def withVector(rows: Seq[Array[Byte]])(
       body: VarBinaryVector => Unit
@@ -43,9 +46,8 @@ class MilvusSparseVectorColumnTest extends AnyFunSuite with Matchers {
   test("a sparse vector reads back as the entries it was encoded from") {
     // Milvus requires the values be finite and non-negative.
     val entries = Seq(3L -> 1.5f, 17L -> 2.25f, 900L -> 0.5f)
-    val bytes =
-      SparseFloatVectorEncoder.encodeSparseFloatVectorEntries(entries)
-    withVector(Seq(bytes)) { vector =>
+    val encoded = bytes("030000000000c03f1100000000001040840300000000003f")
+    withVector(Seq(encoded)) { vector =>
       val column = MilvusSparseVectorColumn(vector)
       column.dataType shouldBe MapType(
         LongType,
@@ -53,7 +55,7 @@ class MilvusSparseVectorColumnTest extends AnyFunSuite with Matchers {
         valueContainsNull = false
       )
       entriesOf(column, 0) shouldBe
-        SparseFloatVectorConverter.decodeSparseFloatVector(bytes)
+        SparseFloatVectorConverter.decodeSparseFloatVector(encoded)
       entriesOf(column, 0) shouldBe entries
     }
   }
@@ -64,9 +66,11 @@ class MilvusSparseVectorColumnTest extends AnyFunSuite with Matchers {
     val first = Seq(1L -> 1.0f, 2L -> 2.0f)
     val second = Seq(10L -> 10.0f)
     val third = Seq(20L -> 20.0f, 21L -> 21.0f, 22L -> 22.0f)
-    val rows = Seq(first, second, third).map(
-      SparseFloatVectorEncoder.encodeSparseFloatVectorEntries
-    )
+    val rows = Seq(
+      "010000000000803f0200000000000040",
+      "0a00000000002041",
+      "140000000000a041150000000000a841160000000000b041"
+    ).map(bytes)
     withVector(rows) { vector =>
       val column = MilvusSparseVectorColumn(vector)
       entriesOf(column, 0) shouldBe first
@@ -87,10 +91,8 @@ class MilvusSparseVectorColumnTest extends AnyFunSuite with Matchers {
   // negative and the entry would be lost.
   test("an index above Int.MaxValue survives") {
     val big = 0xfffffff0L
-    val bytes = SparseFloatVectorEncoder.encodeSparseFloatVectorEntries(
-      Seq(big -> 7.5f)
-    )
-    withVector(Seq(bytes)) { vector =>
+    val encoded = bytes("f0ffffff0000f040")
+    withVector(Seq(encoded)) { vector =>
       entriesOf(MilvusSparseVectorColumn(vector), 0) shouldBe Seq(big -> 7.5f)
     }
   }
@@ -103,9 +105,7 @@ class MilvusSparseVectorColumnTest extends AnyFunSuite with Matchers {
       vector.setNull(0)
       vector.setSafe(
         1,
-        SparseFloatVectorEncoder.encodeSparseFloatVectorEntries(
-          Seq(5L -> 5.5f)
-        )
+        bytes("050000000000b040")
       )
       vector.setValueCount(2)
       val column = MilvusSparseVectorColumn(vector)

@@ -8,9 +8,9 @@ import scala.collection.mutable
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.io.LocalObjectStore
 import com.zilliz.milvus.storage.write.commit.{CommittedSegment, Committer}
 import com.zilliz.milvus.storage.write.exec.StagingLayout
+import com.zilliz.milvus.storage.write.io.LocalWritableObjectStore
 import com.zilliz.spark.connector.uat.{UatResources, UatWriteScope}
 
 class UatResourcesTest extends AnyFunSuite with Matchers {
@@ -30,7 +30,7 @@ class UatResourcesTest extends AnyFunSuite with Matchers {
   ) {
     withDirectory { directory =>
       val scope = new UatWriteScope(directory.toString, "before-write")
-      val store = new LocalObjectStore()
+      val store = new LocalWritableObjectStore()
       intercept[IllegalArgumentException] {
         scope.run(store)(throw new IllegalArgumentException("invalid input"))
       }
@@ -46,10 +46,10 @@ class UatResourcesTest extends AnyFunSuite with Matchers {
       val base = directory.toString
       val first = new UatWriteScope(base, "write-read")
       val other = new UatWriteScope(base, "write-read")
-      val observer = new LocalObjectStore()
+      val observer = new LocalWritableObjectStore()
       val sentinel = s"${other.root}/staging/other/_committed"
       observer.write(sentinel, "other".getBytes(StandardCharsets.UTF_8))
-      val store = new LocalObjectStore()
+      val store = new LocalWritableObjectStore()
       val layout = StagingLayout(first.root, "job")
       val failure = new AssertionError("readback failed after commit")
       val thrown = intercept[AssertionError] {
@@ -72,7 +72,7 @@ class UatResourcesTest extends AnyFunSuite with Matchers {
       val retry = new UatWriteScope(base, "write-read")
       retry.root should not be first.root
       retry.root should not be other.root
-      val retryStore = new LocalObjectStore()
+      val retryStore = new LocalWritableObjectStore()
       val retryLayout = StagingLayout(retry.root, "retry")
       retry.run(retryStore) {
         new Committer(retryStore, retryLayout).commit(Seq.empty, nowMillis = 2L)
@@ -88,8 +88,8 @@ class UatResourcesTest extends AnyFunSuite with Matchers {
     withDirectory { directory =>
       val first = new UatWriteScope(directory.toString, "scenario")
       val second = new UatWriteScope(directory.toString, "scenario")
-      val a = new LocalObjectStore()
-      val b = new LocalObjectStore()
+      val a = new LocalWritableObjectStore()
+      val b = new LocalWritableObjectStore()
       val keyA = s"${first.root}/staging/a/_committed"
       val keyB = s"${second.root}/staging/b/_committed"
       first.run(a) {
@@ -112,7 +112,7 @@ class UatResourcesTest extends AnyFunSuite with Matchers {
   ) {
     withDirectory { directory =>
       val scope = new UatWriteScope(directory.toString, "debug")
-      val store = new LocalObjectStore()
+      val store = new LocalWritableObjectStore()
       val key = s"${scope.root}/staging/job/_committed"
       intercept[AssertionError] {
         scope.run(store, keep = true) {

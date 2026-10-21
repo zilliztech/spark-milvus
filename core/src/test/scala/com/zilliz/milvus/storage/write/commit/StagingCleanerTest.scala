@@ -8,8 +8,9 @@ import java.util.Comparator
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.io.{FileInfo, LocalObjectStore}
+import com.zilliz.milvus.storage.io.FileInfo
 import com.zilliz.milvus.storage.write.exec.StagingLayout
+import com.zilliz.milvus.storage.write.io.LocalWritableObjectStore
 import com.zilliz.milvus.storage.write.io.WritableObjectStore
 
 class StagingCleanerTest extends AnyFunSuite with Matchers {
@@ -18,9 +19,9 @@ class StagingCleanerTest extends AnyFunSuite with Matchers {
   private val retentionMillis = 100000L
   private val oldMillis = 2000L
 
-  private def withStore(f: (LocalObjectStore, Path) => Unit): Unit = {
+  private def withStore(f: (LocalWritableObjectStore, Path) => Unit): Unit = {
     val dir = Files.createTempDirectory("staging-cleaner")
-    val store = new LocalObjectStore(dir.toString)
+    val store = new LocalWritableObjectStore(dir.toString)
     try f(store, dir)
     finally {
       store.close()

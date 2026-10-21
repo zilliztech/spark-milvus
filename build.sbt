@@ -347,7 +347,7 @@ def sparkProject(l: Versions.SparkLine): Project =
 
 lazy val spark35 = sparkProject(Versions.line("3.5"))
   .settings(uatScenarios, localCollectionSuites, searchMergeSuite)
-  // The local collection suites build collections with core's segment fixtures.
+  // The local collection suites consume core's checked read fixtures and resources.
   .dependsOn(core % "test->test")
   // Arrow 12, which Spark 3.5 ships, cannot allocate on JDK 21 (its MemoryUtil
   // looks up DirectByteBuffer(long, int), gone in 21), so the line's test JVM

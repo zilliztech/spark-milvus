@@ -20,12 +20,12 @@ import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.jni.storage.NativeStorageLibrary
 import com.zilliz.milvus.jni.vector.NativeVectorLibrary
-import com.zilliz.milvus.storage.io.LocalObjectStore
 import com.zilliz.milvus.storage.snapshot.{
   SegmentIndexes,
   SnapshotCatalog,
   V2SegmentResolver
 }
+import com.zilliz.milvus.storage.write.io.LocalWritableObjectStore
 import com.zilliz.spark.connector.extensions.{
   MilvusNearestByJoinExec,
   MilvusSparkPlugin,
@@ -33,10 +33,6 @@ import com.zilliz.spark.connector.extensions.{
 }
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.testkit.LocalMilvusCollection
-import com.zilliz.spark.connector.testkit.LocalMilvusCollection.{
-  Entity,
-  Segment
-}
 
 /** `buildIndex` and `writeSnapshot` on a Milvus table's DataFrame, and the
   * `table` argument of `CALL milvus.system.build_index` and `write_snapshot`
@@ -66,19 +62,6 @@ class MilvusDataFrameTest
   private var options: Map[String, String] = Map.empty
   private var spark: SparkSession = _
 
-  private val segments = Seq(30L, 31L).map(segment =>
-    Segment(
-      segment,
-      (0 until 8).map(row =>
-        Entity(
-          segment * 100 + row,
-          Array(row.toFloat + 1f, (segment - 29).toFloat),
-          Some(row % 2L)
-        )
-      )
-    )
-  )
-
   override def beforeAll(): Unit = {
     try {
       NativeStorageLibrary.load()
@@ -90,7 +73,7 @@ class MilvusDataFrameTest
     }
     if (available && arrowAllocates) {
       directory = Files.createTempDirectory("milvus-dataframe-")
-      options = LocalMilvusCollection.write(directory, 2, segments)
+      options = LocalMilvusCollection.load("api", directory)
       spark = SparkSession
         .builder()
         .master("local[2]")
@@ -246,7 +229,7 @@ class MilvusDataFrameTest
     // own id and name, as each segment records it: a restore takes the
     // declaration, a read the segments' records.
     val back = new SnapshotCatalog(
-      new LocalObjectStore(directory.toString),
+      new LocalWritableObjectStore(directory.toString),
       bucket = "",
       V2SegmentResolver.Unavailable
     ).read(written.head.getAs[String]("snapshot"))

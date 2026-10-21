@@ -105,13 +105,35 @@ are named settings in the same file.
 | `project/ReleaseArtifacts.scala` | JVM release classpath, sources, API documentation and artifact metadata |
 | `project/plugins.sbt` | Build plugins and their meta-build dependencies |
 
+## Fixed inputs for read tests
+
+Public read tests consume SHA256-checked files under
+`core/src/test/resources/read-fixtures` and the native-vector test resources.
+Existing files in `core/src/test/data` also have a checksum manifest; their
+original locations stay stable.
+`ReadFixtures.copyTo` verifies and copies a named group; it never regenerates a
+missing or corrupt sample. Run `python3 scripts/ci/check_read_fixtures.py` to
+verify all files and the selected read suites' production dependency boundary.
+The same check runs in public CI, without the private knowledge submodule.
+
+Each sample group records its origin and expected results. Changes to binary
+samples require a deliberate regeneration and review of both expected results
+and hashes. `scripts/fixtures/generate_read_inputs.py` is an explicit maintenance
+command for the synthetic V2 consumer/integration groups (PyArrow 22.0.0 and
+fastavro 1.12.2); builds and CI never run it. V3 and Knowhere samples record the
+producer revisions and native bundle used when they were frozen. Writer,
+index-build and control-plane assertions remain in their existing migration
+scope; they are not evidence for the public reader's independence.
+
 ## Tests that need the native library
 
 Suites that call into C check for upstream `libmilvus-storage-jni` first and cancel
 themselves when it is absent, so a machine without it still gets a green run
 with those suites reported as canceled rather than failed:
 
-- `StorageNativeTest`, `WriterRoundTripTest`, `SegmentWriterTest` and `SegmentReaderTakeTest` in core
+- `StorageNativeTest`, `NativeSegmentReadTest` and `SegmentReaderTakeTest` in core
+  read frozen inputs. `NativeWritableObjectStoreTest`, `WriterRoundTripTest` and
+  `SegmentWriterTest` cover the separate write contracts
 - `MilvusV3PartitionWriterLifecycleTest` and `HadoopEndpointSnapshotTest` in spark-4.0
 - `nearestby.NearestByJoinTest`, `nearestby.FrameSearchTest` and
   `implicits.MilvusDataFrameTest`, which live in spark-4.0's tests and are
@@ -153,8 +175,19 @@ and pending tests, and completed or aborted suites. Name the native or UAT
 suites that canceled and state the missing library or environment prerequisite;
 canceled tests did not pass and provide no coverage for that run.
 
-`integration-4.0` needs a real Milvus on 19530 and MinIO on 9000. It is outside
-the root aggregate, compiles in CI and is not run there.
+`integration-4.0` is outside the root aggregate and compiles in CI. Its write
+and backfill suites require a live Milvus and object store. The read-only
+`MilvusDataSourceTest` instead consumes the committed
+`core/src/test/resources/read-fixtures/integration/v2` files. Upload that directory
+unchanged to the root of a dedicated test bucket using your object-store tooling,
+then set `MILVUS_READ_IT_OPTIONS` to a local JSON file of connector options:
+`fs.storage_type=remote`, endpoint, bucket, credentials and
+`milvus.snapshot.path=snapshot.json`. For S3-compatible stores also configure the
+region, SSL and virtual-host settings as needed. The fixture uses bucket-relative
+keys; `fs.root_path` does not prepend a prefix to remote keys. Keep credentials out of Git.
+Run `sbt 'integration40/testOnly *MilvusDataSourceTest'` with the native bundle.
+The suite only reads files; it does not connect to Milvus, create collections,
+upload data or delete the uploaded fixture.
 
 A Helm chart for running that suite on Kubernetes is under
 `deploy/helm/spark-milvus-integration` (see its README); it runs one Spark local-mode
@@ -484,8 +517,9 @@ sbt -java-home "$JAVA_HOME" -Dmilvus.native.bundle=/absolute/path/to/milvus-nati
   'spark40/Test/runMain com.zilliz.spark.connector.read.LocalEndToEndSmoke'
 ```
 
-The [release consumer](releasing.md#consumer-gates-and-ci-triggers) compiles only
-the smoke fixtures in an independent project and loads production classes from
+The [release consumer](releasing.md#consumer-gates-and-ci-triggers) instead compiles
+`ReadOnlyConsumerSmoke` and `ReadFixtures` in an independent project, embeds the
+checked-in V2/V3 and index samples, and loads production classes from
 the candidate using real `spark-submit --packages`. The test-only
 `milvus.smoke.master` property selects `local-cluster` for an independent executor
 JVM; the default remains `local[4]`. This validates native operations on local
@@ -586,8 +620,9 @@ filters, ignored tests or cancellation conditions to make the run pass.
 Existing native-library and UAT cancellation conditions remain part of the test
 setup; report them and the actual counts as described in
 [Tests that need the native library](#tests-that-need-the-native-library).
-The root run does not include `integration40/test`, which requires live Milvus
-and MinIO. Additional Scala cross-version checks, integration tests, native
+The root run does not include `integration40/test`; its read suite requires a
+real object store, and its write suites also require Milvus. Additional Scala
+cross-version checks, integration tests, native
 builds and publication follow the task's scope and authorization.
 
 Run `sbt checkCapabilityIndex` before every commit that touches

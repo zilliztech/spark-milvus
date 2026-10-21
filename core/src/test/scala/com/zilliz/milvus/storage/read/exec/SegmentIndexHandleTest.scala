@@ -310,7 +310,7 @@ class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
         """{"meta":[{"name":"HNSW","slice_num":2,"total_len":19}]}""".getBytes(
           UTF_8
         )
-      store.write("SLICE_META", meta)
+      Files.write(directory.resolve("SLICE_META"), meta)
       var payload: Payload = null
       val decoder = new IndexFileDecoder {
         override def decode(bytes: Array[Byte]): DecodedIndexFile = {
@@ -327,7 +327,7 @@ class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
       val excessive =
         """{"meta":[{"name":"HNSW","slice_num":2,"total_len":19},{"name":"extra","slice_num":2,"total_len":19}]}"""
           .getBytes(UTF_8)
-      store.write("SLICE_META", excessive)
+      Files.write(directory.resolve("SLICE_META"), excessive)
       val tooMany = intercept[IllegalArgumentException] {
         SegmentIndexHandle.open(missing, layout, false, 10L, store, decoder)
       }

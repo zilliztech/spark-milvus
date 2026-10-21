@@ -1,0 +1,42 @@
+package com.zilliz.milvus.storage.write.stats
+
+import org.scalatest.funsuite.AnyFunSuite
+import org.scalatest.matchers.should.Matchers
+
+import com.zilliz.milvus.storage.stats.BlockedBloomFilter
+
+class BlockedBloomFilterBuilderTest extends AnyFunSuite with Matchers {
+
+  test(
+    "sizing follows blobloom: 3000 keys at 0.001 is 100 blocks and 12 hashes"
+  ) {
+    BlockedBloomFilterBuilder.optimize(3000L, 0.001) shouldBe ((51200L, 12))
+    // a small capacity still gets one whole block; 17 bits per key at 0.001
+    val (bits, k) = BlockedBloomFilterBuilder.optimize(1L, 0.001)
+    bits shouldBe 512L
+    k should be >= 2
+    BlockedBloomFilterBuilder.optimize(100000L, 0.001)._1 shouldBe 1700352L
+  }
+
+  test("what was added is found; the empty filter finds nothing") {
+    val filter = BlockedBloomFilterBuilder.sized(1000L)
+    filter.build().mightContain(42L) shouldBe false
+    (1L to 1000L).foreach(i => filter.add(i * 0x9e3779b97f4a7c15L))
+    val built = filter.build()
+    (1L to 1000L).forall(i =>
+      built.mightContain(i * 0x9e3779b97f4a7c15L)
+    ) shouldBe true
+  }
+
+  test(
+    "the JSON form round-trips and encodes a block as 64 little-endian bytes"
+  ) {
+    val filter = BlockedBloomFilterBuilder.sized(10L)
+    filter.add(0x0000000100000000L) // h1 = 1, h2 = 0: block 0
+    val json = BlockedBloomFilterEncoder.toJson(filter.build())
+    json should startWith("{\"k\":" + filter.k + ",\"b\":[\"")
+    val back = BlockedBloomFilter.fromJson(filter.k, Seq(json.split("\"")(5)))
+    back shouldBe filter.build()
+    back.mightContain(0x0000000100000000L) shouldBe true
+  }
+}

@@ -22,10 +22,6 @@ import com.zilliz.spark.connector.extensions.{
 }
 import com.zilliz.spark.connector.implicits._
 import com.zilliz.spark.connector.testkit.LocalMilvusCollection
-import com.zilliz.spark.connector.testkit.LocalMilvusCollection.{
-  Entity,
-  Segment
-}
 
 /** The connector's DataFrame methods and SQL from a Spark Connect client, on
   * the 4.x lines
@@ -57,19 +53,6 @@ class ConnectSessionTest
   private var port = 0
   private var spark: SparkSession = _
 
-  private val segments = Seq(30L, 31L).map(segment =>
-    Segment(
-      segment,
-      (0 until 8).map(row =>
-        Entity(
-          segment * 100 + row,
-          Array(row.toFloat + 1f, (segment - 29).toFloat),
-          Some(row % 2L)
-        )
-      )
-    )
-  )
-
   override def beforeAll(): Unit = {
     try {
       NativeStorageLibrary.load()
@@ -81,7 +64,7 @@ class ConnectSessionTest
     }
     if (available && clientClasspath.nonEmpty) {
       directory = Files.createTempDirectory("milvus-connect-")
-      options = LocalMilvusCollection.write(directory, 2, segments)
+      options = LocalMilvusCollection.load("api", directory)
       port = {
         val socket = new ServerSocket(0)
         try socket.getLocalPort
@@ -121,7 +104,7 @@ class ConnectSessionTest
   }
 
   /** Runs the client program and returns its lines by their first field. */
-  private def client(): Map[String, Seq[Seq[String]]] = {
+  private def client(program: String): Map[String, Seq[Seq[String]]] = {
     val output = Files.createTempFile("milvus-connect-client-", ".log")
     try {
       val java = new File(System.getProperty("java.home"), "bin/java").getPath
@@ -131,7 +114,7 @@ class ConnectSessionTest
         "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
         "-cp",
         clientClasspath.get,
-        ConnectClientProgram.getClass.getName.stripSuffix("$"),
+        program,
         s"sc://127.0.0.1:$port",
         line
       ) ++ options.toSeq.sorted.map { case (key, value) => s"$key=$value" }
@@ -149,7 +132,7 @@ class ConnectSessionTest
       printed.linesIterator
         .map(_.split('\t').toSeq)
         .filter(fields =>
-          Set("built", "written", "filtered", "method", "sql", "views")
+          Set("built", "written", "filtered", "method", "sql", "views", "rows")
             .contains(fields.head)
         )
         .toSeq
@@ -158,13 +141,33 @@ class ConnectSessionTest
     } finally Files.deleteIfExists(output)
   }
 
+  test("a Connect client reads fixed indexes without building them") {
+    assume(available, "the native libraries are not on this machine")
+    assume(
+      clientClasspath.nonEmpty,
+      "the build passes the Connect client's classpath in milvus.test.connect.client.classpath"
+    )
+    val printed =
+      client(ConnectReadClientProgram.getClass.getName.stripSuffix("$"))
+    printed("rows") shouldBe Seq(Seq("16"))
+    val nearest = Seq(Seq("q1", "3000"), Seq("q1", "3100"), Seq("q1", "3101"))
+    if (line == "4.2") printed("method") shouldBe nearest
+    else
+      printed("method").head.head should include(
+        "nearestByJoin runs on a classic Spark session; on Spark Connect write " +
+          "it in SQL as nearest_by_join"
+      )
+    printed("sql") shouldBe nearest
+    printed("views") shouldBe Seq(Seq("0"))
+  }
+
   test("a Connect client builds, delivers and searches as a classic one does") {
     assume(available, "the native libraries are not on this machine")
     assume(
       clientClasspath.nonEmpty,
       "the build passes the Connect client's classpath in milvus.test.connect.client.classpath"
     )
-    val printed = client()
+    val printed = client(ConnectClientProgram.getClass.getName.stripSuffix("$"))
 
     val classic = spark.read
       .format("milvus")

@@ -1,0 +1,17 @@
+{
+  "columns": [
+    "id",
+    "label"
+  ],
+  "rows": [
+    [
+      1,
+      null
+    ],
+    [
+      3,
+      "alive"
+    ]
+  ],
+  "rawRows": 4
+}

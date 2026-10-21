@@ -7,7 +7,7 @@ import java.nio.ByteBuffer
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.io.LocalObjectStore
+import com.zilliz.milvus.storage.write.io.LocalWritableObjectStore
 
 /** The index objects a build writes, read back by the decoder that loads them
   * (docs/design/projects/spark-milvus/architecture/vector-search.html sections
@@ -54,7 +54,7 @@ class IndexFileWriteTest extends AnyFunSuite with Matchers {
 
   test("a payload comes back from the object it was written to") {
     val directory = Files.createTempDirectory("index-write-test-")
-    val store = new LocalObjectStore(directory.toString)
+    val store = new LocalWritableObjectStore(directory.toString)
     val bytes = Array.tabulate(1000)(index => (index % 251).toByte)
     try {
       val written = SegmentIndexObjects.write(
@@ -91,7 +91,7 @@ class IndexFileWriteTest extends AnyFunSuite with Matchers {
 
   test("a payload longer than a slice is split and SLICE_META says how") {
     val directory = Files.createTempDirectory("index-slice-test-")
-    val store = new LocalObjectStore(directory.toString)
+    val store = new LocalWritableObjectStore(directory.toString)
     val bytes = Array.tabulate(2500)(index => (index % 97).toByte)
     try {
       val written = SegmentIndexObjects.write(
@@ -140,7 +140,7 @@ class IndexFileWriteTest extends AnyFunSuite with Matchers {
 
   test("a nullable index says so, and its bitmap is an object of its own") {
     val directory = Files.createTempDirectory("index-nullable-test-")
-    val store = new LocalObjectStore(directory.toString)
+    val store = new LocalWritableObjectStore(directory.toString)
     val index = Array.tabulate(64)(_.toByte)
     val bitmap = Array[Byte](0x0f, 0x33)
     try {
@@ -168,7 +168,7 @@ class IndexFileWriteTest extends AnyFunSuite with Matchers {
   }
 
   test("an empty or repeated payload is refused before anything is written") {
-    val store = new LocalObjectStore(
+    val store = new LocalWritableObjectStore(
       Files.createTempDirectory("index-refuse-test-").toString
     )
     try {

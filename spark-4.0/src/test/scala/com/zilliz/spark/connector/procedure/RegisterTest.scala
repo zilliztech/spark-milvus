@@ -7,13 +7,13 @@ import scala.util.{Failure, Success}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.io.LocalObjectStore
 import com.zilliz.milvus.storage.write.commit.{
   CommittedSegment,
   Committer,
   Registration
 }
 import com.zilliz.milvus.storage.write.exec.StagingLayout
+import com.zilliz.milvus.storage.write.io.LocalWritableObjectStore
 import io.milvus.grpc.common.Status
 
 /** The register procedure against a local store and a stand-in for Milvus. */
@@ -25,10 +25,14 @@ class RegisterTest extends AnyFunSuite with Matchers {
   )
 
   private def withStore(
-      f: (LocalObjectStore, StagingLayout) => Unit
+      f: (LocalWritableObjectStore, StagingLayout) => Unit
   ): Unit = {
     val dir = Files.createTempDirectory("register")
-    try f(new LocalObjectStore(dir.toString), StagingLayout("files", "job-1"))
+    try
+      f(
+        new LocalWritableObjectStore(dir.toString),
+        StagingLayout("files", "job-1")
+      )
     finally
       Files
         .walk(dir)

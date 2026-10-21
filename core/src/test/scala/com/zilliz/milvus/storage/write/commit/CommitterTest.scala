@@ -7,8 +7,9 @@ import java.util.Comparator
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.io.{FileInfo, LocalObjectStore}
+import com.zilliz.milvus.storage.io.FileInfo
 import com.zilliz.milvus.storage.write.exec.StagingLayout
+import com.zilliz.milvus.storage.write.io.LocalWritableObjectStore
 import com.zilliz.milvus.storage.write.io.WritableObjectStore
 
 class CommitterTest extends AnyFunSuite with Matchers {
@@ -27,12 +28,12 @@ class CommitterTest extends AnyFunSuite with Matchers {
   )
 
   private def withStore(
-      f: (LocalObjectStore, StagingLayout, Path) => Unit
+      f: (LocalWritableObjectStore, StagingLayout, Path) => Unit
   ): Unit = {
     val dir = Files.createTempDirectory("committer")
     try
       f(
-        new LocalObjectStore(dir.toString),
+        new LocalWritableObjectStore(dir.toString),
         StagingLayout("files", "job-1"),
         dir
       )
@@ -268,7 +269,7 @@ class CommitterTest extends AnyFunSuite with Matchers {
     the[IllegalArgumentException] thrownBy SourceSnapshot(" ", "b", 1L, "n")
   }
 
-  private def text(storeRoot: LocalObjectStore, path: String): String =
+  private def text(storeRoot: LocalWritableObjectStore, path: String): String =
     new String(storeRoot.readAll(path), StandardCharsets.UTF_8)
 
   private final class ParentCheckingStore(delegate: WritableObjectStore)

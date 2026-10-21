@@ -178,13 +178,13 @@ class NearestByJoinTest
     }
     if (available && arrowAllocates) {
       directory = Files.createTempDirectory("nearest-by-takeover-")
-      options = LocalMilvusCollection.write(directory, 2, segments)
+      options = LocalMilvusCollection.load("nearest", directory)
       specialDirectory = Files.createTempDirectory("nearest-by-special-")
-      specialOptions = LocalMilvusCollection.write(specialDirectory, 2, special)
+      specialOptions = LocalMilvusCollection.load("special", specialDirectory)
       farDirectory = Files.createTempDirectory("nearest-by-far-")
-      farOptions = LocalMilvusCollection.write(farDirectory, 16, far)
+      farOptions = LocalMilvusCollection.load("far", farDirectory)
       arrayDirectory = Files.createTempDirectory("nearest-by-array-")
-      arrayOptions = LocalMilvusCollection.write(arrayDirectory, 2, arrays)
+      arrayOptions = LocalMilvusCollection.load("arrays", arrayDirectory)
       spark = SparkSession
         .builder()
         .master("local[2]")

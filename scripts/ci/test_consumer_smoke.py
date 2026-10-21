@@ -199,6 +199,7 @@ class ConsumerDiagnosticsTest(unittest.TestCase):
         with mock.patch.object(consumer, "run", side_effect=run), \
              mock.patch.object(consumer.subprocess, "check_output", side_effect=spark_installation), \
              mock.patch.object(consumer, "compile_fixture", return_value=self.root / "smoke.jar"), \
+             mock.patch.object(consumer, "fixture_resources", return_value={"read-fixtures/test": "a" * 64}), \
              mock.patch.object(consumer, "expected_artifacts", side_effect=lambda *args: (args[-1], {})), \
              mock.patch.object(consumer, "check_resolved", return_value={}), \
              mock.patch.object(consumer.sys, "platform", "linux"), \
@@ -240,6 +241,87 @@ class ConsumerDiagnosticsTest(unittest.TestCase):
             self.assertEqual(shlex.split(executor.split("=", 1)[1]), driver[1:])
         report = json.loads((self.output / "consumer-result.json").read_text())
         self.assertEqual([entry["entry"] for entry in report["entries"]], ["universal", "platform"])
+        self.assertEqual(report["read_fixture_sha256"], {"read-fixtures/test": "a" * 64})
+
+
+class ReadFixtureTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.group = self.root / "sample"
+        self.group.mkdir()
+        self.data = self.group / "segment.parquet"
+        self.data.write_bytes(b"fixed independent sample")
+        self.manifest = self.group / "SHA256SUMS"
+        self.manifest.write_text(consumer.digest(self.data) + "  segment.parquet\n")
+
+    def resources(self):
+        return consumer.fixture_resources(self.root, ("sample",))
+
+    def jar(self, *, additional=None, substituted=False):
+        path = self.root / "smoke.jar"
+        with zipfile.ZipFile(path, "w") as archive:
+            for name in consumer.FIXTURE_CLASSES:
+                archive.writestr(name + ".class", b"fixture class")
+            for name in self.resources():
+                relative = name.removeprefix("read-fixtures/")
+                archive.writestr(name, b"substituted" if substituted else (self.root / relative).read_bytes())
+            if additional:
+                archive.writestr(*additional)
+        return path
+
+    def test_only_checksummed_data_is_packaged(self):
+        (self.group / "README.md").write_text("maintenance instructions, not runtime input")
+        resources = self.resources()
+        self.assertEqual(set(resources), {
+            "read-fixtures/sample/SHA256SUMS", "read-fixtures/sample/segment.parquet"})
+        consumer.verify_fixture_jar(self.jar(), resources)
+
+    def test_changed_or_missing_fixed_data_fails(self):
+        self.data.write_bytes(b"changed")
+        with self.assertRaisesRegex(ValueError, "missing or changed"):
+            self.resources()
+        self.data.unlink()
+        with self.assertRaisesRegex(ValueError, "missing or changed"):
+            self.resources()
+
+    def test_unsafe_and_duplicate_checksum_paths_fail(self):
+        for name in ("../outside", "/absolute", "sub/../segment.parquet", "./segment.parquet"):
+            self.manifest.write_text("a" * 64 + "  " + name + "\n")
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "Unsafe fixture path"):
+                self.resources()
+        entry = consumer.digest(self.data) + "  segment.parquet\n"
+        self.manifest.write_text(entry + entry)
+        with self.assertRaisesRegex(ValueError, "Duplicate or recursive"):
+            self.resources()
+
+    def test_absent_or_empty_fixture_manifest_fails(self):
+        self.manifest.write_text("")
+        with self.assertRaisesRegex(ValueError, "Empty fixture checksums"):
+            self.resources()
+        self.manifest.unlink()
+        with self.assertRaisesRegex(ValueError, "Missing fixed read fixture"):
+            self.resources()
+
+    def test_consumer_jar_rejects_production_classes_and_writer_references(self):
+        for name in ("com/zilliz/milvus/storage/read/SegmentReader.class",
+                     consumer.FIXTURE_CLASSES[0] + "Production.class"):
+            with self.subTest(name=name), self.assertRaisesRegex(RuntimeError, "production classes"):
+                consumer.verify_fixture_jar(self.jar(additional=(name, b"production")), self.resources())
+        for reference in consumer.FORBIDDEN_REFERENCES:
+            with self.subTest(reference=reference), self.assertRaisesRegex(RuntimeError, "writer or online client"):
+                consumer.verify_fixture_jar(self.jar(additional=(consumer.FIXTURE_CLASSES[0] + "$Bad.class", reference)),
+                                            self.resources())
+
+    def test_consumer_jar_rejects_changed_resource_bytes(self):
+        with self.assertRaisesRegex(RuntimeError, "fixtures differ"):
+            consumer.verify_fixture_jar(self.jar(substituted=True), self.resources())
+
+    def test_public_consumer_only_compiles_the_read_entry_and_integrity_helper(self):
+        self.assertEqual([Path(path).stem for path in consumer.FIXTURES],
+                         ["ReadOnlyConsumerSmoke", "ReadFixtures"])
+        self.assertTrue(consumer.MAIN.endswith(".ReadOnlyConsumerSmoke"))
 
 
 if __name__ == "__main__":

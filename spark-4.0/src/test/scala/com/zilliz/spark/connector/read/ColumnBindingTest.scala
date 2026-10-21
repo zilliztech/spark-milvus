@@ -1,9 +1,8 @@
 package com.zilliz.spark.connector.read
 
 import java.nio.file.Files
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
-import com.fasterxml.jackson.databind.ObjectMapper
 import org.apache.arrow.memory.RootAllocator
 import org.apache.arrow.vector.types.pojo.Schema
 import org.apache.arrow.vector.VectorSchemaRoot
@@ -13,11 +12,11 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.jni.storage.NativeStorageLibrary
+import com.zilliz.milvus.storage.codec.BinlogFixture
 import com.zilliz.milvus.storage.delete.DeletePlan
 import com.zilliz.milvus.storage.read.plan.{DeleteSource, SegmentReadTask}
 import com.zilliz.milvus.storage.snapshot.{DeltaLogFile, SegmentLayout}
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
-import com.zilliz.milvus.storage.write.codec.BinlogEncoder
 import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
@@ -235,7 +234,7 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
   // The schema mapper prepends the system fields, so this is about naming
   // style, not position.
   test("each line's arrow schema is named the same way as its columns") {
-    import scala.collection.JavaConverters._
+    import scala.jdk.CollectionConverters._
     val v2Names = v2().arrowSchema.getFields.asScala.map(_.getName)
     v2Names should contain allOf ("id", "vec")
 
@@ -376,15 +375,11 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
     }
     val directory = Files.createTempDirectory("empty-delete-plan-")
     val file = directory.resolve("empty.binlog")
-    val bytes = BinlogEncoder.envelope(
-      2,
-      10L,
-      20L,
-      30L,
-      100L,
-      DataType.Int64.value,
-      new ObjectMapper().createObjectNode().put("version", "MULTI_FIELD"),
-      Array.emptyByteArray
+    val bytes = BinlogFixture.encode(
+      Array.emptyByteArray,
+      dataType = DataType.Int64.value,
+      extras = """{"version":"MULTI_FIELD"}""",
+      eventType = 2
     )
     def binding = ColumnBinding(
       MilvusInputPartition(

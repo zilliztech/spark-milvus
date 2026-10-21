@@ -1,14 +1,13 @@
 package com.zilliz.milvus.storage.io
 
 import java.nio.file.{Files, Path}
-import java.util.{Map => JavaMap}
 import java.util.Collections
 import java.util.Comparator
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 import org.apache.arrow.c.{ArrowArray, ArrowSchema, Data}
 import org.apache.arrow.memory.RootAllocator
-import org.apache.arrow.vector.{BigIntVector, VarCharVector, VectorSchemaRoot}
+import org.apache.arrow.vector.{BigIntVector, VarCharVector}
 import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
@@ -21,33 +20,14 @@ import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
 import io.milvus.storage.{
   MilvusStorageColumnGroups,
   MilvusStorageProperties,
-  MilvusStorageReader,
-  MilvusStorageWriter
+  MilvusStorageReader
 }
 
-/** Writes a segment through milvus-storage's JNI and reads it back through
-  * milvus-storage's JNI.
-  *
-  * This is the strongest check the write path has without a live Milvus: it
-  * exercises both directions of the Arrow boundary and the column groups the
-  * writer hands back, and the values have to survive the round trip.
-  *
-  * It is also the regression test for milvus-storage#493, which is why the row
-  * count is what it is. `reader.record_batch_max_rows` defaults to 8192, so the
-  * packed reader only starts handing back sliced batches
-  * (`rb->Slice(min_rows)`) once more than 16384 rows are read. Below that the
-  * offset materialization in milvus_storage_reader.cpp never runs, and a test
-  * that stayed under the boundary would pass just as happily against the broken
-  * ArrowArrayStream path.
-  *
-  * The check itself is that values stay strictly in step with the row offset.
-  * If a sliced batch were imported without honouring `ArrowArray.offset`, every
-  * batch after the first would restart from row 0 and the comparison fails.
-  *
-  * Needs libmilvus-storage-jni, so it skips where the library is absent, which
-  * is the state of CI.
+/** Reads frozen parquet through JNI, including sliced Arrow batches and
+  * multiple-file column groups. Samples were generated once before the writer
+  * migration; these regressions must work without any production writer.
   */
-class WriterRoundTripTest extends AnyFunSuite with Matchers {
+class NativeSegmentReadTest extends AnyFunSuite with Matchers {
 
   /** Over 2 * 8192, so the reader slices. See the class comment. */
   private val rows = 20480
@@ -77,93 +57,13 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
     ).asJava
   )
 
-  private def fill(root: VectorSchemaRoot): Unit = {
-    val id = root.getVector("id").asInstanceOf[BigIntVector]
-    val name = root.getVector("name").asInstanceOf[VarCharVector]
-    id.allocateNew(rows)
-    name.allocateNew(rows)
-    var i = 0
-    while (i < rows) {
-      id.setSafe(i, i.toLong * 7)
-      name.setSafe(i, s"row-$i".getBytes("UTF-8"))
-      i += 1
-    }
-    root.setRowCount(rows)
-  }
-
-  test(
-    "a segment written through milvus-storage's JNI reads back with the same values"
-  ) {
+  test("a frozen segment preserves values across sliced native Arrow batches") {
     skipWithoutLibrary()
-
-    val dir: Path = Files.createTempDirectory("native-writer-roundtrip")
+    val dir = Files.createTempDirectory("native-fixed-segment")
+    ReadFixtures.copyTo("segments/batch-20480", dir)
     val allocator = new RootAllocator(Long.MaxValue)
-    // The local backend roots at fs.root_path and appends the key, so the
-    // temp directory is the root and every path below is relative to it.
-    val properties = Map(
-      "fs.storage_type" -> "local",
-      "fs.root_path" -> dir.toAbsolutePath.toString
-    ).asJava
-
-    // One exported ArrowSchema per consumer: loon_writer_new and loon_reader_new
-    // each take ownership of the struct they are given, so handing the same one
-    // to both fails with "Cannot import released ArrowSchema".
-    var writeSchema: ArrowSchema = null
-    var writer: MilvusStorageWriter = null
-    var nativeProperties: MilvusStorageProperties = null
-    var written = 0L
     var segmentReader: SegmentReader = null
-
     try {
-      writeSchema = ArrowSchema.allocateNew(allocator)
-      Data.exportSchema(allocator, schema, null, writeSchema)
-
-      // --- write ---
-      nativeProperties = new MilvusStorageProperties()
-      nativeProperties.create(properties)
-      writer = new MilvusStorageWriter()
-      writer.create(
-        "segment",
-        writeSchema.memoryAddress(),
-        nativeProperties
-      )
-      writer.isValid shouldBe true
-
-      val source = VectorSchemaRoot.create(schema, allocator)
-      try {
-        fill(source)
-        val array = ArrowArray.allocateNew(allocator)
-        try {
-          Data.exportVectorSchemaRoot(allocator, source, null, array)
-          writer.write(array.memoryAddress())
-          writer.flush()
-        } finally array.close()
-      } finally source.close()
-
-      written = writer.close()
-      written should not be 0L
-
-      val groupCount = MilvusStorageColumnGroups.count(written)
-      groupCount should be > 0
-      val files = (0 until groupCount).map(
-        MilvusStorageColumnGroups.files(written, _)
-      )
-      val counts = (0 until groupCount).map(
-        MilvusStorageColumnGroups.fileRowCounts(written, _)
-      )
-      val columns = (0 until groupCount).map(
-        MilvusStorageColumnGroups.columns(written, _)
-      )
-      info(
-        s"wrote $groupCount column group(s): " +
-          files
-            .zip(counts)
-            .map { case (f, c) => s"${f.toSeq} rows=${c.toSeq}" }
-            .mkString("; ")
-      )
-      counts.map(_.sum).sum shouldBe rows.toLong
-
-      // --- read back, through the registry the Spark readers use ---
       val task = SegmentReadTask(
         segmentId = 1L,
         partitionId = 1L,
@@ -171,8 +71,8 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
           Seq(
             V2ColumnGroup(
               fieldIds = Seq(0L, 1L),
-              filePaths = files.head.toSeq,
-              fileRowCounts = counts.head.toSeq
+              filePaths = Seq("segment.parquet"),
+              fileRowCounts = Seq(rows.toLong)
             )
           )
         ),
@@ -238,76 +138,11 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
       closed.copies shouldBe metrics.copies
     } finally {
       if (segmentReader != null) segmentReader.close()
-      if (written != 0L) MilvusStorageColumnGroups.destroy(written)
-      if (writer != null) writer.destroy()
-      if (nativeProperties != null) nativeProperties.free()
-      if (writeSchema != null) writeSchema.close()
       allocator.close()
-      Files
-        .walk(dir)
-        .sorted(Comparator.reverseOrder())
-        .forEach(Files.deleteIfExists(_))
-    }
-  }
-
-  /** Writes `count` rows starting at `from` into its own segment under `dir`,
-    * and returns that segment's single file path plus its row count.
-    */
-  private def writeSegment(
-      allocator: RootAllocator,
-      properties: JavaMap[String, String],
-      segment: String,
-      from: Int,
-      count: Int
-  ): (String, Long) = {
-    val schemaStruct = ArrowSchema.allocateNew(allocator)
-    var writer: MilvusStorageWriter = null
-    var nativeProperties: MilvusStorageProperties = null
-    var groups = 0L
-    try {
-      Data.exportSchema(allocator, schema, null, schemaStruct)
-      nativeProperties = new MilvusStorageProperties()
-      nativeProperties.create(properties)
-      writer = new MilvusStorageWriter()
-      writer.create(
-        segment,
-        schemaStruct.memoryAddress(),
-        nativeProperties
-      )
-      val source = VectorSchemaRoot.create(schema, allocator)
-      try {
-        val id = source.getVector("id").asInstanceOf[BigIntVector]
-        val name = source.getVector("name").asInstanceOf[VarCharVector]
-        id.allocateNew(count)
-        name.allocateNew(count)
-        var i = 0
-        while (i < count) {
-          id.setSafe(i, (from + i).toLong * 7)
-          name.setSafe(i, s"row-${from + i}".getBytes("UTF-8"))
-          i += 1
-        }
-        source.setRowCount(count)
-        val array = ArrowArray.allocateNew(allocator)
-        try {
-          Data.exportVectorSchemaRoot(allocator, source, null, array)
-          writer.write(array.memoryAddress())
-          writer.flush()
-        } finally array.close()
-      } finally source.close()
-
-      groups = writer.close()
-      val files = MilvusStorageColumnGroups.files(groups, 0)
-      val counts = MilvusStorageColumnGroups.fileRowCounts(groups, 0)
-      require(
-        files.length == 1,
-        s"expected one file per segment, got ${files.toSeq}"
-      )
-      (files(0), counts(0))
-    } finally {
-      if (groups != 0L) MilvusStorageColumnGroups.destroy(groups)
-      if (writer != null) writer.destroy()
-      if (nativeProperties != null) nativeProperties.free()
-      schemaStruct.close()
+      val paths = Files.walk(dir)
+      try
+        paths.sorted(Comparator.reverseOrder()).forEach(Files.deleteIfExists(_))
+      finally paths.close()
     }
   }
 
@@ -320,9 +155,8 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
     // keeps its characters inside the string object, so growing the vector
     // moves them and every pointer taken earlier dangles.
     //
-    // The test above cannot catch this: the writer names its files
-    // `<segment>/_data/<uuid>.parquet`, which is far past the small-string
-    // threshold, so the characters live on the heap and survive the move.
+    // This remains a reader regression even when no writer is available:
+    // load the same fixed file bytes under names below the small-string limit.
     val dir: Path = Files.createTempDirectory("native-short-paths")
     val allocator = new RootAllocator(Long.MaxValue)
     val properties = Map(
@@ -339,9 +173,8 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
     var batchReader = 0L
 
     try {
-      val parts = (0 until 3).map { i =>
-        writeSegment(allocator, properties, s"segment-$i", i * perFile, perFile)
-      }
+      ReadFixtures.copyTo("segments/short-paths", dir)
+      val parts = (0 until 3).map(i => (s"part-$i.parquet", perFile.toLong))
       // Move each file to a name inside the small-string range. The path the C
       // layer is handed is relative to fs.root_path.
       val shortParts = parts.zip(shortNames).map { case ((path, count), name) =>
@@ -438,9 +271,8 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
     var batchReader = 0L
 
     try {
-      val parts = (0 until 3).map { i =>
-        writeSegment(allocator, properties, s"segment-$i", i * perFile, perFile)
-      }
+      ReadFixtures.copyTo("segments/multi-file", dir)
+      val parts = (0 until 3).map(i => (s"part-$i.parquet", perFile.toLong))
       parts.map(_._2).sum shouldBe (3L * perFile)
 
       columnGroups = MilvusStorageColumnGroups.createFromGroups(
