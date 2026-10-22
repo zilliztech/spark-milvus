@@ -11,8 +11,7 @@ import io.milvus.grpc.schema.{CollectionSchema => ProtoSchema, FieldSchema}
   *
   * Fields a source cannot supply are `Option` or carry an explicit state, so a
   * missing value is visible to the planner instead of defaulting to "none".
-  * `docs/design/projects/spark-milvus/architecture/snapshot.html` is the
-  * design.
+  * `design document architecture/snapshot.html` is the design.
   *
   * @param bucket
   *   the bucket every path in `segments` is a key of; the native reader is

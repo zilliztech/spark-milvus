@@ -7,7 +7,7 @@ package com.zilliz.milvus.storage
   * historical containers before sharing this decoder and `DeletePlan`.
   *
   * Main types: DeletePlan, DeltaLogReader; DeleteBitset and DeltaLogDecoder are
-  * the designed names they grow into. Capabilities: R8 (see
-  * docs/design/projects/spark-milvus/capabilities.md).
+  * the designed names they grow into. Capabilities: R8 (see design document
+  * capabilities.md).
   */
 package object delete

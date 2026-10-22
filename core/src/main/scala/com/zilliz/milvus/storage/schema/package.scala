@@ -19,7 +19,7 @@ package com.zilliz.milvus.storage
   * Milvus's `NormalizeExternalArrow`.
   *
   * Main types: SchemaMapper, MilvusTypes, ArrowTypes, VectorLayout, MetricType,
-  * HybridTimestamp. Capabilities: R15, C3 (see
-  * docs/design/projects/spark-milvus/capabilities.md).
+  * HybridTimestamp. Capabilities: R15, C3 (see design document
+  * capabilities.md).
   */
 package object schema

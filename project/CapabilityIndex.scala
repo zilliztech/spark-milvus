@@ -3,12 +3,10 @@ import scala.util.matching.Regex
 import sbt._
 import sbt.Keys._
 
-/** Checks that the capability index in
-  * projects/spark-milvus/capabilities.md of the maintainers' design documents
-  * and the capability ids declared in package docs still agree. The design
-  * documents are not a submodule: they are read from the directory named by
-  * SPARK_MILVUS_DESIGN_DIR, or from a local, git-ignored docs/design checkout
-  * or symlink.
+/** Checks that the capability index in the maintainers' design documents and
+  * the capability ids declared in package docs still agree. The design
+  * documents are kept outside this repository and are read from the directory
+  * named by SPARK_MILVUS_DESIGN_DIR.
   *
   * The index is the only thing tying a feature to the code that implements it,
   * and nothing else notices when it drifts: renaming a package, moving code or
@@ -27,20 +25,18 @@ object CapabilityIndex {
   /** Names the directory holding the maintainers' design documents. */
   private val DesignDirVariable = "SPARK_MILVUS_DESIGN_DIR"
 
-  /** Where a local checkout or symlink of the design documents may sit;
-    * `.gitignore` covers it.
-    */
-  private val LocalDesignDir = "docs/design"
-
-  /** The design documents: the variable when set, otherwise the ignored local
-    * directory.
-    */
-  private def designDir(root: File): File =
+  /** The design documents, from the environment. */
+  private def designDir: File =
     sys.env
       .get(DesignDirVariable)
       .filter(_.nonEmpty)
       .map(file)
-      .getOrElse(root / LocalDesignDir)
+      .getOrElse(
+        sys.error(
+          s"$DesignDirVariable is not set: point it at the directory holding " +
+            "the maintainers' design documents"
+        )
+      )
 
   /** A row in one of the capability tables: `| R1 | ... | ... | location | ...`
     */
@@ -115,12 +111,12 @@ object CapabilityIndex {
   }
 
   /** The ids a package doc claims: those inside its `Capabilities: ... (see
-    * docs/design/projects/spark-milvus/capabilities.md)` sentence, which may
-    * wrap across lines. Ids anywhere else are prose — "Storage V2", "DataSource
-    * V2", "the RPC behind C1" — and must not count as a claim.
+    * design document capabilities.md)` sentence, which may wrap across lines.
+    * Ids anywhere else are prose — "Storage V2", "DataSource V2", "the RPC
+    * behind C1" — and must not count as a claim.
     */
   private val ClaimSentence: Regex =
-    raw"(?s)Capabilities:(.*?)\(see[\s*]+docs/design/projects/spark-milvus/capabilities\.md\)".r
+    raw"(?s)Capabilities:(.*?)\(see[\s*]+design[\s*]+document[\s*]+capabilities\.md\)".r
 
   private def claimedIn(doc: String): Set[String] =
     ClaimSentence
@@ -155,11 +151,11 @@ object CapabilityIndex {
     checkCapabilityIndex := {
       val log = streams.value.log
       val root = (ThisBuild / baseDirectory).value
-      val doc = designDir(root) / CapabilitiesDoc
+      val doc = designDir / CapabilitiesDoc
       if (!doc.isFile)
         sys.error(
-          s"$doc not found: set $DesignDirVariable to the directory holding " +
-            s"the design documents, or place them at $LocalDesignDir"
+          s"$doc not found: $DesignDirVariable must name the directory holding " +
+            "the maintainers' design documents"
         )
 
       val (body, section11) = sections(IO.read(doc))

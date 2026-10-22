@@ -18,27 +18,26 @@ package com.zilliz.milvus.storage
   * next segment's source on one background thread inside the task; neither
   * survives the task.
   *
-  * This package keeps the computation only
-  * (docs/design/projects/spark-milvus/architecture/ vector-search.html sections
-  * 1-2). The format supplies owned VectorBatch.Stream and IndexSearch.Target
-  * values; the computation borrows their batches and buffers until its work
-  * drains, then closes what it owns. SearchPlan takes resolved segment
-  * identities and row counts, never read tasks or snapshot metadata. SearchPlan
-  * splits the query set into query groups and the segment tasks into segment
-  * sets, as many as the search runs tasks at once, and chooses which side a
-  * task keeps: its queries, when they fit the task's heap budget, or its
-  * segment set, sized to the task's off-heap budget. SegmentSearch searches a
-  * segment set with one of two strategies, ExactScan over vector batches or
-  * IndexSearch over an index handle (ExactScan calls the batched distance entry
-  * for float32 fields, compacting excluded rows out of a batch first, and
-  * Knowhere.bruteForce for the other element types), and returns each query's
-  * merged candidates as (query, segment, row offset, score), packed by
-  * TopKMerger into one CandidateBytes record per query: SegmentSearch.runGroups
-  * reads each segment once for all the groups a task keeps, and a task keeping
-  * its segment set holds it through SegmentSearch.hold while the groups pass.
-  * Opening segments, building exclusion bitmaps and reading and decoding index
-  * files belong to the Milvus TableFormat side
-  * (docs/design/projects/spark-milvus/architecture/table-version.html section
+  * This package keeps the computation only (design document
+  * architecture/vector-search.html sections 1-2). The format supplies owned
+  * VectorBatch.Stream and IndexSearch.Target values; the computation borrows
+  * their batches and buffers until its work drains, then closes what it owns.
+  * SearchPlan takes resolved segment identities and row counts, never read
+  * tasks or snapshot metadata. SearchPlan splits the query set into query
+  * groups and the segment tasks into segment sets, as many as the search runs
+  * tasks at once, and chooses which side a task keeps: its queries, when they
+  * fit the task's heap budget, or its segment set, sized to the task's off-heap
+  * budget. SegmentSearch searches a segment set with one of two strategies,
+  * ExactScan over vector batches or IndexSearch over an index handle (ExactScan
+  * calls the batched distance entry for float32 fields, compacting excluded
+  * rows out of a batch first, and Knowhere.bruteForce for the other element
+  * types), and returns each query's merged candidates as (query, segment, row
+  * offset, score), packed by TopKMerger into one CandidateBytes record per
+  * query: SegmentSearch.runGroups reads each segment once for all the groups a
+  * task keeps, and a task keeping its segment set holds it through
+  * SegmentSearch.hold while the groups pass. Opening segments, building
+  * exclusion bitmaps and reading and decoding index files belong to the Milvus
+  * TableFormat side (design document architecture/table-version.html section
   * 3); IndexFileCodec and MilvusIndexFileDecoder now live in core.codec.
   * TopKMerger keeps k per query for batches and segments alike and packs each
   * query's best k into CandidateBytes for the caller to send on in score order.
@@ -53,10 +52,9 @@ package com.zilliz.milvus.storage
   * buffers to Knowhere as ByteBuffers.
   *
   * A search can be ranked by a RankingFunction, the vector function of a
-  * nearest-by join
-  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
-  * 2). EngineRange says which vectors Knowhere scores as that function computes
-  * in float; an exact scan reads each batch once to classify its rows, hands
+  * nearest-by join (design document architecture/dataframe-api.html section 2).
+  * EngineRange says which vectors Knowhere scores as that function computes in
+  * float; an exact scan reads each batch once to classify its rows, hands
   * Knowhere the rows in range and has the function score the rest against every
   * query of the group, into the same TopKMerger, and an indexed search ranks
   * NaN and infinite scores instead of failing on them.
@@ -67,11 +65,9 @@ package com.zilliz.milvus.storage
   * borrow the buffer FrameSearch fills directly, a candidate's place being the
   * base partition and the row's position in it, both checked as UInt32 before
   * CarriedCandidates packs each query's best k with the rows they came from,
-  * since such an input has no table to take them from after the merge
-  * (docs/design/projects/spark-milvus/architecture/ dataframe-api.html section
-  * 4).
+  * since such an input has no table to take them from after the merge (design
+  * document architecture/dataframe-api.html section 4).
   *
-  * Capabilities: V5, V7, V9 (see
-  * docs/design/projects/spark-milvus/capabilities.md).
+  * Capabilities: V5, V7, V9 (see design document capabilities.md).
   */
 package object vector

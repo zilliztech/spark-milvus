@@ -38,9 +38,8 @@ import com.zilliz.spark.connector.search.{
 }
 
 /** A nearest-by join the connector executes: for each query row, the k base
-  * rows nearest to it by one Milvus metric
-  * (docs/design/projects/spark-milvus/architecture/ dataframe-api.html sections
-  * 3 and 4).
+  * rows nearest to it by one Milvus metric (design document
+  * architecture/dataframe-api.html sections 3 and 4).
   *
   * It keeps Spark's NearestByJoin contract: the output is the query columns and
   * the base columns, both nullable, with the column ids unchanged, and no score
@@ -58,8 +57,8 @@ import com.zilliz.spark.connector.search.{
   * ranking, but when nothing above the join selects it, it is not an output and
   * the take stage does not read it. At k=100,000 over a 768-dimension table the
   * take read 3 KB of vector for each of 10^10 hits, 31 TB against the 8 GB of
-  * primary keys the query asked for
-  * (docs/design/projects/spark-milvus/enhance/2026-10-13-search-take-stage.html).
+  * primary keys the query asked for (design document
+  * enhance/2026-10-13-search-take-stage.html).
   */
 final case class MilvusNearestByJoin(
     left: LogicalPlan,
@@ -149,13 +148,13 @@ private[extensions] object MilvusTableInput {
   }
 }
 
-/** Plans a [[MilvusNearestByJoin]] by its optimized base
-  * (docs/design/projects/spark-milvus/ architecture/dataframe-api.html section
-  * 4): a Milvus table input when the base is the Milvus scan with at most a
-  * projection of its columns above it and the base vector is one of them, a
-  * vector field the search takes; a DataFrame input otherwise, with the reason
-  * kept for explain. Either way Spark's own computation of the join runs over
-  * the same optimized base and ranking, whose columns are the node's.
+/** Plans a [[MilvusNearestByJoin]] by its optimized base (design document
+  * architecture/dataframe-api.html section 4): a Milvus table input when the
+  * base is the Milvus scan with at most a projection of its columns above it
+  * and the base vector is one of them, a vector field the search takes; a
+  * DataFrame input otherwise, with the reason kept for explain. Either way
+  * Spark's own computation of the join runs over the same optimized base and
+  * ranking, whose columns are the node's.
   */
 object MilvusNearestByJoinStrategy extends SparkStrategy {
   override def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
@@ -218,9 +217,9 @@ object MilvusNearestByJoinStrategy extends SparkStrategy {
 }
 
 /** Runs a [[MilvusNearestByJoin]] over a Milvus table input: the query rows are
-  * its child, and the base is searched through `scan` rather than read
-  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
-  * 4); the query rows the connector does not search are joined by `spark`.
+  * its child, and the base is searched through `scan` rather than read (design
+  * document architecture/dataframe-api.html section 4); the query rows the
+  * connector does not search are joined by `spark`.
   *
   * `scan` and `spark` are the driver's: a task whose closure reaches the plan
   * above this node, a window's for one, carries the node without them, as
@@ -293,10 +292,9 @@ final case class MilvusNearestByJoinExec(
 
 /** Runs a [[MilvusNearestByJoin]] over a DataFrame input: the query rows are
   * its left child, the base rows its right child, read and scanned exactly
-  * however the join was written, APPROX too
-  * (docs/design/projects/spark-milvus/architecture/ dataframe-api.html sections
-  * 3 and 4); the query rows the connector does not search are joined by
-  * `spark`.
+  * however the join was written, APPROX too (design document
+  * architecture/dataframe-api.html sections 3 and 4); the query rows the
+  * connector does not search are joined by `spark`.
   *
   * Explain names the input and why the base is not a Milvus table input, the
   * mode, the metric, k and the base vector; the search's counters and how the

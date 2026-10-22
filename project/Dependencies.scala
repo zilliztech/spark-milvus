@@ -107,7 +107,7 @@ object Dependencies {
     // Shipped, not compiled against: these supply the credential provider
     // classes that fs.s3a.aws.credentials.provider names by string. Removing
     // one fails when a FileSystem is built, not at compile time. See
-    // docs/design/projects/spark-milvus/architecture/storage-auth.html.
+    // design document architecture/storage-auth.html.
     awsSdkS3,
     awsSdkS3Transfer,
     awsSdkSts,

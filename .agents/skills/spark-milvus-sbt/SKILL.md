@@ -5,14 +5,13 @@ description: Use when preparing any Spark-Milvus commit, or reviewing or changin
 
 # Maintain the Spark-Milvus build
 
-Read the repository [AGENTS.md](../../../AGENTS.md), then
-section 4 of modules.md (`docs/design/projects/spark-milvus/architecture/modules.md`) and the
-comments in `build.sbt` and `project/*.scala`. The former sbt conventions page
-(`docs/design/projects/spark-milvus/engineering/sbt.html`) was removed on 2026-09-20; the constraints
-that remain written down live in those two places, and this skill applies them. Consult
-modules.md (`docs/design/projects/spark-milvus/architecture/modules.md`) when a change affects module
-boundaries or compatibility, and [contributing.md](../../../docs/contributing.md)
-for build commands and environment constraints.
+Read the repository [AGENTS.md](../../../AGENTS.md), then the comments in
+`build.sbt` and `project/*.scala`; the build constraints that are written down
+live there, and this skill applies them. Section 4 of the maintainers' modules
+design records the module and compatibility constraints; consult it when a
+change affects module boundaries or compatibility, and
+[contributing.md](../../../docs/contributing.md) for build commands and
+environment constraints.
 
 For commit preparation without build changes, go directly to
 [validation](#validate-before-committing); the build review steps
@@ -49,10 +48,10 @@ consistent with the candidate verifier.
 Follow AGENTS.md's removal rule; a grep result alone does not authorize removing
 a user-facing contract.
 
-Record a changed convention in section 4 of modules.md when it is a build
-constraint, and record the decision in the design log (`docs/design/projects/spark-milvus/README.md#6-决策日志`). Link to
-existing policy instead of copying it into AGENTS.md or this skill. Keep code
-and build comments in English, and the design document in Chinese.
+Record a changed convention in section 4 of the maintainers' modules design
+when it is a build constraint, and record the decision in their design log.
+Link to existing policy instead of copying it into AGENTS.md or this skill.
+Keep code and build comments in English, and the design documents in Chinese.
 
 ## Validate before committing
 

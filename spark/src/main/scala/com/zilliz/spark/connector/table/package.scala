@@ -10,7 +10,6 @@ package com.zilliz.spark.connector
   * snapshot schema. `_segment_id` and `_row_offset` are synthesized metadata;
   * `_timestamp` is stored field 1. No online service or catalog is consulted.
   *
-  * Capabilities: R1, R12, R16 (see
-  * docs/design/projects/spark-milvus/capabilities.md).
+  * Capabilities: R1, R12, R16 (see design document capabilities.md).
   */
 package object table

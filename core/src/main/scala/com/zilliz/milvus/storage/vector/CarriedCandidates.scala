@@ -7,9 +7,8 @@ import scala.collection.IndexedSeq
 import com.zilliz.milvus.storage.schema.MetricType
 
 /** One query's candidates with the row each one carries, as bytes: what a
-  * first-stage task over a DataFrame input sends on
-  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
-  * 4).
+  * first-stage task over a DataFrame input sends on (design document
+  * architecture/dataframe-api.html section 4).
   *
   * A candidate holds a UInt32 base-partition ordinal, UInt32 physical row
   * offset and Float32 score, followed by its row's length and opaque bytes. The

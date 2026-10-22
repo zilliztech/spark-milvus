@@ -45,8 +45,7 @@ private[search] object SearchQueries {
 
   /** A set already packed on the driver: row `i` of `vectors` is the query of
     * `ids(i)`. It is broadcast as it is, and nothing about it runs a job
-    * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
-    * 4).
+    * (design document architecture/dataframe-api.html section 4).
     */
   final case class Packed(ids: Array[Long], vectors: Array[Byte])
       extends Input
@@ -55,9 +54,9 @@ private[search] object SearchQueries {
   }
 
   /** How a query set reaches the first-stage tasks, decided once for a search
-    * (docs/design/projects/spark-milvus/architecture/vector-search.html section
-    * 2.1): a set the driver packed is broadcast as it is, executor rows that
-    * fit `milvus.search.queries.max.bytes` are packed on the executors and
+    * (design document architecture/vector-search.html section 2.1): a set the
+    * driver packed is broadcast as it is, executor rows that fit
+    * `milvus.search.queries.max.bytes` are packed on the executors and
     * broadcast, and a larger one travels by group with the shuffle.
     */
   sealed trait Delivery {

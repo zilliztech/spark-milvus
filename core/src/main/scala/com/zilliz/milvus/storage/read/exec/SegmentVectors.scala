@@ -26,15 +26,13 @@ import com.zilliz.milvus.storage.vector.{
   * the vector column together with the columns deletes and the filter need, and
   * hands out the buffer Knowhere reads, the exclusion bitmap of that batch and
   * where the batch starts in the segment. The computation never sees the
-  * reader, the columns or the delete rules
-  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
-  * 2.3).
+  * reader, the columns or the delete rules (design document
+  * architecture/vector-search.html section 2.3).
   *
   * The block after the one handed out is read on this segment's own thread
   * while the caller computes, so reading and the engine overlap; a segment
-  * holds at most two blocks at once
-  * (docs/design/projects/spark-milvus/architecture/search-resources.html
-  * section 3.5).
+  * holds at most two blocks at once (design document
+  * architecture/search-resources.html section 3.5).
   */
 final class SegmentVectors private (
     reader: SegmentReader,

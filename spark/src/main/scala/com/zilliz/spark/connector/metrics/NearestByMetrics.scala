@@ -7,9 +7,8 @@ import org.apache.spark.SparkContext
 /** The SQL metrics of the plan node that runs a nearest-by join: the search's
   * counters ([[SearchMetrics]]), its output rows, and what the driver settles
   * before the search runs, namely how the query rows divide and how the
-  * segments are searched
-  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html sections
-  * 2 and 4).
+  * segments are searched (design document architecture/dataframe-api.html
+  * sections 2 and 4).
   */
 object NearestByMetrics {
 

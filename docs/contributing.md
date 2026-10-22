@@ -590,8 +590,8 @@ builds and publication follow the task's scope and authorization.
 
 Run `sbt checkCapabilityIndex` before every commit that touches the capability
 index in the maintainers' design documents or a `package.scala`; it reads those
-documents from `SPARK_MILVUS_DESIGN_DIR` or a local `docs/design/` checkout, and
-CI does not run it. CI does run
+documents from the directory named by `SPARK_MILVUS_DESIGN_DIR`, and CI does not
+run it. CI does run
 `python3 -m unittest discover -s native-build -p 'test_*.py'` plus the same
 discovery over `scripts/tests`; run them when touching `native-build/`.
 
@@ -629,18 +629,15 @@ contributors do not need access to the maintainers' design documents to propose
 or document a change.
 
 The maintainers keep the design documents, decision log and capability index
-outside this repository; this repository does not mount them, and the build and
-CI do not read them. Paths written as `docs/design/...` in source comments,
-package docs and skills name files inside that document set; maintainers place
-a checkout or symlink of it at `docs/design/` here, which `.gitignore` covers,
-so those paths resolve locally. Its `projects/spark-milvus/AGENTS.md` is the
-full orientation for maintainers. Maintainers reconcile accepted public
-proposals with the design records and capability index, and run
-`sbt checkCapabilityIndex` when that index or a `package.scala` changes, with
-`SPARK_MILVUS_DESIGN_DIR` pointing at the documents when they are not at
-`docs/design/`. Public CI does not fetch those documents or claim to perform the
-index check. A document change is committed where the documents live; this
-repository records no gitlink for them.
+outside this repository; this repository does not mount or link to them, and
+the build and CI do not read them. A comment that cites a "design document" or
+"the maintainers' ... design" names a page in that set. Maintainers reconcile
+accepted public proposals with the design records and capability index, and
+run `sbt checkCapabilityIndex` when that index or a `package.scala` changes,
+with `SPARK_MILVUS_DESIGN_DIR` naming the directory that holds the documents.
+Public CI does not fetch those documents or claim to perform the index check. A
+document change is committed where the documents live; this repository records
+no gitlink for them.
 
 ### Repository-local document references
 

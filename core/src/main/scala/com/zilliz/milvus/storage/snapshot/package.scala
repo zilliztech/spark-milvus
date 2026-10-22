@@ -14,7 +14,7 @@ package com.zilliz.milvus.storage
   * rules. PhysicalColumnGroups carries already-resolved files and column names
   * for consumers of the low-level reader, without compatibility interpretation.
   *
-  * Capabilities: R2, R3, R9, R13, R16, C3 (see
-  * docs/design/projects/spark-milvus/capabilities.md).
+  * Capabilities: R2, R3, R9, R13, R16, C3 (see design document
+  * capabilities.md).
   */
 package object snapshot

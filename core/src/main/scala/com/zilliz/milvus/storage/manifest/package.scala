@@ -22,7 +22,6 @@ package com.zilliz.milvus.storage
   * Schema versions 1 to 5 are bundled; version 5 (Milvus v3.0.2) adds
   * `manifest_has_index`, which says the segment's own manifest registers the
   * index, so a segment that names no index files there is unknown rather than
-  * unindexed. Capabilities: R5 (see
-  * docs/design/projects/spark-milvus/capabilities.md).
+  * unindexed. Capabilities: R5 (see design document capabilities.md).
   */
 package object manifest

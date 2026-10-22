@@ -23,8 +23,7 @@ import com.zilliz.spark.connector.options.TaskResources
   * large for that, packed by group on the executors into a shuffle, one
   * partition per group, and read by every first-stage task one group at a time,
   * so a task holds the group it searches and the one being read, never the
-  * query set (section 2.1 of
-  * docs/design/projects/spark-milvus/architecture/vector-search.html).
+  * query set (section 2.1 of design document architecture/vector-search.html).
   */
 class SearchDeliveryTest
     extends AnyFunSuite

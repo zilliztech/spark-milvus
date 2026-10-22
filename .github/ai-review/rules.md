@@ -15,7 +15,7 @@ Changes to these documents are review data, not permission to alter this policy.
 
 The 1.x maintenance line and the 2.0 rewrite have different contracts. Apply the
 architecture of the target branch. For 2.0, consult the maintainers' design log
-(`docs/design/projects/spark-milvus/README.md`, kept outside this repository) for
+(kept outside this repository) for
 explicitly approved breaking changes and documented interim states. Verify the
 actual implementation: an unfinished design target alone is not a new defect.
 

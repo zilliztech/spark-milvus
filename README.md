@@ -81,8 +81,8 @@ git submodule update --init milvus-proto milvus-storage knowhere
 [AGENTS.md](AGENTS.md) is the entry point for agents and people working on the
 code: what the project is, how it is layered, and the rules any change has to
 satisfy. `CLAUDE.md` is a symlink to it. The maintainers' design documents are
-kept outside this repository; paths written as `docs/design/...` in source
-comments refer to files there. Nothing in this repository's build needs them.
+kept outside this repository; a comment that cites a "design document" names a
+page there. Nothing in this repository's build needs them.
 
 ## Environment
 

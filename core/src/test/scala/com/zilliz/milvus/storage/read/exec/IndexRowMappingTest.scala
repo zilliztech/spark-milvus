@@ -6,8 +6,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 /** What an index label means in its segment, for a column with nulls and
-  * without (docs/design/projects/spark-milvus/architecture/vector-search.html
-  * section 2.4).
+  * without (design document architecture/vector-search.html section 2.4).
   */
 class IndexRowMappingTest extends AnyFunSuite with Matchers {
 

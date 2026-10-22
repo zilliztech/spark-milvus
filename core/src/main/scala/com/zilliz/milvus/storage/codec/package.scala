@@ -13,9 +13,8 @@ package com.zilliz.milvus.storage
   * MilvusIndexFileDecoder takes one index object apart and IndexFileCodec
   * assembles the slices of a persisted index and hands the payload to the
   * vector library; both belong to the Milvus format side rather than to the
-  * computation
-  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
-  * 2.5). `IndexFileFormat` provides shared envelope and slice definitions.
+  * computation (design document architecture/vector-search.html section 2.5).
+  * `IndexFileFormat` provides shared envelope and slice definitions.
   * FloatConverter packs read-query vectors, so its encode methods remain part
   * of this read-side package.
   *
@@ -26,7 +25,7 @@ package com.zilliz.milvus.storage
   *
   * Main types: FloatConverter, SparseFloatVectorConverter, ArrayCodec,
   * BinlogCodec, BinlogFormat, MilvusIndexFileDecoder, IndexFileCodec,
-  * IndexFileFormat, VectorIndexFamilies. Capabilities: R15, V2 (see
-  * docs/design/projects/spark-milvus/capabilities.md).
+  * IndexFileFormat, VectorIndexFamilies. Capabilities: R15, V2 (see design
+  * document capabilities.md).
   */
 package object codec

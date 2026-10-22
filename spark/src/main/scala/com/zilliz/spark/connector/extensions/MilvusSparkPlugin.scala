@@ -23,9 +23,8 @@ import com.zilliz.milvus.jni.vector.NativeVectorLibrary
   * needs it waits. An executor starts long before its first search task -- the
   * driver is still planning and delivering the query set -- so the same work
   * done here costs the job nothing. A load that fails here is logged and left
-  * to the first task, which reports the failure the way it always did
-  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
-  * 2.1, 2026-09-24 decision).
+  * to the first task, which reports the failure the way it always did (design
+  * document architecture/vector-search.html section 2.1, 2026-09-24 decision).
   */
 class MilvusSparkPlugin extends SparkPlugin {
   override def driverPlugin(): DriverPlugin = null

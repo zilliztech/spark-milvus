@@ -5,6 +5,6 @@
  * unchanged, which falls back to its own packaged resource and then the system
  * library path; an explicit {@code milvus.storage.native.path} that names
  * another file is rejected.
- * <p>Capabilities: R4 (see docs/design/projects/spark-milvus/capabilities.md).
+ * <p>Capabilities: R4 (see design document capabilities.md).
  */
 package com.zilliz.milvus.jni.storage;

@@ -12,8 +12,7 @@ import com.zilliz.spark.connector.extensions.{
 
 /** `nearestByJoin` on Spark 3.5, which has no NearestByJoin: the arguments
   * checked as Spark 4.2 checks them, and a [[NearestByJoinRequest]] for the
-  * analyzer (docs/design/projects/spark-milvus/architecture/dataframe-api.html
-  * section 6).
+  * analyzer (design document architecture/dataframe-api.html section 6).
   *
   * The ranking is resolved by selecting it over the cross join of the two
   * frames, which is also where a query side and a base read from the same table

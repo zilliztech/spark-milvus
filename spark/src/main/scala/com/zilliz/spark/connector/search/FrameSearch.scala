@@ -40,9 +40,8 @@ import com.zilliz.spark.connector.types.ArrowAllocator
 
 /** A nearest-by join's search over a DataFrame input: a base the connector
   * cannot search as a Milvus table, read row by row in its own partitions and
-  * scanned exactly, each candidate carrying its row to the merge
-  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html sections
-  * 2 and 4).
+  * scanned exactly, each candidate carrying its row to the merge (design
+  * document architecture/dataframe-api.html sections 2 and 4).
   *
   * The query groups are cut so that a group, its candidates and the rows they
   * carry stay inside `milvus.search.group.max.bytes`, and reach the tasks as a

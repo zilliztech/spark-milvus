@@ -14,7 +14,7 @@ package com.zilliz.milvus.storage
   * Row-group min/max pruning (R10) remains outside this implementation.
   *
   * Main types: PrimaryKeyStats, BlockedBloomFilter, PrimaryKeyFilter,
-  * PrimaryKeyBloomPruner. Capabilities: R9, R18 (see
-  * docs/design/projects/spark-milvus/capabilities.md).
+  * PrimaryKeyBloomPruner. Capabilities: R9, R18 (see design document
+  * capabilities.md).
   */
 package object stats

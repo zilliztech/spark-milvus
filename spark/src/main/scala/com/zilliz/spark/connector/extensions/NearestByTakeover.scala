@@ -12,10 +12,10 @@ import com.zilliz.milvus.storage.schema.MetricType
 import com.zilliz.spark.connector.table.MilvusTable
 
 /** Whether the connector executes a nearest-by join, and the node that does
-  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
-  * 3). Spark 4.2's rule asks this of its `NearestByJoin`, the older lines' rule
-  * of a [[NearestByJoinRequest]]; each line says which of its expressions are
-  * the three vector functions.
+  * (design document architecture/dataframe-api.html section 3). Spark 4.2's
+  * rule asks this of its `NearestByJoin`, the older lines' rule of a
+  * [[NearestByJoinRequest]]; each line says which of its expressions are the
+  * three vector functions.
   *
   * A join is replaced when its ranking is one of them in the direction its
   * metric ranks, one argument is computed from the base's columns and the other

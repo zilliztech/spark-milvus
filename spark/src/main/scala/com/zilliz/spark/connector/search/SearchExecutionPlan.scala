@@ -361,8 +361,8 @@ private[connector] object SearchExecutionPlan {
   private val MaxFrameBlockRows = 65536
 
   /** How many first-stage tasks run at once, and what one of them may keep
-    * (docs/design/projects/spark-milvus/architecture/vector-search.html section
-    * 2.1, search-resources.html section 3.3). An index search declares that its
+    * (design document architecture/vector-search.html section 2.1,
+    * search-resources.html section 3.3). An index search declares that its
     * tasks take every core of their executor, so one runs per executor;
     * otherwise a task takes `spark.task.cpus`.
     *

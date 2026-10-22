@@ -29,7 +29,7 @@ private[storage] object IndexFileCodec extends Logging {
   // in 1 MiB chunks, and what is allocated for it is held against the bytes its
   // slice objects have on the store before anything is allocated. Only
   // SLICE_META and valid_data are materialized as Java arrays and have caps
-  // (docs/design/projects/spark-milvus/architecture/search-resources.html section 3.4).
+  // (design document architecture/search-resources.html section 3.4).
   // One request for an unsliced object reads this much; several are in flight
   // at once (ConcurrentRangeReads).
   private val RangeBytes = 8 * 1024 * 1024
@@ -38,9 +38,8 @@ private[storage] object IndexFileCodec extends Logging {
 
   /** An index that has been read, decoded and handed to Knowhere, with what
     * that cost: the object bytes read and the wall time of the whole load. The
-    * search reports both as `milvus.search.index.*`
-    * (docs/design/projects/spark-milvus/architecture/vector-search.html section
-    * 1.3).
+    * search reports both as `milvus.search.index.*` (design document
+    * architecture/vector-search.html section 1.3).
     */
   private[storage] final case class Loaded(
       index: NativeVectorIndex,
@@ -339,7 +338,7 @@ private[storage] object IndexFileCodec extends Logging {
   private[codec] final class CardinalPayload(store: ObjectStore, key: String) {
     // The object's size on the store is what is allocated for it, so the
     // allocation can never exceed the bytes that exist; the only bound is
-    // that a footer fits (docs/design/projects/spark-milvus/architecture/search-resources.html
+    // that a footer fits (design document architecture/search-resources.html
     // section 3.4).
     val length: Long = store.size(key)
     require(

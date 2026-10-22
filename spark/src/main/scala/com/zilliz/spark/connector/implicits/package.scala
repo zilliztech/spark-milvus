@@ -8,8 +8,7 @@ import org.apache.spark.sql.DataFrame
   * support. Java callers construct `MilvusDataFrame` directly. Connect and
   * classic class loading remain separate in the selected NearestByEntry shim.
   *
-  * Capabilities: V5, V7 (see
-  * docs/design/projects/spark-milvus/capabilities.md).
+  * Capabilities: V5, V7 (see design document capabilities.md).
   */
 package object implicits {
 

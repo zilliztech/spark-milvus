@@ -14,9 +14,8 @@ import com.zilliz.milvus.storage.schema.{
   VectorLayout
 }
 
-/** Which vectors Knowhere scores as Spark's float functions do
-  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
-  * 2).
+/** Which vectors Knowhere scores as Spark's float functions do (design document
+  * architecture/dataframe-api.html section 2).
   */
 class EngineRangeTest extends AnyFunSuite with Matchers {
 

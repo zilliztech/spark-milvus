@@ -34,9 +34,8 @@ import com.zilliz.spark.connector.types.{ArrowAllocator, ArrowConverter}
   *
   * Only the rows that survived the merge are read, one segment at a time and
   * each row once however many queries hit it. Reading them is the Milvus format
-  * side taking rows by address
-  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
-  * 2.1).
+  * side taking rows by address (design document architecture/vector-search.html
+  * section 2.1).
   */
 private[search] object SearchTake {
 
@@ -64,9 +63,8 @@ private[search] object SearchTake {
     * a task's take reads that run and the buckets together read the segment
     * once. Hashing the offset instead spread every task over every row group of
     * its segment: at k=100,000 each of 109 bucket tasks read the whole segment
-    * again, 31 TB in all against 8 GB of primary keys
-    * (docs/design/projects/spark-milvus/enhance/2026-10-13-search-take-stage.html
-    * section 5).
+    * again, 31 TB in all against 8 GB of primary keys (design document
+    * enhance/2026-10-13-search-take-stage.html section 5).
     */
   def rangeBucket(offset: Long, rows: Long, buckets: Int): Int = {
     require(rows > 0 && buckets > 0, s"$rows rows, $buckets buckets")

@@ -267,7 +267,7 @@ lazy val spark = Project("spark", file("spark"))
   )
   .settings(lineBundle(Versions.selected))
 
-// Spark Connect on the 4.x lines (docs/design/projects/spark-milvus/architecture/dataframe-api.html
+// Spark Connect on the 4.x lines (design document architecture/dataframe-api.html
 // section 9). The suite runs the server in its own JVM, beside the classic
 // session, and starts the client as a JVM of its own: the client jar carries
 // the sql-api classes rebuilt against a relocated Arrow, which would replace
@@ -377,7 +377,7 @@ def jvmReleaseSettings(l: Versions.SparkLine): Seq[Setting[_]] =
     )
   )
 
-// The selected Spark line's local bundle (docs/design/projects/spark-milvus/architecture/modules.md section 4, constraints
+// The selected Spark line's local bundle (design document architecture/modules.md section 4, constraints
 // 6 and 17).
 def lineBundle(l: Versions.SparkLine): Seq[Setting[_]] =
   fatJarRules ++ Seq(
@@ -432,7 +432,7 @@ lazy val integration = project
   )
 
 // Shared packing rules for the selected Spark bundle and JVM export
-// (docs/design/projects/spark-milvus/architecture/modules.md section 4, constraint 6).
+// (design document architecture/modules.md section 4, constraint 6).
 lazy val fatJarRules: Seq[Setting[_]] = Seq(
   assembly / parallelExecution := true,
   assembly / assemblyPackageScala / assembleArtifact := false,

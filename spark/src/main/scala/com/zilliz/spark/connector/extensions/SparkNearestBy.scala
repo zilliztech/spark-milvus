@@ -9,9 +9,8 @@ import org.apache.spark.sql.SparkSession
 import com.zilliz.milvus.storage.vector.RankingFunction
 
 /** Spark's own computation of one NEAREST BY, which the Spark line that has the
-  * syntax gives a [[MilvusNearestByJoin]] when it replaces the join
-  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html sections
-  * 2 and 4).
+  * syntax gives a [[MilvusNearestByJoin]] when it replaces the join (design
+  * document architecture/dataframe-api.html sections 2 and 4).
   *
   * The connector ranks candidates by Float engine-scale scores, including Float
   * squared distances for L2. `function` scores base rows Knowhere is not given,

@@ -32,8 +32,7 @@ import org.apache.spark.unsafe.types.UTF8String
 import com.zilliz.milvus.storage.schema.MetricType
 
 /** Spark 4.2's NEAREST BY join, taken over where the connector executes it
-  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
-  * 3).
+  * (design document architecture/dataframe-api.html section 3).
   */
 object NearestByExtensions {
   def apply(extensions: SparkSessionExtensions): Unit = {
@@ -103,9 +102,8 @@ final class ReplaceNearestByJoin(session: SparkSession)
   }
 }
 
-/** Spark's own computation of one NEAREST BY the rule replaced
-  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html sections
-  * 2 and 4).
+/** Spark's own computation of one NEAREST BY the rule replaced (design document
+  * architecture/dataframe-api.html sections 2 and 4).
   *
   * `execute` puts the query rows it is given in place of the join's query side,
   * as a relation over the same column ids, and runs the join as Spark does:

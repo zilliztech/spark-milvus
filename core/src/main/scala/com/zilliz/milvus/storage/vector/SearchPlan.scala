@@ -12,15 +12,14 @@ import com.zilliz.milvus.storage.schema.VectorLayout
   *
   * How many sets there are, and which side a task keeps in memory, follow from
   * how many tasks the search runs at once and the two budgets of one task: its
-  * queries' budget on the heap and its segments' budget off it
-  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
-  * 2.1, search-resources .html section 3.3). A task that can keep its queries
-  * reads every segment of its set once, one at a time, so there are as many
-  * sets as tasks run at once: each set is then read once and the query set is
-  * taken once per set, which is the least either costs. A task that cannot
-  * keeps its segment set and the query groups pass through it, so a set holds
-  * no more than the segment budget and there are more sets when the segments
-  * need them.
+  * queries' budget on the heap and its segments' budget off it (design document
+  * architecture/vector-search.html section 2.1, search-resources .html section
+  * 3.3). A task that can keep its queries reads every segment of its set once,
+  * one at a time, so there are as many sets as tasks run at once: each set is
+  * then read once and the query set is taken once per set, which is the least
+  * either costs. A task that cannot keeps its segment set and the query groups
+  * pass through it, so a set holds no more than the segment budget and there
+  * are more sets when the segments need them.
   *
   * An exact search with fewer sets than tasks run at once cuts its queries into
   * contiguous ranges, one task per (set, range): the batched distance entry
@@ -223,9 +222,7 @@ object SearchPlan {
   /** The share of a task's segment budget an unknown-sized segment is planned
     * at. Half the budget, before reserving the query matrix and working
     * buffers. A task streams instead of holding when the segments turn out
-    * larger
-    * (docs/design/projects/spark-milvus/architecture/search-resources.html
-    * section 3.3).
+    * larger (design document architecture/search-resources.html section 3.3).
     */
   val UnknownSegmentShare: Double = 0.5
 
@@ -413,8 +410,7 @@ object SearchPlan {
 
   /** The first-stage tasks of one search: the segment sets, the query groups,
     * the ranges of groups each task answers on its set, and the side a task
-    * keeps (docs/design/projects/spark-milvus/architecture/vector-search.html
-    * section 2.1).
+    * keeps (design document architecture/vector-search.html section 2.1).
     *
     * @param concurrency
     *   how many first-stage tasks run at once in the whole search

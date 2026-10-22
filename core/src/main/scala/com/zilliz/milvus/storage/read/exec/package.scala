@@ -11,11 +11,10 @@ package com.zilliz.milvus.storage.read
   * caller, outside this physical read boundary. The three ownership rules — a
   * handle never crosses serialization, a constructor that throws releases what
   * it took, `close()` is idempotent — are kept by `NativeSegmentReader` and
-  * explained in docs/design/projects/spark-milvus/architecture/storage-io.html
-  * section 3. The reader keeps MilvusStorageProperties alive until it is
-  * destroyed, and closes an owned manifest only after the reader has released
-  * its borrowed column groups. JNI and native library loading belong to
-  * milvus-storage.
+  * explained in design document architecture/storage-io.html section 3. The
+  * reader keeps MilvusStorageProperties alive until it is destroyed, and closes
+  * an owned manifest only after the reader has released its borrowed column
+  * groups. JNI and native library loading belong to milvus-storage.
   *
   * `SegmentReader.take` retrieves sorted, unique physical row indices with a
   * per-call projection through the upstream reader's takeRecordBatchReaderScala
@@ -48,23 +47,22 @@ package com.zilliz.milvus.storage.read
   * its read bytes and time; SegmentIndexHandle implements IndexSearch.Target,
   * keeping index decoding and the valid_data row mapping in this package.
   * `core.vector` computes on what these hand over and opens nothing itself
-  * (docs/design/projects/spark-milvus/architecture/vector-search.html sections
-  * 2.3 and 2.4).
+  * (design document architecture/vector-search.html sections 2.3 and 2.4).
   *
   * `SegmentReader.metrics` is what the read cost on the crossing, as
   * `ReadMetrics`: calls and time, batches and bytes, the C side's copies, the
-  * allocator's peak (G5;
-  * docs/design/projects/spark-milvus/architecture/storage-io.html section 5).
+  * allocator's peak (G5; design document architecture/storage-io.html section
+  * 5).
   *
   * Main types: SegmentReader, PhysicalColumnGroup, DeletePlans, ReadMetrics,
   * RowExclusions, SegmentVectors, SegmentIndexHandle, IndexRowMapping.
-  * Capabilities: R3, R4, R8, R14, R17, V2, G3, G5 (see
-  * docs/design/projects/spark-milvus/capabilities.md). R4 and R17 name the
-  * columnar outlet; R17 is partial: batches leave as `VectorSchemaRoot` and
-  * become Spark `ColumnarBatch` in layer 3, while the raw-address signature for
-  * native consumers (vector buffer address plus bitmap) does not exist yet. G3
-  * maps typed row/byte batch limits to the upstream reader; the Spark reader
-  * owns a bounded child allocator that outlives every imported batch. Design:
-  * docs/design/projects/spark-milvus/architecture/read.html section 5.2.
+  * Capabilities: R3, R4, R8, R14, R17, V2, G3, G5 (see design document
+  * capabilities.md). R4 and R17 name the columnar outlet; R17 is partial:
+  * batches leave as `VectorSchemaRoot` and become Spark `ColumnarBatch` in
+  * layer 3, while the raw-address signature for native consumers (vector buffer
+  * address plus bitmap) does not exist yet. G3 maps typed row/byte batch limits
+  * to the upstream reader; the Spark reader owns a bounded child allocator that
+  * outlives every imported batch. Design: design document
+  * architecture/read.html section 5.2.
   */
 package object exec

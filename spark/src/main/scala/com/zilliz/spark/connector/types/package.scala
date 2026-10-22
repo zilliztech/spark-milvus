@@ -15,7 +15,6 @@ package com.zilliz.spark.connector
   * `SelectedRowsColumn` presents selected rows of another column without
   * copying its buffers.
   *
-  * Capabilities: R15, G3 (see
-  * docs/design/projects/spark-milvus/capabilities.md).
+  * Capabilities: R15, G3 (see design document capabilities.md).
   */
 package object types

@@ -160,9 +160,8 @@ object SegmentReader {
     * each range is one GET on one connection, which moves 40 to 60 MB/s from
     * S3. Arrow's default cache requests the ranges one at a time as decoding
     * reaches them, so a task read at one connection's speed whatever the range
-    * size; requested together, eight ranges use eight connections
-    * (docs/design/projects/spark-milvus/architecture/search-resources.html
-    * section 3.6).
+    * size; requested together, eight ranges use eight connections (design
+    * document architecture/search-resources.html section 3.6).
     */
   private[exec] val RangesPerBatch = 8
 
@@ -436,8 +435,7 @@ private[exec] final class ExpectedRowsSegmentReader(
 /** [[SegmentReader]] over milvus-storage's C reader.
   *
   * Three rules this class exists to keep, all of them from getting them wrong
-  * once (see docs/design/projects/spark-milvus/architecture/storage-io.html
-  * section 3):
+  * once (see design document architecture/storage-io.html section 3):
   *
   *   - A handle never crosses a serialization boundary. It is opened here, on
   *     the executor, from a physical source description.

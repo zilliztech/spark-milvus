@@ -10,14 +10,13 @@ import com.zilliz.spark.connector.extensions.{
   NearestByJoinRequest
 }
 
-/** `nearestByJoin` on Spark 4.0 and 4.1, which have no NearestByJoin
-  * (docs/design/projects/spark-milvus/architecture/dataframe-api.html section
-  * 6). A Spark Connect DataFrame is not a plan this JVM can build on; its SQL
-  * form is the table function `nearest_by_join`. The session is told by its
-  * class name, and the plan is built in [[ClassicNearestByJoin]]: a Connect
-  * client has neither the classic nor the catalyst classes, and the JVM loads
-  * some of the classes a class refers to when it checks that class, so this
-  * object refers to none.
+/** `nearestByJoin` on Spark 4.0 and 4.1, which have no NearestByJoin (design
+  * document architecture/dataframe-api.html section 6). A Spark Connect
+  * DataFrame is not a plan this JVM can build on; its SQL form is the table
+  * function `nearest_by_join`. The session is told by its class name, and the
+  * plan is built in [[ClassicNearestByJoin]]: a Connect client has neither the
+  * classic nor the catalyst classes, and the JVM loads some of the classes a
+  * class refers to when it checks that class, so this object refers to none.
   */
 private[implicits] object NearestByEntry {
 

@@ -32,7 +32,7 @@ object MilvusOption {
   val SearchCallsInFlight = "milvus.search.calls.in.flight"
   // An index's search tuning, given with the base input of a NEAREST BY:
   // ef for the HNSW family, nprobe for the IVF family
-  // (docs/design/projects/spark-milvus/architecture/dataframe-api.html section 5).
+  // (design document architecture/dataframe-api.html section 5).
   val SearchParams = "milvus.search.params"
   val MilvusFilter = "milvus.filter"
 

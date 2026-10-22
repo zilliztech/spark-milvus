@@ -5,9 +5,9 @@ description: Use when opening, reading, listing or writing a file in object stor
 
 # Storage access
 
-Read [AGENTS.md](../../../AGENTS.md), then
-the design (`docs/design/projects/spark-milvus/architecture/storage-access.html`). That
-document owns the decision and the evidence; this skill applies it. Credentials
+Read [AGENTS.md](../../../AGENTS.md), then the maintainers' storage-access
+design. That document owns the decision and the evidence; this skill applies
+it. Credentials
 under Hadoop are in
 [spark-milvus-storage-auth](../spark-milvus-storage-auth/SKILL.md).
 
@@ -136,7 +136,7 @@ JVM side and computing which groups to skip produces a result with nowhere to
 go, so R10 is not a question of where to put the code: pruning has to happen on
 the side that reads. It needs Milvus to write statistics files registered in the
 manifest's `stats`, and milvus-storage's reader to prune with them. Section 5 of
-docs/design/projects/spark-milvus/README.md tracks both.
+the maintainers' design log tracks both.
 
 Do not reach for `Manifest.stats` expecting min/max. It maps a stat name
 (`"bloom_filter.100"`) to `{paths, metadata}` — paths to auxiliary files.

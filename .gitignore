@@ -17,6 +17,3 @@ __pycache__/
 .sbt/
 
 examples/
-
-# Local checkout or symlink of the maintainers' design documents; not a submodule.
-/docs/design/

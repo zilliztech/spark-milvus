@@ -5,13 +5,12 @@ a symlink to this file, so every tool reads the same page; edit this one.
 
 The full guide — where the work stands, which document governs which
 subsystem, the design principles and the index-maintenance rules — is kept by
-the maintainers outside this repository. Paths written as `docs/design/...` in
-source comments, package docs and skills name files in that document set.
-Maintainers place a checkout or symlink of it at `docs/design/` here, which git
-ignores, and then read `docs/design/projects/spark-milvus/AGENTS.md` before
-anything else; it continues this page. Otherwise this page and
-[docs/contributing.md](docs/contributing.md) are what you have, and they are
-enough to build, test and change the code.
+the maintainers outside this repository. A comment that cites a "design
+document" or "the maintainers' ... design" names a page in that document set;
+nothing in this repository contains or links to those pages. Maintainers read
+that set's project orientation before anything else; it continues this page.
+Otherwise this page and [docs/contributing.md](docs/contributing.md) are what
+you have, and they are enough to build, test and change the code.
 
 ## What this project is
 
@@ -94,7 +93,7 @@ The [formatting](docs/contributing.md#formatting) and
 hold the required commands: the formatter and its check with Java 21, `git diff
 --check`, then the full root unit test suite. A change to a `package.scala` or
 to the capability index in the maintainers' design documents also runs
-`sbt checkCapabilityIndex`, which reads those documents from
-`SPARK_MILVUS_DESIGN_DIR` or from a local `docs/design/` checkout. A document
-change is committed where the documents live; this repository records no
-gitlink for them ([Documents](docs/contributing.md#documents)).
+`sbt checkCapabilityIndex`, which reads those documents from the directory
+named by `SPARK_MILVUS_DESIGN_DIR`. A document change is committed where the
+documents live; this repository records no gitlink for them
+([Documents](docs/contributing.md#documents)).

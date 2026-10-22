@@ -33,9 +33,8 @@ package com.zilliz.milvus.storage
   * several threads at once.
   *
   * Main types: ObjectStore, ObjectStoreFactory, NativeObjectStore, FileInfo,
-  * ConcurrentRangeReads. Capabilities: R2, R3 (see
-  * docs/design/projects/spark-milvus/capabilities.md). Design:
-  * docs/design/projects/spark-milvus/architecture/storage-access.html section
-  * 4.
+  * ConcurrentRangeReads. Capabilities: R2, R3 (see design document
+  * capabilities.md). Design: design document architecture/storage-access.html
+  * section 4.
   */
 package object io

@@ -7,7 +7,6 @@ package com.zilliz.spark.connector
   * `MilvusOption` parses typed read limits, filters and fixed snapshot input;
   * `SearchLimits` and `TaskResources` supply search execution limits.
   *
-  * Capabilities: R16, G1, G3 (see
-  * docs/design/projects/spark-milvus/capabilities.md).
+  * Capabilities: R16, G1, G3 (see design document capabilities.md).
   */
 package object options

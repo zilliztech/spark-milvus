@@ -7,10 +7,10 @@ import com.zilliz.milvus.storage.schema.MetricType
 /** One candidate row for one query: where it is and what it scored.
   *
   * `score` is the metric score rounded to Float32 before local selection,
-  * shared by local and global ranking
-  * (docs/design/projects/spark-milvus/architecture/vector-search.html section
-  * 2.6). [[TopKMerger]] does not hold these: it holds the three numbers in
-  * primitive arrays, and builds a `Candidate` only where a caller asks for one.
+  * shared by local and global ranking (design document
+  * architecture/vector-search.html section 2.6). [[TopKMerger]] does not hold
+  * these: it holds the three numbers in primitive arrays, and builds a
+  * `Candidate` only where a caller asks for one.
   */
 final case class Candidate(
     query: Int,
@@ -59,8 +59,7 @@ object Candidate {
   * sorts only when the caller requests [[sort]], and only for the k it kept.
   * [[results]] reads the current order without ending collection; [[sort]]
   * finalizes one query before its ordered output, and [[takePacked]] requires
-  * that explicit step
-  * (docs/design/projects/spark-milvus/architecture/topk-merger.html).
+  * that explicit step (design document architecture/topk-merger.html).
   */
 final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
     extends Serializable {
