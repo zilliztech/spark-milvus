@@ -269,8 +269,8 @@ lazy val spark = Project("spark", file("spark"))
 // Spark Connect on the 4.x lines. The suite runs the server in its own JVM,
 // beside the classic session, and starts the client as a JVM of its own: the
 // client jar carries the sql-api classes rebuilt against a relocated Arrow,
-// which would replace the classic ones. The client's classpath, the jar and this line's classes,
-// reaches the suite as a system property.
+// which would replace the classic ones. The client's classpath, the jar and
+// this line's classes, reaches the suite as a system property.
 lazy val ConnectClient = config("connect-client").hide
 
 def connectClient(l: Versions.SparkLine): Seq[Setting[_]] = Seq(
