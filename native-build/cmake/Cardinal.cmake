@@ -54,6 +54,12 @@ function(milvus_add_cardinal)
             prometheus-cpp::prometheus-cpp nlohmann_json::nlohmann_json
             simde::simde milvus-common::milvus-common OpenBLAS::OpenBLAS
             OpenMP::OpenMP_CXX "${MILVUS_KNOWHERE_AIO_LIBRARY}")
+        if(version EQUAL 2)
+            # Cardinal v2 from #946 on partitions compaction groups with METIS
+            # (compaction_planner.cpp); upstream links metis::metis privately.
+            # The same Conan package already serves Knowhere's Cardinal build.
+            target_link_libraries(${target} PRIVATE metis::metis)
+        endif()
 
         set(smalltopk "${cardinal_root}/third_party/smalltopk/smalltopk")
         if(cardinal_arch STREQUAL "X86_64")
