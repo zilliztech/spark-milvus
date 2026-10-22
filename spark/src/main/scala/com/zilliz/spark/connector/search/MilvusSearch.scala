@@ -152,8 +152,10 @@ object MilvusSearch extends Logging {
     val dictionary = spark.sparkContext.broadcast(execution.candidateDictionary)
     logInfo(
       s"Merge stage: $queryCount queries x ${plan.sets.size} answers of $k over ${mergePlan.partitions} partitions, " +
-        s"about ${mergePlan.queriesPerPartition} queries a partition at ${mergePlan.bytesPerQuery} estimated bytes each " +
-        s"against ${mergeStage.heap.bytes} bytes of heap a task; " +
+        s"about ${mergePlan.queriesPerPartition} queries a partition; one query retains up to " +
+        s"${mergeStage.footprint.stateBytes} bytes of runs in the reduce-side map against " +
+        s"${mergeStage.executionHeap.bytes} bytes of execution pool a task, and holds " +
+        s"${mergeStage.footprint.temporaryBytes} bytes of its own against ${mergeStage.heap.bytes} bytes of heap a task; " +
         s"tasksPerExecutor=${mergeStage.running} coresPerTask=${mergeStage.cores}" +
         (if (mergeStage.profile.isEmpty) " (default slots)"
          else " (declared)") +

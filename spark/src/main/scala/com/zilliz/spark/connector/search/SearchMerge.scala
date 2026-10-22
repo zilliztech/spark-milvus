@@ -48,8 +48,76 @@ private[search] object SearchMerge {
     )
   )
 
-  /** Count limit before compacting the retained sorted runs. */
+  /** Count limit before compacting the retained sorted runs, and the least the
+    * plan lowers it to when the executor's memory is tight: at two, each
+    * arriving answer is merged into the state at once.
+    */
   val MaxRuns: Int = 8
+  val MinRuns: Int = 2
+
+  /** The most of a shuffle block the reduce side brings into the heap at once:
+    * Spark fetches a block to memory below
+    * `spark.network.maxRemoteBlockSizeFetchToMem` (200 MiB by default) and to
+    * disk above it.
+    */
+  val FetchToMemoryBytes: Long = 200L << 20
+
+  /** What one query's merge holds at its peak, by where it lives. The retained
+    * runs, up to `maxRuns` answers of `answerBytes` each, are the value in the
+    * reduce-side map, which Spark accounts in its execution pool and spills
+    * when it outgrows the task's share. The compaction's output and the answer
+    * being deserialized are the task's own objects, in the heap Spark does not
+    * manage, together with the cursors, heads and selection arrays. Answers are
+    * counted at the width they are written: every candidate takes
+    * `CandidateBytes.Width` bytes, a carried one its header and row.
+    */
+  final case class Footprint(
+      answerBytes: Long,
+      maxRuns: Int,
+      stateBytes: Long,
+      temporaryBytes: Long
+  ) {
+    def bytesPerQuery: Long = add(stateBytes, temporaryBytes)
+  }
+
+  def footprint(
+      sources: Int,
+      k: Int,
+      layout: CandidateRuns.Layout = CandidateRuns.Plain,
+      candidateBytes: Long = CandidateBytes.Width.toLong,
+      maxRuns: Int = MaxRuns
+  ): Footprint = {
+    require(sources > 0, "Every query needs at least one candidate source")
+    require(k > 0, s"A search needs a positive k: $k")
+    require(
+      candidateBytes > 0L,
+      s"Candidate width must be positive: $candidateBytes"
+    )
+    require(
+      maxRuns >= MinRuns,
+      s"A merge batch needs at least $MinRuns runs: $maxRuns"
+    )
+    val answerBytes = multiply(k.toLong, candidateBytes)
+    val stateBytes = multiply(math.min(sources, maxRuns).toLong, answerBytes)
+    // Views, cursors and heap slots of a compaction, and the containers' and
+    // array headers of two states. Carried selection can hold old and new Int
+    // arrays together during growth: two arrays per generation, each <= k.
+    val headBytes = multiply(96L, maxRuns.toLong)
+    val selectionBytes = layout match {
+      case CandidateRuns.Plain   => 0L
+      case CandidateRuns.Carried => multiply(16L, k.toLong)
+    }
+    val metadataBytes = add(512L, multiply(64L, maxRuns.toLong))
+    val temporaryBytes = add(
+      multiply(2L, answerBytes),
+      add(add(headBytes, selectionBytes), metadataBytes)
+    )
+    Footprint(answerBytes, maxRuns, stateBytes, temporaryBytes)
+  }
+
+  /** The heap a shuffle block of `queries` answers takes while it is read. */
+  def blockBytes(queries: Long, answerBytes: Long): Long =
+    math.min(multiply(queries, answerBytes), FetchToMemoryBytes)
 
   /** One merge's partitioning and per-query candidate budget. The byte target
     * triggers compaction; a single answer may exceed it. Expected key counts
@@ -66,93 +134,44 @@ private[search] object SearchMerge {
   ) {
     require(partitions > 0, s"The merge needs a partition: $partitions")
     require(k > 0, s"topK must be positive: $k")
-    require(maxRuns >= 2, s"A merge batch needs at least two runs: $maxRuns")
+    require(
+      maxRuns >= MinRuns,
+      s"A merge batch needs at least $MinRuns runs: $maxRuns"
+    )
     require(targetBytes > 0L, s"The byte target must be positive: $targetBytes")
   }
 
-  /** What one query's merge is planned to hold at its worst, and the parts of
-    * it: every source's answer at once, or two full batches absorbing each
-    * other, whichever is more, plus the temporaries of a compaction. Every
-    * answer is reserved at `candidateBytes` a candidate, which is above the
-    * fixed wire width on purpose.
-    */
-  final case class QueryBytes(
-      answerBytes: Long,
-      batchBytes: Long,
-      temporaryBytes: Long,
-      bytesPerQuery: Long
-  )
-
-  def queryBytes(
-      sources: Int,
-      k: Int,
-      layout: CandidateRuns.Layout = CandidateRuns.Plain,
-      candidateBytes: Long = SearchPlan.PackedCandidateReserveBytes.toLong,
-      maxRuns: Int = MaxRuns
-  ): QueryBytes = {
-    require(sources > 0, "Every query needs at least one candidate source")
-    require(k > 0, s"A search needs a positive k: $k")
-    require(
-      candidateBytes > 0L,
-      s"Candidate width must be positive: $candidateBytes"
-    )
-    require(maxRuns >= 2, s"A merge batch needs at least two runs: $maxRuns")
-    val answerBytes = multiply(k.toLong, candidateBytes)
-    val batchBytes = multiply(math.min(sources, maxRuns).toLong, answerBytes)
-    // Conservative estimates for views, cursors, heap slots and two states'
-    // containers/array headers. Carried selection can hold old and new Int
-    // arrays together during growth: two arrays per generation, each <= k.
-    val headBytes = multiply(96L, maxRuns.toLong)
-    val selectionBytes = layout match {
-      case CandidateRuns.Plain   => 0L
-      case CandidateRuns.Carried => multiply(16L, k.toLong)
-    }
-    val scratchBytes = add(headBytes, selectionBytes)
-    val metadataBytes = add(512L, multiply(64L, maxRuns.toLong))
-    val temporaryBytes = add(
-      multiply(2L, answerBytes),
-      add(scratchBytes, metadataBytes)
-    )
-    val bytesPerQuery = add(
-      math.max(multiply(sources.toLong, answerBytes), multiply(2L, batchBytes)),
-      temporaryBytes
-    )
-    QueryBytes(answerBytes, batchBytes, temporaryBytes, bytesPerQuery)
-  }
-
-  /** The batch limits of a merge whose partition count
-    * `SearchExecutionPlan.mergePartitions` fixed. Half of the task's unmanaged
-    * heap share is the data budget; what one query's share of it leaves after
-    * the scratch a compaction needs is split between retained runs and the
-    * output, and the retained part never plans above one full batch. Spark's
-    * spill streams and hash skew can retain more than two states; neither this
-    * estimate nor the per-state target is a task memory limit.
+  /** The batch limits of a merge whose partition count and runs
+    * `SearchExecutionPlan.mergeStage` fixed. `stateBudgetBytes` is the
+    * execution pool share of one task; the queries a partition is expected to
+    * hold divide it, and a query's retained runs are compacted once they reach
+    * that share or one full batch, whichever is less. Hash skew can retain more
+    * than the expected queries; neither the estimate nor the target is a task
+    * memory limit.
     */
   def plan(
       partitions: Int,
       queries: Long,
       sources: Int,
       k: Int,
-      heapBytesPerTask: Long,
+      stateBudgetBytes: Long,
       layout: CandidateRuns.Layout = CandidateRuns.Plain,
-      candidateBytes: Long = SearchPlan.PackedCandidateReserveBytes.toLong,
+      candidateBytes: Long = CandidateBytes.Width.toLong,
       maxRuns: Int = MaxRuns
   ): Plan = {
     require(partitions > 0, s"The merge needs a partition: $partitions")
     require(queries > 0, s"A search needs at least one query: $queries")
-    val bytes = queryBytes(sources, k, layout, candidateBytes, maxRuns)
-    val dataBudget = math.max(0L, heapBytesPerTask) / 2L
+    val held = footprint(sources, k, layout, candidateBytes, maxRuns)
     val expected = divideUp(queries, partitions.toLong)
-    val perQueryBudget = dataBudget / expected
-    val available = math.max(0L, perQueryBudget - bytes.temporaryBytes)
-    val target = math.min(bytes.batchBytes, math.max(1L, available / 2L))
+    val perQueryBudget = math.max(0L, stateBudgetBytes) / expected
+    val target = math.min(held.stateBytes, math.max(1L, perQueryBudget))
     Plan(
       partitions,
       k,
       layout,
       maxRuns,
       target,
-      bytes.bytesPerQuery,
+      held.bytesPerQuery,
       expected
     )
   }

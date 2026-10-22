@@ -216,6 +216,26 @@ private[search] object SearchResources {
     }
   }
 
+  /** The heap Spark manages, `(heap - 300 MiB) x spark.memory.fraction`,
+    * divided by the tasks that run at once on the executor: the fair share of
+    * the execution pool one task's reduce-side map may grow to before Spark
+    * spills it. The merge's retained candidate runs live in that map.
+    */
+  def executionBudget(
+      heapBytes: Long,
+      memoryFraction: Double,
+      tasks: Int
+  ): Choice = {
+    val running = math.max(1, tasks)
+    val managed =
+      (math.max(0L, heapBytes - ReservedHeapBytes) * memoryFraction).toLong
+    val perTask = math.max(0L, managed / running)
+    Choice(
+      perTask,
+      s"heap=${mib(heapBytes)} x $memoryFraction / $running tasks -> ${mib(perTask)}"
+    )
+  }
+
   /** The queries one task keeps on the heap: the part of the heap Spark does
     * not manage, `(heap - 300 MiB) x (1 - spark.memory.fraction)`, divided by
     * the search tasks that run at once on the executor.

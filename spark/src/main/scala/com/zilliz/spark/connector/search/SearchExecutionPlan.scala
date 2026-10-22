@@ -10,6 +10,7 @@ import com.zilliz.milvus.storage.vector.{
   CandidateBytes,
   CandidateDictionary,
   CandidateRuns,
+  CarriedCandidates,
   IndexSearch,
   SearchPlan
 }
@@ -44,17 +45,24 @@ private[connector] object SearchExecutionPlan {
   ) extends Serializable
 
   /** How the merge stage runs on one executor: `running` of its tasks at once,
-    * each declaring `cores` so that no more fit, with `heap` as the unmanaged
-    * heap one of them then has. `profile` is that declaration, None when the
-    * default task slots already run that many or this master takes none.
-    * `bytesPerQuery` is the worst case one query's merge is planned to hold.
+    * each declaring `cores` so that no more fit; `maxRuns` answers a query
+    * retains before compacting; `queriesPerPartition` queries a partition is
+    * cut for, in `partitions` partitions. `heap` is the unmanaged heap one task
+    * then has for its own objects and `executionHeap` its share of the pool
+    * Spark manages, where the reduce-side map holds the retained runs.
+    * `profile` is the declaration, None when the default task slots already run
+    * that many or this master takes none.
     */
   final case class MergeStage(
       running: Int,
       cores: Int,
+      maxRuns: Int,
+      queriesPerPartition: Int,
+      partitions: Int,
       heap: SearchResources.Choice,
+      executionHeap: SearchResources.Choice,
       profile: Option[ResourceProfile],
-      bytesPerQuery: Long
+      footprint: SearchMerge.Footprint
   )
 
   /** @param stageHeap
@@ -180,13 +188,16 @@ private[connector] object SearchExecutionPlan {
     }.toVector
     val stageHeap = budget.heapFor(budget.resources.tasksPerExecutor)
     val merge = mergeStage(
+      spark.sparkContext.defaultParallelism,
       budget.resources,
       budget.heap,
       budget.fraction,
       plan.sets.size,
       k,
       CandidateRuns.Plain,
-      SearchPlan.PackedCandidateReserveBytes.toLong
+      CandidateBytes.Width.toLong,
+      queries.count,
+      plan.tasks
     )
     Milvus(
       budget,
@@ -206,19 +217,14 @@ private[connector] object SearchExecutionPlan {
       dictionary,
       merge,
       SearchMerge.plan(
-        mergePartitions(
-          spark,
-          queries.count,
-          plan.tasks,
-          plan.sets.size,
-          k,
-          merge.heap.bytes
-        ),
+        merge.partitions,
         queries.count,
         plan.sets.size,
         k,
-        merge.heap.bytes,
-        CandidateRuns.Plain
+        merge.executionHeap.bytes,
+        CandidateRuns.Plain,
+        CandidateBytes.Width.toLong,
+        merge.maxRuns
       ),
       if (takeColumns)
         Some(
@@ -305,16 +311,18 @@ private[connector] object SearchExecutionPlan {
     // A retained row also appears in the packed answer during encoding.
     val retainedMaxBytes =
       math.max(0L, (availableHeapBytes - queryHeap) / 2L)
-    val carriedBytes =
-      SearchPlan.PackedCandidateReserveBytes.toLong + 4L + rowBytes
+    val carriedBytes = CarriedCandidates.HeaderBytes.toLong + rowBytes
     val merge = mergeStage(
+      spark.sparkContext.defaultParallelism,
       resources,
       heap,
       fraction,
       math.max(1, basePartitions),
       k,
       CandidateRuns.Carried,
-      carriedBytes
+      carriedBytes,
+      queries.count,
+      math.max(1, tasks)
     )
     Frame(
       groups,
@@ -334,81 +342,109 @@ private[connector] object SearchExecutionPlan {
       merge,
       // Here every candidate carries its row.
       SearchMerge.plan(
-        mergePartitions(
-          spark,
-          queries.count,
-          math.max(1, tasks),
-          math.max(1, basePartitions),
-          k,
-          merge.heap.bytes,
-          carriedBytes
-        ),
+        merge.partitions,
         queries.count,
         math.max(1, basePartitions),
         k,
-        merge.heap.bytes,
+        merge.executionHeap.bytes,
         CandidateRuns.Carried,
-        carriedBytes
+        carriedBytes,
+        merge.maxRuns
       )
     )
   }
 
-  /** The merge stage's concurrency: as many tasks at once on an executor as the
-    * default slots allow, fewer when one query's planned merge state does not
-    * fit a default slot's heap share. One query needs twice its `bytesPerQuery`
-    * (its inputs and its output, as `mergePartitions` divides a task's share);
-    * the number of tasks whose shares each hold that is `wanted`, and the stage
-    * declares `ceil(cores / wanted)` cores a task so that `floor(cores / that)`
-    * run at once. When even one task per executor does not hold one query,
-    * planning fails here rather than letting the stage run out of heap.
+  /** The merge stage's concurrency, runs and partitioning, from where one
+    * query's merge state lives. A task's retained runs are the value in the
+    * reduce-side map, which Spark accounts in its execution pool, `(heap - 300
+    * MiB) x spark.memory.fraction` shared by the tasks that run at once; its
+    * compaction output, the answer it is deserializing and the shuffle block it
+    * reads are its own objects, in the heap Spark does not manage. Both pools
+    * are divided by the tasks that run at once on the executor.
+    *
+    * The stage runs as many tasks at once as both pools hold one query each
+    * for, preferring the default task slots (every core busy) and, at that
+    * concurrency, the most runs a query may retain before compacting (fewer
+    * compactions); below the default slots it declares the cores a task takes
+    * so that no more fit. A partition then takes as many queries as the two
+    * shares hold at once, never more than `QueriesPerMergePartition`. When one
+    * task alone on its executor cannot hold one query, planning fails here
+    * rather than letting the stage run out of heap.
     *
     * A master that takes no task-resource declaration (local, or dynamic
     * allocation on) runs the default slots whatever the need; planning still
-    * fails when their share is too small.
+    * fails when their shares are too small.
     */
   def mergeStage(
+      parallelism: Int,
       resources: TaskResources,
       heapBytes: Long,
       fraction: Double,
       sources: Int,
       k: Int,
       layout: CandidateRuns.Layout,
-      candidateBytes: Long
+      candidateBytes: Long,
+      queries: Long,
+      firstStageTasks: Int
   ): MergeStage = {
-    val bytesPerQuery =
-      SearchMerge.queryBytes(sources, k, layout, candidateBytes).bytesPerQuery
-    val needed = saturatingDouble(bytesPerQuery)
     val slots = resources.tasksPerExecutor
-    val executorHeap = SearchResources.queryBudget(heapBytes, fraction, 1).bytes
-    val fits = if (needed <= 0L) slots.toLong else executorHeap / needed
-    val wanted = math.max(1L, math.min(fits, slots.toLong)).toInt
-    val (running, cores, profile) =
-      if (!resources.declarable || wanted >= slots)
-        (slots, resources.taskCpus, None)
-      else {
-        val taskCores =
-          (resources.executorCores + wanted - 1) / wanted
+    val userHeap = SearchResources.queryBudget(heapBytes, fraction, 1).bytes
+    val executionHeap =
+      SearchResources.executionBudget(heapBytes, fraction, 1).bytes
+    def held(maxRuns: Int) =
+      SearchMerge.footprint(sources, k, layout, candidateBytes, maxRuns)
+    // One query in a task: its runs in the map, its temporaries and the block
+    // it arrives in outside it.
+    def fits(running: Int, maxRuns: Int): Boolean = {
+      val footprint = held(maxRuns)
+      footprint.stateBytes <= executionHeap / running &&
+      footprint.temporaryBytes + SearchMerge.blockBytes(
+        1L,
+        footprint.answerBytes
+      ) <= userHeap / running
+    }
+    // The concurrencies a stage can declare: `cores` cores a task for every
+    // whole-number division of the executor, most tasks first and, for one
+    // count of tasks, the most cores that still fit that many. An
+    // undeclarable stage has only the default slots.
+    val choices: Seq[(Int, Int)] =
+      if (!resources.declarable) Seq((slots, resources.taskCpus))
+      else
+        (resources.executorCores to resources.taskCpus by -1)
+          .map(cores => (resources.executorCores / cores, cores))
+          .filter { case (running, _) => running >= 1 && running <= slots }
+          .distinctBy(_._1)
+          .sortBy(-_._1)
+    val chosen = choices.iterator
+      .map { case (running, cores) =>
         (
-          math.max(1, resources.executorCores / taskCores),
-          taskCores,
-          resources.atMost(wanted)
+          running,
+          cores,
+          (SearchMerge.MaxRuns to SearchMerge.MinRuns by -1)
+            .find(fits(running, _))
         )
       }
-    val heap = SearchResources.queryBudget(heapBytes, fraction, running)
-    if (needed > heap.bytes) {
+      .collectFirst { case (running, cores, Some(maxRuns)) =>
+        (running, cores, maxRuns)
+      }
+    val (running, cores, maxRuns) = chosen.getOrElse {
+      val alone = if (resources.declarable) 1 else slots
       val largest = largestMergeableK(
-        executorHeap / (if (resources.declarable) 1L else slots.toLong),
+        userHeap / alone,
+        executionHeap / alone,
         sources,
         layout,
         candidateBytes
       )
+      val minimal = held(SearchMerge.MinRuns)
       throw new IllegalArgumentException(
-        s"Merging one query's $sources answers of k=$k needs $needed bytes of " +
-          s"heap in a task (${bytesPerQuery} planned bytes a query, twice for " +
-          s"its inputs and output), but a merge task has ${heap.bytes} " +
-          s"(${heap.reason})" +
+        s"Merging one query's $sources answers of k=$k holds ${minimal.stateBytes} bytes " +
+          s"of retained runs in the reduce-side map against an execution pool share of " +
+          s"${executionHeap / alone} bytes, and ${minimal.temporaryBytes + SearchMerge
+              .blockBytes(1L, minimal.answerBytes)} bytes of its own against a heap share of " +
+          s"${userHeap / alone} bytes" +
           (if (resources.declarable)
-             s" even when one runs alone on its executor"
+             " even when one task runs alone on its executor"
            else
              s"; this master takes no task cores declaration, so $slots run at once") +
           (if (largest >= 1L)
@@ -416,22 +452,60 @@ private[connector] object SearchExecutionPlan {
            else ". Raise spark.executor.memory: no k fits these executors.")
       )
     }
-    MergeStage(running, cores, heap, profile, bytesPerQuery)
+    val footprint = held(maxRuns)
+    val heap = SearchResources.queryBudget(heapBytes, fraction, running)
+    val execution =
+      SearchResources.executionBudget(heapBytes, fraction, running)
+    // Queries a partition: as many as the map share holds runs for and the
+    // task's own share holds the block of, within the fixed few thousand.
+    val byState = execution.bytes / math.max(1L, footprint.stateBytes)
+    val ownRoom = math.max(0L, heap.bytes - footprint.temporaryBytes)
+    val byBlock =
+      if (ownRoom >= SearchMerge.FetchToMemoryBytes) Long.MaxValue
+      else ownRoom / math.max(1L, footprint.answerBytes)
+    val perPartition = math
+      .max(
+        1L,
+        math.min(QueriesPerMergePartition.toLong, math.min(byState, byBlock))
+      )
+      .toInt
+    val partitions =
+      mergePartitions(parallelism, queries, firstStageTasks, perPartition)
+    val profile =
+      if (running >= slots) None else resources.taking(cores)
+    MergeStage(
+      running,
+      cores,
+      maxRuns,
+      perPartition,
+      partitions,
+      heap,
+      execution,
+      profile,
+      footprint
+    )
   }
 
-  /** The largest k whose merge one task of `heapBytes` holds, 0 when none does.
+  /** The largest k whose merge one task holds with `userHeapBytes` of its own
+    * and `executionHeapBytes` of the pool Spark manages, 0 when none does.
     * Planned bytes grow with k, so a binary search finds it.
     */
   def largestMergeableK(
-      heapBytes: Long,
+      userHeapBytes: Long,
+      executionHeapBytes: Long,
       sources: Int,
       layout: CandidateRuns.Layout,
       candidateBytes: Long
   ): Long = {
-    def fits(k: Int): Boolean =
-      saturatingDouble(
-        SearchMerge.queryBytes(sources, k, layout, candidateBytes).bytesPerQuery
-      ) <= heapBytes
+    def fits(k: Int): Boolean = {
+      val footprint = SearchMerge
+        .footprint(sources, k, layout, candidateBytes, SearchMerge.MinRuns)
+      footprint.stateBytes <= executionHeapBytes &&
+      footprint.temporaryBytes + SearchMerge.blockBytes(
+        1L,
+        footprint.answerBytes
+      ) <= userHeapBytes
+    }
     if (!fits(1)) return 0L
     var low = 1
     var high = Int.MaxValue
@@ -441,9 +515,6 @@ private[connector] object SearchExecutionPlan {
     }
     low.toLong
   }
-
-  private def saturatingDouble(value: Long): Long =
-    if (value > Long.MaxValue / 2L) Long.MaxValue else 2L * value
 
   /** One group's queries always stay, even when the whole search was planned
     * with resident segments. Unknown or estimated sizes still attempt holding;
@@ -673,19 +744,19 @@ private[connector] object SearchExecutionPlan {
     */
   val QueriesPerMergePartition: Int = 4096
 
-  /** How many partitions the merge runs in: one for each task slot the job has,
-    * and never more than there are queries. The merge is an RDD shuffle rather
-    * than a SQL aggregation, so nothing downstream re-partitions it and
+  /** How many partitions the merge runs in: one for each task slot the job has
+    * and for every first-stage task, so no executor sits out the merge; more
+    * when the queries would otherwise pile up beyond `queriesPerPartition` in
+    * one; never more than there are queries, since a query is one key and
+    * cannot be split. The merge is an RDD shuffle rather than a SQL
+    * aggregation, so nothing downstream re-partitions it and
     * `spark.sql.shuffle.partitions` does not apply.
     */
   def mergePartitions(
-      spark: SparkSession,
+      parallelism: Int,
       queries: Long,
       firstStageTasks: Int,
-      candidateSourcesPerQuery: Int,
-      k: Int,
-      heapBytesPerTask: Long,
-      candidateBytes: Long = SearchPlan.PackedCandidateReserveBytes.toLong
+      queriesPerPartition: Int
   ): Int = {
     require(queries > 0, s"A search needs at least one query: $queries")
     require(
@@ -693,29 +764,12 @@ private[connector] object SearchExecutionPlan {
       s"A search needs at least one task: $firstStageTasks"
     )
     require(
-      candidateSourcesPerQuery > 0,
-      "Every query needs at least one candidate source"
+      queriesPerPartition > 0,
+      s"A partition takes at least one query: $queriesPerPartition"
     )
-    require(k > 0, s"A search needs a positive k: $k")
-    // At least one partition for every task slot the job has and for every
-    // first-stage task, so no executor sits out the merge; more when the
-    // queries would otherwise pile up in one partition; never more than there
-    // are queries, since a query is one key and cannot be split.
-    //
-    // How many queries a partition may hold is the smaller of a fixed few
-    // thousand and what the task's heap fits: every query arrives as one
-    // packed answer per candidate source (segment set or base partition), and the
-    // reduce-side map holds them until they are merged. 100k queries at
-    // k=16,384 over 15 tasks were 5.9 MB a query; 64 partitions of 1,563
-    // queries each ran the 6 GiB heap out (2026-09-26 decision). Half the
-    // heap share is left for the merged answers and the rows they become.
-    val slots = math.max(1, spark.sparkContext.defaultParallelism)
-    val bytesPerQuery =
-      candidateSourcesPerQuery.toLong * k.toLong * candidateBytes
-    val byHeap =
-      math.max(1L, math.max(0L, heapBytesPerTask) / 2L / bytesPerQuery)
-    val perPartition = math.min(QueriesPerMergePartition.toLong, byHeap)
-    val byQueries = (queries + perPartition - 1L) / perPartition
+    val slots = math.max(1, parallelism)
+    val byQueries =
+      (queries + queriesPerPartition - 1L) / queriesPerPartition
     val wanted =
       math.max(math.max(slots.toLong, firstStageTasks.toLong), byQueries)
     math.max(1L, math.min(queries, wanted)).toInt

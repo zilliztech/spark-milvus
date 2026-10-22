@@ -107,14 +107,23 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     )
 
   /** The merge plan of two first-stage tasks over two candidate sources. */
-  private def plan(queries: Long, k: Int, heap: Long = 1L << 30) =
+  private def plan(queries: Long, k: Int, heap: Long = 1L << 30) = {
+    val perPartition = math
+      .max(1L, math.min(4096L, heap / 2L / (2L * k * CandidateBytes.Width)))
+      .toInt
     SearchMerge.plan(
-      SearchExecutionPlan.mergePartitions(spark, queries, 2, 2, k, heap),
+      SearchExecutionPlan.mergePartitions(
+        spark.sparkContext.defaultParallelism,
+        queries,
+        2,
+        perPartition
+      ),
       queries,
       2,
       k,
       heap
     )
+  }
 
   private def completed(
       answers: Seq[(Long, Array[Byte])],
@@ -191,7 +200,7 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     } finally broadcast.destroy()
   }
 
-  test("fixed candidate wire width keeps the conservative merge budget") {
+  test("the merge budget counts candidates at their fixed wire width") {
     val baseline = SearchMerge.plan(17, 100L, 4, 100000, 1L << 30)
     CandidateBytes.Width shouldBe 12
     val planned = SearchMerge.plan(
@@ -201,9 +210,13 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       100000,
       1L << 30,
       CandidateRuns.Plain,
-      candidateBytes = 24L
+      candidateBytes = CandidateBytes.Width.toLong
     )
     planned shouldBe baseline
+    SearchMerge.footprint(4, 100000).answerBytes shouldBe 100000L * 12L
+    SearchMerge
+      .plan(17, 100L, 4, 100000, 1L << 30, CandidateRuns.Plain, 24L)
+      .bytesPerQuery should be > baseline.bytesPerQuery
   }
 
   test("Float L2 ties select the same addresses before and after shuffle") {
@@ -691,72 +704,38 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
   ) {
     // local[2]: two slots. A partition cannot hold part of a query, so one
     // query is one partition however wide the cluster is.
-    val heap = 1L << 30
-    SearchExecutionPlan.mergePartitions(spark, 1L, 1, 1, 10, heap) shouldBe 1
-    SearchExecutionPlan.mergePartitions(spark, 100L, 1, 1, 10, heap) shouldBe 2
+    val slots = spark.sparkContext.defaultParallelism
+    slots shouldBe 2
+    SearchExecutionPlan.mergePartitions(slots, 1L, 1, 4096) shouldBe 1
+    SearchExecutionPlan.mergePartitions(slots, 100L, 1, 4096) shouldBe 2
     // More first-stage tasks than slots: every task's output still lands in a
     // partition of its own, which is what a cluster of many executors needs.
-    SearchExecutionPlan.mergePartitions(
-      spark,
-      100L,
-      16,
-      16,
-      10,
-      heap
-    ) shouldBe 16
+    SearchExecutionPlan.mergePartitions(slots, 100L, 16, 4096) shouldBe 16
     // A query count far above the parallelism: partitions grow with it so a
     // reduce-side map holds a few thousand queries, not all of them.
-    SearchExecutionPlan.mergePartitions(
-      spark,
-      1000000L,
-      6,
-      6,
-      10,
-      heap
-    ) shouldBe 245
+    SearchExecutionPlan.mergePartitions(slots, 1000000L, 6, 4096) shouldBe 245
     the[IllegalArgumentException] thrownBy SearchExecutionPlan
-      .mergePartitions(spark, 0L, 1, 1, 10, heap)
+      .mergePartitions(slots, 0L, 1, 4096)
+    the[IllegalArgumentException] thrownBy SearchExecutionPlan
+      .mergePartitions(slots, 1L, 1, 0)
   }
 
-  test("a large k cuts the merge into partitions whose queries fit the heap") {
-    // 100k queries, 15 first-stage tasks, k=16,384: 15 x 16,384 x 24 = 5.9 MB
-    // a query; half of a 306 MB heap share holds 26 of them -> 3,847 partitions.
-    // The run that died had 64.
-    val heap = 306393907L
-    val perQuery = 15L * 16384L * 24L
-    val expected = (100000L + heap / 2 / perQuery - 1) / (heap / 2 / perQuery)
-    SearchExecutionPlan.mergePartitions(
-      spark,
-      100000L,
-      15,
-      15,
-      16384,
-      heap
-    ) shouldBe expected.toInt
-    expected should be > 64L
-    // k=100 stays at the fixed few thousand queries a partition: 100k / 4096 = 25.
-    SearchExecutionPlan.mergePartitions(
-      spark,
-      100000L,
-      15,
-      15,
-      100,
-      heap
-    ) shouldBe 25
+  test("a large k cuts the merge into partitions of the queries a task holds") {
+    // 100k queries, 15 first-stage tasks, 26 queries a partition (what the
+    // stage planner found a task's shares hold at k=16,384) -> 3,847
+    // partitions. The run that died had 64.
+    val slots = spark.sparkContext.defaultParallelism
+    SearchExecutionPlan.mergePartitions(slots, 100000L, 15, 26) shouldBe 3847
+    // A small k stays at the fixed few thousand queries a partition: 100k /
+    // 4096 = 25.
+    SearchExecutionPlan.mergePartitions(slots, 100000L, 15, 4096) shouldBe 25
   }
   test(
     "query grouping changes task parallelism without multiplying candidate fan-in"
   ) {
-    val heap = 306393907L
-    SearchExecutionPlan.mergePartitions(
-      spark,
-      100000L,
-      1500,
-      15,
-      16384,
-      heap
-    ) shouldBe
-      SearchExecutionPlan.mergePartitions(spark, 100000L, 15, 15, 16384, heap)
+    val slots = spark.sparkContext.defaultParallelism
+    SearchExecutionPlan.mergePartitions(slots, 100000L, 1500, 26) shouldBe
+      SearchExecutionPlan.mergePartitions(slots, 100000L, 15, 26)
   }
 
   test("a merge plan budgets its batch from the partitions it was given") {
@@ -768,12 +747,10 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     } {
       val partitions =
         SearchExecutionPlan.mergePartitions(
-          spark,
+          spark.sparkContext.defaultParallelism,
           queries,
           sources,
-          sources,
-          k,
-          heap
+          4096
         )
       val plain = SearchMerge.plan(partitions, queries, sources, k, heap)
       val carried = SearchMerge.plan(
@@ -787,29 +764,28 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       )
       plain.partitions shouldBe partitions
       plain.queriesPerPartition shouldBe (queries + partitions - 1) / partitions
-      plain.bytesPerQuery should be > sources.toLong * k * 24L
       plain.bytesPerQuery shouldBe SearchMerge
-        .queryBytes(sources, k)
+        .footprint(sources, k)
         .bytesPerQuery
+      plain.bytesPerQuery should be >= math.min(sources, 8).toLong * k * 12L
       carried.bytesPerQuery should be > plain.bytesPerQuery
       plain.targetBytes should be > 0L
       plain.targetBytes should be <= math
         .min(sources, plain.maxRuns)
-        .toLong * k * 24L
+        .toLong * k * 12L
       if (heap == 0L) plain.targetBytes shouldBe 1L
     }
-    // 15 sources at k=16,384 over the 3,847 partitions the heap test above
-    // plans: 26 queries a partition share half of a 306 MB heap, and after the
-    // two output copies and the scratch of a compaction, half of what remains
-    // retains about six and a half answers, under the eight of a full batch.
+    // 15 sources at k=16,384 over 3,847 partitions: 26 queries a partition
+    // share a 306 MB execution share, 11.8 MB each, more than the 1.6 MB of a
+    // full batch of eight answers, so the batch is the compaction target.
     val heap = 306393907L
-    val answer = 16384L * 24L
-    val temporary = 2L * answer + (96L * 8L) + (512L + 64L * 8L)
+    val answer = 16384L * 12L
     val planned = SearchMerge.plan(3847, 100000L, 15, 16384, heap)
     planned.queriesPerPartition shouldBe 26L
-    planned.targetBytes shouldBe (heap / 2L / 26L - temporary) / 2L
-    planned.targetBytes should be < 8L * answer
-    planned.targetBytes should be > 6L * answer
+    planned.targetBytes shouldBe 8L * answer
+    // A share too small for a batch compacts earlier: 26 queries in 3 MB.
+    SearchMerge.plan(3847, 100000L, 15, 16384, 3L << 20).targetBytes shouldBe
+      (3L << 20) / 26L
   }
 
   test(
@@ -826,7 +802,7 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     )
     plan.partitions shouldBe 100
     plan.bytesPerQuery shouldBe Long.MaxValue
-    plan.targetBytes shouldBe 1L
+    plan.targetBytes shouldBe Long.MaxValue
     the[IllegalArgumentException] thrownBy SearchMerge.plan(0, 1L, 1, 1, 0L)
     the[IllegalArgumentException] thrownBy SearchMerge.plan(1, 0L, 1, 1, 0L)
     the[IllegalArgumentException] thrownBy SearchMerge

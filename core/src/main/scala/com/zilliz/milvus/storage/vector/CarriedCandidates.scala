@@ -20,7 +20,12 @@ import com.zilliz.milvus.storage.schema.MetricType
 object CarriedCandidates {
 
   /** What precedes a row: its place, its score and its length. */
-  private val Header: Int = CandidateBytes.Width + 4
+  /** The fixed bytes before each carried row: the address candidate and the
+    * row's length.
+    */
+  val HeaderBytes: Int = CandidateBytes.Width + 4
+
+  private val Header: Int = HeaderBytes
 
   /** Writes candidates already ranked best first, each followed by its row. The
     * caller supplies the order used by the merge; encoding preserves it without

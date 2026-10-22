@@ -127,11 +127,13 @@ private[connector] object FrameSearch extends Logging {
         s"${delivery.describe}, queryGroups=${groups.size}, " +
         s"basePartitions=${base.rows.getNumPartitions}, tasks=$tasks, " +
         s"blockRows=$blockRows, rowBytes=$rowBytes; merge over " +
-        s"${execution.merge.partitions} partitions at " +
-        s"${execution.merge.bytesPerQuery} estimated bytes a query against " +
-        s"${execution.mergeStage.heap.bytes} bytes of heap a task, " +
+        s"${execution.merge.partitions} partitions, about " +
+        s"${execution.merge.queriesPerPartition} queries a partition, " +
+        s"${execution.mergeStage.footprint.stateBytes} bytes of runs a query against " +
+        s"${execution.mergeStage.executionHeap.bytes} bytes of execution pool a task, " +
         s"tasksPerExecutor=${execution.mergeStage.running} " +
-        s"coresPerTask=${execution.mergeStage.cores}"
+        s"coresPerTask=${execution.mergeStage.cores} " +
+        s"maxRuns=${execution.mergeStage.maxRuns}"
     )
     val vector = base.vector
     val projection = base.projection

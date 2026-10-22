@@ -475,86 +475,114 @@ class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
   }
 
   test(
-    "the merge stage runs fewer tasks at once when one query's state outgrows a slot"
+    "the merge stage keeps every slot busy while both heap pools hold a query"
   ) {
     val GiB = 1L << 30
-    // An L executor of the bench: 32 cores, a 24 GiB heap, one core a task.
+    // An L executor of the bench: 32 cores, a 24 GiB heap, one core a task;
+    // 16 executors give a default parallelism of 512.
     val large = TaskResources(16, 32, 1, declarable = true)
     def stage(
         k: Int,
+        queries: Long,
         sources: Int = 16,
         resources: TaskResources = large
     ): SearchExecutionPlan.MergeStage =
       SearchExecutionPlan.mergeStage(
+        512,
         resources,
         24L * GiB,
         0.6,
         sources,
         k,
         CandidateRuns.Plain,
-        SearchPlan.PackedCandidateReserveBytes.toLong
+        CandidateBytes.Width.toLong,
+        queries,
+        16
       )
-    // Up to k=100,000 one query's 18 x k x 24 B fits a default slot's share
-    // twice over, so the default 32 tasks and their share stand, undeclared.
-    for (k <- Seq(10, 100, 1000, 10000, 100000)) {
-      val unchanged = stage(k)
-      unchanged.running shouldBe 32
-      unchanged.cores shouldBe 1
-      unchanged.profile shouldBe None
-      unchanged.heap shouldBe SearchResources.queryBudget(24L * GiB, 0.6, 32)
-      unchanged.bytesPerQuery shouldBe SearchMerge
-        .queryBytes(16, k)
-        .bytesPerQuery
+    val userShare = SearchResources.queryBudget(24L * GiB, 0.6, 32)
+    val executionShare = SearchResources.executionBudget(24L * GiB, 0.6, 32)
+    // Up to k=1,000,000 a default slot's two shares hold a query's eight
+    // retained runs and its temporaries: 32 tasks, undeclared, full batches.
+    // A partition takes as many queries as the execution share holds runs
+    // for: 49 at k=100,000, 4 at k=1,000,000, the fixed cap below that.
+    for ((k, perPartition) <- Seq(1000 -> 4096, 100000 -> 49, 1000000 -> 4)) {
+      val full = stage(k, 1000000L)
+      full.running shouldBe 32
+      full.cores shouldBe 1
+      full.profile shouldBe None
+      full.maxRuns shouldBe SearchMerge.MaxRuns
+      full.heap shouldBe userShare
+      full.executionHeap shouldBe executionShare
+      full.queriesPerPartition shouldBe perPartition
+      full.partitions shouldBe math.max(
+        512L,
+        (1000000L + perPartition - 1) / perPartition
+      )
+      full.footprint shouldBe SearchMerge.footprint(16, k)
     }
-    // k=1,000,000: 432 MB a query, twice that a task; 11 such shares fit the
-    // executor's 9.5 GiB, so a task declares ceil(32 / 11) = 3 cores and 10
-    // run at once, each with a tenth of the heap.
-    val million = stage(1000000)
-    million.running shouldBe 10
-    million.cores shouldBe 3
-    million.profile shouldBe defined
-    million.heap shouldBe SearchResources.queryBudget(24L * GiB, 0.6, 10)
-    // Four sources need 10 x k x 24 B: 21 shares fit, 2 cores a task, 16 run.
-    val fewerSources = stage(1000000, sources = 4)
-    fewerSources.running shouldBe 16
-    fewerSources.cores shouldBe 2
-    // k=10,000,000: 8.6 GB a task, so one task takes the whole executor.
-    val tenMillion = stage(10000000)
-    tenMillion.running shouldBe 1
-    tenMillion.cores shouldBe 32
-    tenMillion.heap shouldBe SearchResources.queryBudget(24L * GiB, 0.6, 1)
-    // Beyond about 11.8 million even that does not hold one query: planning
-    // fails and names the largest k that would.
-    val executorHeap = SearchResources.queryBudget(24L * GiB, 0.6, 1).bytes
+    stage(100000, 1000000L).partitions shouldBe 20409
+    stage(1000000, 10000L).partitions shouldBe 2500
+    // k=10,000,000: a 120 MB answer. A slot's own share (318 MB) does not hold
+    // the compaction output, the arriving answer and its block (360 MB), so
+    // tasks take 2 cores and 16 run; their execution share (955 MB) holds
+    // seven retained runs, one query a partition.
+    val tenMillion = stage(10000000, 10000L)
+    tenMillion.running shouldBe 16
+    tenMillion.cores shouldBe 2
+    tenMillion.maxRuns shouldBe 7
+    tenMillion.queriesPerPartition shouldBe 1
+    tenMillion.partitions shouldBe 10000
+    tenMillion.profile shouldBe defined
+    tenMillion.heap shouldBe SearchResources.queryBudget(24L * GiB, 0.6, 16)
+    tenMillion.executionHeap shouldBe SearchResources
+      .executionBudget(24L * GiB, 0.6, 16)
+    // k=100,000,000: 1.2 GB answers, 2.6 GB of temporaries a task (the block
+    // is capped at what Spark fetches to memory): 3 tasks of 10 cores, whose
+    // 5.1 GB execution share retains four runs.
+    val hundredMillion = stage(100000000, 1000L)
+    hundredMillion.running shouldBe 3
+    hundredMillion.cores shouldBe 10
+    hundredMillion.maxRuns shouldBe 4
+    // Beyond about 415 million even one task alone does not hold a query:
+    // planning fails and names the largest k that would.
     val largest = SearchExecutionPlan.largestMergeableK(
-      executorHeap,
+      SearchResources.queryBudget(24L * GiB, 0.6, 1).bytes,
+      SearchResources.executionBudget(24L * GiB, 0.6, 1).bytes,
       16,
       CandidateRuns.Plain,
-      SearchPlan.PackedCandidateReserveBytes.toLong
+      CandidateBytes.Width.toLong
     )
-    largest should be > 11000000L
-    largest should be < 12000000L
-    stage(largest.toInt).running shouldBe 1
+    largest should be > 410000000L
+    largest should be < 420000000L
+    stage(largest.toInt, 10L).running shouldBe 1
     val failure =
-      the[IllegalArgumentException] thrownBy stage(largest.toInt + 1)
+      the[IllegalArgumentException] thrownBy stage(largest.toInt + 1, 10L)
     failure.getMessage should include(s"lower k to at most $largest")
-    failure.getMessage should include("even when one runs alone")
-    the[IllegalArgumentException] thrownBy stage(20000000)
-    // A master that takes no declaration keeps its default slots, and fails
-    // as soon as one of their shares does not hold a query.
+    failure.getMessage should include("even when one task runs alone")
+    the[IllegalArgumentException] thrownBy stage(Int.MaxValue, 10L)
+    // A master that takes no declaration keeps its default slots: four tasks
+    // of a local[4] hold k=10,000,000 with full batches, and fail as soon as
+    // one of their shares does not hold a query.
     val local = TaskResources(1, 4, 1, declarable = false)
-    val undeclared = stage(100000, resources = local)
+    val undeclared = stage(10000000, 100L, resources = local)
     undeclared.running shouldBe 4
     undeclared.profile shouldBe None
+    undeclared.maxRuns shouldBe SearchMerge.MaxRuns
+    undeclared.queriesPerPartition shouldBe 3
     val localFailure =
-      the[IllegalArgumentException] thrownBy stage(10000000, resources = local)
+      the[IllegalArgumentException] thrownBy stage(
+        100000000,
+        100L,
+        resources = local
+      )
     localFailure.getMessage should include("takes no task cores declaration")
-    // The smallest slot of all finds no k at all.
+    // The smallest shares of all find no k.
     SearchExecutionPlan.largestMergeableK(
+      0L,
       0L,
       16,
       CandidateRuns.Plain,
-      SearchPlan.PackedCandidateReserveBytes.toLong
+      CandidateBytes.Width.toLong
     ) shouldBe 0L
   }
 
