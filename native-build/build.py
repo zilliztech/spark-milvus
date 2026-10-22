@@ -71,6 +71,25 @@ def cardinal_versions(knowhere_source):
     return versions
 
 
+def cardinal_overrides(values):
+    """Parse `--cardinal-version GEN=REF` options into the refs that replace Knowhere's pins.
+
+    Knowhere's Cardinal pins can lag its own IndexNode API; a downstream build
+    that must pair a newer Cardinal with the pinned Knowhere names the ref (tag
+    or commit) per generation here. The provenance records the override as the
+    tag, so the source identity stays visible.
+    """
+    overrides = {}
+    for value in values or []:
+        generation, separator, ref = value.partition("=")
+        if separator != "=" or generation not in CARDINAL_VERSION_FILES or not re.fullmatch(r"[A-Za-z0-9._/-]+", ref):
+            raise ValueError("--cardinal-version expects v1=<ref> or v2=<ref>, got: " + value)
+        if generation in overrides:
+            raise ValueError("--cardinal-version names " + generation + " twice")
+        overrides[generation] = ref
+    return overrides
+
+
 def clone_ref(source, ref, destination):
     """Check out a tag or branch and return the commit it resolved to."""
     if destination.exists():
@@ -308,6 +327,8 @@ def main():
                         help="Local Git object source whose HEAD matches the root knowhere submodule")
     parser.add_argument("--cardinal-repository", help="Authorized Cardinal Git repository or local checkout")
     parser.add_argument("--with-cardinal", action="store_true")
+    parser.add_argument("--cardinal-version", action="append", metavar="GEN=REF",
+                        help="Replace the Cardinal ref Knowhere pins for generation v1 or v2 (tag or commit)")
     parser.add_argument("--jobs", type=int, default=8)
     parser.add_argument("--cargo-cache", type=Path, help="Optional existing Cargo target cache, copied before compiling")
     parser.add_argument("--corrosion-source", type=Path, help="Optional local Corrosion v0.5 source cache")
@@ -317,6 +338,10 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.jobs <= 50:
         parser.error("--jobs must be between 1 and 50")
+    try:
+        args.cardinal_overrides = cardinal_overrides(args.cardinal_version)
+    except ValueError as error:
+        parser.error(str(error))
     try:
         target = platforms.host_platform()
     except ValueError as error:
@@ -389,10 +414,13 @@ def build(args, repository, java_home, work, target, profile):
         clone(knowhere_object_source, knowhere_pin, knowhere, recorded_knowhere)
         cardinal = {}
         if args.with_cardinal:
-            # The tags come from the Knowhere snapshot just cloned; the resolved
-            # commits go into the provenance so a resumed build can be checked.
+            # The tags come from the Knowhere snapshot just cloned unless the caller
+            # overrides a generation; the resolved commits go into the provenance so
+            # a resumed build can be checked.
             cardinal_identity = provenance / "cardinal-source-identity.json"
-            for generation, tag in cardinal_versions(knowhere).items():
+            versions = cardinal_versions(knowhere)
+            versions.update(getattr(args, "cardinal_overrides", {}))
+            for generation, tag in versions.items():
                 local_source = knowhere_object_source / "thirdparty" / ("cardinal" + generation)
                 origin = args.cardinal_repository or (
                     str(local_source) if (local_source / ".git").exists() else "https://github.com/zilliztech/cardinal.git")
