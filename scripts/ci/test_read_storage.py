@@ -1,5 +1,6 @@
 """Verify read fixture authorization and cleanup without a Docker daemon."""
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -10,6 +11,31 @@ import read_storage
 
 
 class ReadStorageTest(unittest.TestCase):
+    def test_initial_run_diagnostic_redacts_credentials_and_omits_command_and_input(self):
+        result = subprocess.CompletedProcess([], 125, stdout='private stdout',
+                                             stderr='pull access denied; user=admin-key password=secret-key\n')
+        with mock.patch.object(read_storage.subprocess, 'run', return_value=result):
+            with self.assertRaises(RuntimeError) as failure:
+                read_storage.docker('run', 'private argument', data='private input',
+                                    diagnostic_secrets=('admin-key', 'secret-key'))
+        self.assertEqual(str(failure.exception),
+                         'Read fixture Docker run failed (exit 125): '
+                         'pull access denied; user=[REDACTED] password=[REDACTED]')
+
+    def test_admin_diagnostics_are_suppressed_by_default(self):
+        result = subprocess.CompletedProcess([], 1, stdout='private stdout', stderr='private credentials')
+        with mock.patch.object(read_storage.subprocess, 'run', return_value=result):
+            with self.assertRaises(RuntimeError) as failure:
+                read_storage.docker('exec', 'private argument', data='private input')
+        self.assertEqual(str(failure.exception), 'Read fixture Docker exec failed (exit 1)')
+
+    def test_empty_diagnostic_still_reports_operation_and_exit_code(self):
+        result = subprocess.CompletedProcess([], 125, stdout='', stderr=' \n')
+        with mock.patch.object(read_storage.subprocess, 'run', return_value=result):
+            with self.assertRaises(RuntimeError) as failure:
+                read_storage.docker('run', diagnostic_secrets=('admin-key', 'secret-key'))
+        self.assertEqual(str(failure.exception), 'Read fixture Docker run failed (exit 125)')
+
     def test_users_cannot_read_each_others_snapshot_or_data(self):
         for name in ('a', 'b'):
             statements = read_storage.policy('bucket', name)['Statement']

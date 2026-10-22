@@ -383,6 +383,13 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      - name: Prepare the isolated V3 object-storage fixture
+        run: python3 scripts/ci/read_storage.py start --directory "$RUNNER_TEMP/read-storage-preflight"
+
+      - name: Remove the object-storage preflight fixture
+        if: always()
+        run: python3 scripts/ci/read_storage.py stop --directory "$RUNNER_TEMP/read-storage-preflight"
+
       - name: Install patchelf
         run: |
           sudo apt-get update -qq

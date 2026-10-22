@@ -17,11 +17,19 @@ FIXTURE = ROOT / 'core/src/test/resources/read-fixtures/collections/nearest'
 IMAGE = 'minio/minio:RELEASE.2024-11-07T00-52-20Z'
 
 
-def docker(*args, data=None):
+def docker(*args, data=None, diagnostic_secrets=None):
     result = subprocess.run(['docker', *args], input=data, text=True, capture_output=True)
     if result.returncode:
-        # Admin arguments and diagnostics may contain generated credentials.
-        raise RuntimeError('Read fixture Docker operation failed')
+        message = f'Read fixture Docker {args[0]} failed (exit {result.returncode})'
+        # Never include argv or stdin. Only opted-in operations expose stderr,
+        # with every generated credential supplied by the caller for redaction.
+        if diagnostic_secrets is not None:
+            diagnostic = result.stderr.strip()
+            for secret in diagnostic_secrets:
+                diagnostic = diagnostic.replace(secret, '[REDACTED]')
+            if diagnostic:
+                message += ': ' + diagnostic
+        raise RuntimeError(message)
     return result.stdout.strip()
 
 
@@ -78,7 +86,8 @@ def start(directory, network_container=None):
         network = ['--network', 'container:' + network_container]
     container = docker('run', '-d', '--rm', *network,
                        '-e', 'MINIO_ROOT_USER=' + admin, '-e', 'MINIO_ROOT_PASSWORD=' + password,
-                       IMAGE, 'server', '--address', f'{"127.0.0.1" if network_container else "0.0.0.0"}:{port}', '/data')
+                       IMAGE, 'server', '--address', f'{"127.0.0.1" if network_container else "0.0.0.0"}:{port}', '/data',
+                       diagnostic_secrets=(admin, password))
     try:
         (directory / 'container').write_text(container + '\n')
         internal = f'http://127.0.0.1:{port}'
