@@ -11,10 +11,10 @@ import time
 import urllib.request
 
 from check_read_fixtures import check_group
+import minio_image
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = ROOT / 'core/src/test/resources/read-fixtures/collections/nearest'
-IMAGE = 'minio/minio:RELEASE.2024-11-07T00-52-20Z'
 
 
 def docker(*args, data=None, diagnostic_secrets=None):
@@ -76,6 +76,7 @@ def start(directory, network_container=None):
         raise RuntimeError('Fixture state exists; stop that fixture before starting another')
     directory.chmod(0o700)
     fixture = verified_fixture()
+    image = minio_image.ensure_image(ROOT / 'target' / 'minio-fixture-image')
     admin, password = 'root' + secrets.token_hex(8), secrets.token_hex(24)
     port = 9000
     network = ['--publish', '127.0.0.1::9000']
@@ -86,7 +87,7 @@ def start(directory, network_container=None):
         network = ['--network', 'container:' + network_container]
     container = docker('run', '-d', '--rm', *network,
                        '-e', 'MINIO_ROOT_USER=' + admin, '-e', 'MINIO_ROOT_PASSWORD=' + password,
-                       IMAGE, 'server', '--address', f'{"127.0.0.1" if network_container else "0.0.0.0"}:{port}', '/data',
+                       image, 'server', '--address', f'{"127.0.0.1" if network_container else "0.0.0.0"}:{port}', '/data',
                        diagnostic_secrets=(admin, password))
     try:
         (directory / 'container').write_text(container + '\n')
