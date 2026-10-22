@@ -269,6 +269,9 @@ function(milvus_add_knowhere)
   endif()
 
     if(WITH_CARDINAL)
+        # Resolved from the Conan graph only with Cardinal (dependencies.json
+        # feature_scope); Cardinal v2's compaction planner links it.
+        find_package(metis REQUIRED)
         include("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Cardinal.cmake")
         milvus_add_cardinal()
         target_compile_definitions(knowhere PRIVATE
