@@ -62,8 +62,8 @@ files carrying gRPC services are generated into `client`. `milvus-storage`
 supplies the native storage library from `milvus-io/milvus-storage`, pinned at
 official commit `5694520`, including PR #714's Tencent OIDC role chain while
 retaining eager Parquet pre-buffering and the IO pool API from PR #703.
-`knowhere` tracks the PR #1829 branch (`LawrenceTL92/knowhere-contrib`, branch
-`codex/knowhere-jni-pr`) and supplies the C API, JNI and Java sources used by
+`knowhere` tracks upstream `zilliztech/knowhere` on `main`, including merged
+PR #1829, and supplies the C API, JNI and Java sources used by
 `native-vector` and the unified native build. `docs/design` is the private
 knowledge repository `zilliztech/vector-batch-knowledge`, with the connector's
 designs under `projects/spark-milvus`; the build and CI do not read it.

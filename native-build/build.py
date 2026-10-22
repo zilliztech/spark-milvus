@@ -446,24 +446,24 @@ def build(args, repository, java_home, work, target, profile):
             shutil.copytree(repository / "native-build", build_inputs / "native-build",
                             ignore=shutil.ignore_patterns("__pycache__"))
             shutil.copy2(repository / "scripts/build-native.sh", build_inputs / "build-native.sh")
-        from dependency_versions import validate_upstream_versions
+        from dependency_versions import selected_references, validate_upstream_versions
         storage_recipe = (git_value(args.storage_source, "show", storage_pin + ":cpp/conanfile.py")
                           if (args.storage_source / ".git").exists()
                           else (storage / "cpp/conanfile.py").read_text())
         knowhere_recipe = git_value(knowhere, "show", knowhere_pin + ":conanfile.py")
-        version_selection = validate_upstream_versions(constraints, storage_recipe, knowhere_recipe)
+        conan_os = adapter.conan_os
+        version_selection = validate_upstream_versions(
+            constraints, storage_recipe, knowhere_recipe,
+            conan_os=conan_os, with_cardinal=args.with_cardinal)
         version_selection["sourceRevisions"] = {"storage": storage_pin, "knowhere": knowhere_pin}
         version_selection["recipeSha256"] = {
             name: hashlib.sha256(source.encode()).hexdigest()
             for name, source in (("storage", storage_recipe), ("knowhere", knowhere_recipe))}
         (provenance / "dependency-version-selection.json").write_text(
             json.dumps(version_selection, indent=2) + "\n")
-        # The unified conanfile skips references upstream declares for another
-        # operating system, so the lock is checked against the same selection.
-        scope = constraints.get("platform_scope", {})
-        conan_os = platforms.host().conan_os
-        references = {name: reference for name, reference in constraints["references"].items()
-                      if not scope.get(name) or conan_os in scope[name]}
+        # Validate the lock against the same platform and feature selection as Conan.
+        references = selected_references(
+            constraints, conan_os=conan_os, with_cardinal=args.with_cardinal)
         consumer = work / "dependency-input"
         consumer.mkdir(exist_ok=True)
         shutil.copy2(repository / "native-build/conanfile.py", consumer / "conanfile.py")
@@ -479,10 +479,12 @@ def build(args, repository, java_home, work, target, profile):
         build_profile.write_text(profile.read_text().split("[options]")[0].rstrip("\n") + "\n\n" + replacements)
         dependencies = work / "dependencies"
         options = ["-pr:h", host_profile, "-pr:b", build_profile,
+                   "-o:h", "with_cardinal=" + str(args.with_cardinal),
                    "-c:h", "tools.build:jobs=" + str(args.jobs), "-c:b", "tools.build:jobs=" + str(args.jobs)]
         inputs = {"references": references, "hostProfile": host_profile.read_text(),
                   "consumerSha256": digest(consumer / "conanfile.py"),
                   "dependencySelectionSha256": digest(consumer / "dependencies.json"),
+                  "withCardinal": args.with_cardinal,
                   "jobs": args.jobs}
         input_file = provenance / "dependency-input.json"
         lockfile = provenance / "conan.lock"

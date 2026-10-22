@@ -11,7 +11,9 @@ class MilvusNativeDependencies(ConanFile):
     name = "spark-milvus-native-dependencies"
     version = "1"
     settings = "os", "arch", "compiler", "build_type"
+    options = {"with_cardinal": [True, False]}
     default_options = {
+        "with_cardinal": False,
         "arrow/*:with_jemalloc": False,
         "arrow/*:with_s3": True,
         "arrow/*:with_azure": True,
@@ -36,6 +38,7 @@ class MilvusNativeDependencies(ConanFile):
         "glog/*:with_gflags": True,
         "grpc/*:secure": True,
         "libcurl/*:with_ssl": "openssl",
+        "metis/*:with_64bit_types": True,
         "opentelemetry-cpp/*:with_stl": True,
         "openssl/*:no_apps": True,
         "prometheus-cpp/*:with_pull": False,
@@ -48,9 +51,16 @@ class MilvusNativeDependencies(ConanFile):
         # engines' own conanfiles gate the same names, and dependencies.json
         # records which.
         scope = pinned.get("platform_scope", {})
+        feature_scope = pinned.get("feature_scope", {})
+        features = {"with_cardinal": bool(self.options.with_cardinal)}
+        for name, feature in feature_scope.items():
+            if name != "_comment" and (name not in pinned["references"] or feature not in features):
+                raise ValueError("Unknown dependency feature scope: " + name)
         for name, reference in pinned["references"].items():
             allowed = scope.get(name)
             if allowed and str(self.settings.os) not in allowed:
+                continue
+            if name in feature_scope and not features[feature_scope[name]]:
                 continue
             self.requires(reference, force=True)
 

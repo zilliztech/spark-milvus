@@ -24,7 +24,8 @@
     "libunwind": "libunwind/1.8.1#748a981ace010b80163a08867b732e71",
     "liburing": "liburing/2.8#62ead9595cc393717972842e53dc3099",
     "lz4": "lz4/1.10.0#982d9b673900f665a1da109e09c17cab",
-    "milvus-common": "milvus-common/1.0.0-b589c5a@milvus/dev#d431af735c8acb829feb7a94f05daf42",
+    "metis": "metis/5.2.1#85cfe7ee0dfc0cba7c0334e92efcbbc6",
+    "milvus-common": "milvus-common/1.0.0-78f2c29@milvus/dev#af77e5f5444d6dd7cc5573182b958491",
     "nlohmann_json": "nlohmann_json/3.11.3#ffb9e9236619f1c883e36662f944345d",
     "openblas": "openblas/0.3.30#aca4131c143d4c109923372e052c643c",
     "openssl": "openssl/3.3.2#9f9f130d58e7c13e76bb8a559f0a6a8b",
@@ -50,6 +51,10 @@
       "Linux"
     ]
   },
+  "feature_scope": {
+    "_comment": "Knowhere requires METIS only when its Cardinal engine is enabled.",
+    "metis": "with_cardinal"
+  },
   "static_on": {
     "_comment": "References whose recipe cannot build a shared library on the named systems. milvus-storage's conanfile sets the same option: 'macOS cannot build opentelemetry-cpp with shared=True'.",
     "opentelemetry-cpp": [
@@ -61,7 +66,8 @@
     "ordered_versions": {
       "milvus-common": [
         "1.0.0-60a563c",
-        "1.0.0-b589c5a"
+        "1.0.0-b589c5a",
+        "1.0.0-78f2c29"
       ]
     },
     "excluded_requirements": {

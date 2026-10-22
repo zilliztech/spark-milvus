@@ -472,7 +472,7 @@ def stage(plan_path, inputs, output):
             record(artifact, "native", content=pom_bytes(artifact, plan, []), extension="pom", platform=platform)
             document_jars(artifact, "native", f"# {artifact}\n\nResource-only native artifact.\n"
                 f"Storage source: https://github.com/milvus-io/milvus-storage/tree/{plan['pins']['milvus-storage']}\n"
-                f"Knowhere source: https://github.com/LawrenceTL92/knowhere-contrib/tree/{plan['pins']['knowhere']}\n"
+                f"Knowhere source: https://github.com/zilliztech/knowhere/tree/{plan['pins']['knowhere']}\n"
                 "The main JAR contains dependency provenance and third-party licenses.\n"
                 "See docs/releasing.md in the connector source for build and system requirements.\n", platform=platform)
         jvm_lines = [] if plan.get("distribution") == "thin" else plan["jvm"]

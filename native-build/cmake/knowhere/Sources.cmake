@@ -1,4 +1,4 @@
-# Sources for Knowhere 1fff20db5aa172ce8a9890fef9f9590920ac8f30, by architecture.
+# Sources for Knowhere a1e178ceeb8ba26dfa5bd65fddab2534a267c2e4, by architecture.
 # Keep these lists explicit: an upstream source upgrade requires reviewing its build rules.
 
 set(MILVUS_UTILS_SSE_SOURCES
@@ -53,7 +53,9 @@ set(MILVUS_KNOWHERE_UTILS_SOURCES
 set(MILVUS_FAISS_FASTSCAN_SOURCES
     "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/IndexIVFFastScan.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/IndexIVFPQFastScan.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/IndexIVFSQFastScan.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/IndexPQFastScan.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/IndexSQFastScan.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/cppcontrib/knowhere/IVFFastScanIteratorWorkspace.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/cppcontrib/knowhere/IndexIVFPQFastScan.cpp"
 )
@@ -91,10 +93,13 @@ set(MILVUS_FAISS_AVX512_SOURCES
     "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/utils/simd_impl/super_kmeans_kernels_avx512.cpp"
 )
 
+set(MILVUS_FAISS_AVX512_VPOPCNT_SOURCES
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/utils/hamming_distance/hamming_avx512_vpopcnt.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/utils/simd_impl/rabitq_avx512_vpopcnt.cpp"
+)
+
 set(MILVUS_FAISS_AVX512_SPR_SOURCES
     "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/impl/scalar_quantizer/sq-avx512-spr.cpp"
-    "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/utils/hamming_distance/hamming_avx512_spr.cpp"
-    "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/utils/simd_impl/rabitq_avx512_spr.cpp"
 )
 
 set(MILVUS_FAISS_SOURCES
@@ -159,6 +164,7 @@ set(MILVUS_FAISS_SOURCES
     "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/cppcontrib/knowhere/IndexFlat.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/cppcontrib/knowhere/IndexHNSW.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/cppcontrib/knowhere/IndexHNSWBinary.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/cppcontrib/knowhere/IndexHNSWRaBitQ.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/cppcontrib/knowhere/IndexIVF.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/cppcontrib/knowhere/IndexIVFFlat.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/cppcontrib/knowhere/IndexIVFPQ.cpp"
@@ -274,6 +280,8 @@ set(MILVUS_KNOWHERE_SOURCES
     "${KNOWHERE_SOURCE_DIR}/src/cluster/cluster.cc"
     "${KNOWHERE_SOURCE_DIR}/src/cluster/cluster_factory.cc"
     "${KNOWHERE_SOURCE_DIR}/src/cluster/kmeans/faiss_kmeans.cc"
+    "${KNOWHERE_SOURCE_DIR}/src/common/build_scheduler.cc"
+    "${KNOWHERE_SOURCE_DIR}/src/common/cancellation.cc"
     "${KNOWHERE_SOURCE_DIR}/src/common/comp/brute_force.cc"
     "${KNOWHERE_SOURCE_DIR}/src/common/comp/knowhere_config.cc"
     "${KNOWHERE_SOURCE_DIR}/src/common/comp/materialized_view.cc"
@@ -298,6 +306,7 @@ set(MILVUS_KNOWHERE_SOURCES
     "${KNOWHERE_SOURCE_DIR}/src/index/hnsw/hnsw.cc"
     "${KNOWHERE_SOURCE_DIR}/src/index/hnsw/impl/IndexBruteForceWrapper.cc"
     "${KNOWHERE_SOURCE_DIR}/src/index/hnsw/impl/IndexConditionalWrapper.cc"
+    "${KNOWHERE_SOURCE_DIR}/src/index/hnsw/impl/IndexHNSWRaBitQWrapper.cc"
     "${KNOWHERE_SOURCE_DIR}/src/index/hnsw/impl/IndexHNSWWrapper.cc"
     "${KNOWHERE_SOURCE_DIR}/src/index/hnsw/impl/IndexWrapperCosine.cc"
     "${KNOWHERE_SOURCE_DIR}/src/index/index.cc"
@@ -313,6 +322,7 @@ set(MILVUS_KNOWHERE_SOURCES
     "${KNOWHERE_SOURCE_DIR}/src/index/ivf/ivfrbq_wrapper.cc"
     "${KNOWHERE_SOURCE_DIR}/src/index/minhash/minhash_index_node.cc"
     "${KNOWHERE_SOURCE_DIR}/src/index/minhash/minhash_util.cc"
+    "${KNOWHERE_SOURCE_DIR}/src/index/mrl_index_node.cc"
     "${KNOWHERE_SOURCE_DIR}/src/index/refine/refine_utils.cc"
     "${KNOWHERE_SOURCE_DIR}/src/index/sparse/codec/simd_bitpacking_kernel.c"
     "${KNOWHERE_SOURCE_DIR}/src/index/sparse/codec/streamvbyte_0124_decode.c"
@@ -321,6 +331,7 @@ set(MILVUS_KNOWHERE_SOURCES
     "${KNOWHERE_SOURCE_DIR}/src/index/sparse/sindi_simd.cc"
     "${KNOWHERE_SOURCE_DIR}/src/index/sparse/sindi_simd_avx2.cc"
     "${KNOWHERE_SOURCE_DIR}/src/index/sparse/sindi_simd_avx512.cc"
+    "${KNOWHERE_SOURCE_DIR}/src/index/sparse/sindi_simd_lsx.cc"
     "${KNOWHERE_SOURCE_DIR}/src/index/sparse/sindi_simd_sve.cc"
     "${KNOWHERE_SOURCE_DIR}/src/index/sparse/sparse_index_node.cc"
     "${KNOWHERE_SOURCE_DIR}/src/io/memory_io.cc"

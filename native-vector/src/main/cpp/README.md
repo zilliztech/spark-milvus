@@ -2,8 +2,8 @@
 
 Knowhere PR [#1829](https://github.com/zilliztech/knowhere/pull/1829) supplies
 the C interface, JNI, Java API and native resource loader. The root `knowhere`
-submodule follows `LawrenceTL92/knowhere-contrib` branch
-`codex/knowhere-jni-pr`; the superproject gitlink pins the exact commit used by
+submodule follows upstream `zilliztech/knowhere` branch
+`main`; the superproject gitlink pins the exact commit used by
 the build.
 
 The connector consumes these artifacts through `NativeVectorLibrary` in

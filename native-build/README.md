@@ -137,12 +137,15 @@ cannot each start 50 compilation jobs at the same time.
 Conan reuses compatible cached binaries when the recipe revision, configuration
 and package ID all match. `build.py` copies `conanfile.py` and
 `dependencies.json` into the work directory, checks the dependency declarations
-from both pinned engine revisions, and rejects a selected conflict version unless
-it is the newer upstream requirement. Conan then resolves only the exact recipe
-references in `dependencies.json`; the full lock covers every host and build
-dependency. The driver writes the host and build profiles it passes to Conan
+from both pinned engine revisions for the selected OS and `--with-cardinal`,
+and rejects a selected conflict version unless it is the newer upstream
+requirement. Unknown conditions or dynamic requirements fail validation.
+`platform_scope` and `feature_scope` select the same direct graph for validation
+and Conan; for example, METIS is required only with Cardinal. Conan then resolves
+only the selected exact recipe references in `dependencies.json`; the full lock
+covers every host and build dependency. The driver writes the host and build profiles it passes to Conan
 into the work directory: the checked-in profile of the host platform plus a
-`[replace_requires]` section naming every reference in `dependencies.json`,
+`[replace_requires]` section naming every selected reference in `dependencies.json`,
 without the `[options]` section for the build profile. The consumer's
 `force=True` requirements pin the host context only; without the replacements,
 build-context tools such as protoc resolve their zlib and openssl ranges to the

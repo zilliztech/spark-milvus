@@ -140,11 +140,32 @@ function(milvus_add_knowhere)
         target_link_libraries(${target} PRIVATE milvus-common::milvus-common)
     endforeach()
     target_compile_options(faiss_avx512 PRIVATE
-        -mavx512f -mavx512dq -mavx512bw -mavx512vl)
+        -mavx512f -mavx512cd -mavx512dq -mavx512bw -mavx512vl)
     target_compile_definitions(faiss_avx512 PRIVATE COMPILE_SIMD_AVX512)
 
-    set(spr_supported TRUE)
-    foreach(extension avx512vpopcntdq avx512vnni avx512fp16 avx512bf16)
+    # VPOPCNT kernels have their own runtime dispatch level; they do not
+    # require the additional Sapphire Rapids VNNI, FP16 and BF16 features.
+    set(vpopcnt_supported TRUE)
+    foreach(extension avx512vpopcntdq avx512bitalg)
+        string(TOUPPER "${extension}" flag_name)
+        check_cxx_compiler_flag("-m${extension}" "MILVUS_HAS_${flag_name}")
+        if(NOT MILVUS_HAS_${flag_name})
+            set(vpopcnt_supported FALSE)
+        endif()
+    endforeach()
+    if(vpopcnt_supported)
+        add_library(faiss_avx512_vpopcnt OBJECT ${MILVUS_FAISS_AVX512_VPOPCNT_SOURCES})
+        milvus_knowhere_compile(faiss_avx512_vpopcnt)
+        target_compile_options(faiss_avx512_vpopcnt PRIVATE
+            -mavx2 -mfma -mf16c -mpopcnt -mavx512f -mavx512cd -mavx512vl
+            -mavx512dq -mavx512bw -mavx512vpopcntdq -mavx512bitalg)
+        target_compile_definitions(faiss_avx512_vpopcnt PRIVATE
+            COMPILE_SIMD_AVX2 COMPILE_SIMD_AVX512 COMPILE_SIMD_AVX512_VPOPCNT)
+        target_link_libraries(faiss_avx512_vpopcnt PRIVATE milvus-common::milvus-common)
+    endif()
+
+    set(spr_supported ${vpopcnt_supported})
+    foreach(extension avx512vnni avx512fp16 avx512bf16)
         string(TOUPPER "${extension}" flag_name)
         check_cxx_compiler_flag("-m${extension}" "MILVUS_HAS_${flag_name}")
         if(NOT MILVUS_HAS_${flag_name})
@@ -156,10 +177,11 @@ function(milvus_add_knowhere)
         milvus_knowhere_compile(faiss_avx512_spr)
         target_compile_options(faiss_avx512_spr PRIVATE
             -mavx2 -mfma -mf16c -mpopcnt -mavx512f -mavx512cd -mavx512vl
-            -mavx512dq -mavx512bw -mavx512vpopcntdq -mavx512vnni
+            -mavx512dq -mavx512bw -mavx512vpopcntdq -mavx512bitalg -mavx512vnni
             -mavx512fp16 -mavx512bf16)
         target_compile_definitions(faiss_avx512_spr PRIVATE
-            COMPILE_SIMD_AVX2 COMPILE_SIMD_AVX512 COMPILE_SIMD_AVX512_SPR)
+            COMPILE_SIMD_AVX2 COMPILE_SIMD_AVX512 COMPILE_SIMD_AVX512_VPOPCNT
+            COMPILE_SIMD_AVX512_SPR)
         target_link_libraries(faiss_avx512_spr PRIVATE milvus-common::milvus-common)
     endif()
 
@@ -171,6 +193,10 @@ function(milvus_add_knowhere)
         -Wno-reorder -Wno-unused-local-typedefs -Wno-unused-function -Wno-strict-aliasing)
     target_compile_definitions(faiss PRIVATE
         FINTEGER=int FAISS_ENABLE_DD COMPILE_SIMD_AVX2 COMPILE_SIMD_AVX512)
+    if(vpopcnt_supported)
+        target_sources(faiss PRIVATE $<TARGET_OBJECTS:faiss_avx512_vpopcnt>)
+        target_compile_definitions(faiss PRIVATE COMPILE_SIMD_AVX512_VPOPCNT)
+    endif()
     if(spr_supported)
         target_sources(faiss PRIVATE $<TARGET_OBJECTS:faiss_avx512_spr>)
         target_compile_definitions(faiss PRIVATE COMPILE_SIMD_AVX512_SPR)
