@@ -145,7 +145,7 @@ object FloatConverter {
         float32Exp =
           127 - 15 - msbPos // 127 (float32 bias) - 15 (float16 bias) - leading zero count
         float32Frac =
-          (f16Frac << (msbPos + 1)) & 0x7fffff // Shift to align with float32 mantissa
+          ((f16Frac << (msbPos + 1)) & 0x3ff) << 13 // Drop the implicit leading bit, then align the fraction
       }
     } else if (f16Exp == 0x1f) { // Infinity or NaN
       float32Exp = 0xff // Float32 infinity/NaN exponent
