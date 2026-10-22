@@ -536,6 +536,26 @@ class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
     tenMillion.heap shouldBe SearchResources.queryBudget(24L * GiB, 0.6, 16)
     tenMillion.executionHeap shouldBe SearchResources
       .executionBudget(24L * GiB, 0.6, 16)
+    // With blocks above 64 MiB fetched to disk the slot's own share holds the
+    // two answers alone, so every slot runs, each retaining three runs.
+    val spooled = SearchExecutionPlan.mergeStage(
+      512,
+      large,
+      24L * GiB,
+      0.6,
+      16,
+      10000000,
+      CandidateRuns.Plain,
+      CandidateBytes.Width.toLong,
+      10000L,
+      16,
+      64L << 20
+    )
+    spooled.running shouldBe 32
+    spooled.cores shouldBe 1
+    spooled.maxRuns shouldBe 3
+    spooled.queriesPerPartition shouldBe 1
+    spooled.profile shouldBe None
     // k=100,000,000: 1.2 GB answers, 2.6 GB of temporaries a task (the block
     // is capped at what Spark fetches to memory): 3 tasks of 10 cores, whose
     // 5.1 GB execution share retains four runs.

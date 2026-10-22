@@ -88,6 +88,20 @@ private[search] object SearchResources {
   private[search] def memoryMiB(value: String): Long =
     Math.multiplyExact(JavaUtils.byteStringAsMb(value), 1L << 20)
 
+  /** `spark.network.maxRemoteBlockSizeFetchToMem`: the largest shuffle block
+    * the reduce side fetches into memory rather than to disk, which is heap a
+    * merge task holds while it reads an answer's block.
+    */
+  def fetchToMemoryBytes(spark: SparkSession): Long =
+    Try(
+      JavaUtils.byteStringAsBytes(
+        spark.conf.get(
+          "spark.network.maxRemoteBlockSizeFetchToMem",
+          SearchMerge.FetchToMemoryBytes.toString
+        )
+      )
+    ).getOrElse(SearchMerge.FetchToMemoryBytes)
+
   /** `spark.memory.fraction`: the share of the heap Spark manages, the rest
     * being where a task's own objects live.
     */

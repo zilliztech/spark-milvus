@@ -55,10 +55,11 @@ private[search] object SearchMerge {
   val MaxRuns: Int = 8
   val MinRuns: Int = 2
 
-  /** The most of a shuffle block the reduce side brings into the heap at once:
-    * Spark fetches a block to memory below
-    * `spark.network.maxRemoteBlockSizeFetchToMem` (200 MiB by default) and to
-    * disk above it.
+  /** The default of `spark.network.maxRemoteBlockSizeFetchToMem`: Spark fetches
+    * a shuffle block to memory below it and to disk above it, so a block up to
+    * this size is heap the reduce task holds while it reads it. A submission
+    * that lowers the setting keeps big answers off the heap, and the plan reads
+    * the actual value (`SearchResources.fetchToMemoryBytes`).
     */
   val FetchToMemoryBytes: Long = 200L << 20
 
@@ -115,9 +116,16 @@ private[search] object SearchMerge {
     Footprint(answerBytes, maxRuns, stateBytes, temporaryBytes)
   }
 
-  /** The heap a shuffle block of `queries` answers takes while it is read. */
-  def blockBytes(queries: Long, answerBytes: Long): Long =
-    math.min(multiply(queries, answerBytes), FetchToMemoryBytes)
+  /** The heap a shuffle block of `queries` answers takes while it is read: the
+    * block itself up to `fetchToMemoryBytes`, beyond which Spark spools it to
+    * disk and the task holds only what it deserializes.
+    */
+  def blockBytes(
+      queries: Long,
+      answerBytes: Long,
+      fetchToMemoryBytes: Long = FetchToMemoryBytes
+  ): Long =
+    math.min(multiply(queries, answerBytes), math.max(0L, fetchToMemoryBytes))
 
   /** One merge's partitioning and per-query candidate budget. The byte target
     * triggers compaction; a single answer may exceed it. Expected key counts

@@ -197,7 +197,8 @@ private[connector] object SearchExecutionPlan {
       CandidateRuns.Plain,
       CandidateBytes.Width.toLong,
       queries.count,
-      plan.tasks
+      plan.tasks,
+      SearchResources.fetchToMemoryBytes(spark)
     )
     Milvus(
       budget,
@@ -322,7 +323,8 @@ private[connector] object SearchExecutionPlan {
       CandidateRuns.Carried,
       carriedBytes,
       queries.count,
-      math.max(1, tasks)
+      math.max(1, tasks),
+      SearchResources.fetchToMemoryBytes(spark)
     )
     Frame(
       groups,
@@ -359,8 +361,12 @@ private[connector] object SearchExecutionPlan {
     * reduce-side map, which Spark accounts in its execution pool, `(heap - 300
     * MiB) x spark.memory.fraction` shared by the tasks that run at once; its
     * compaction output, the answer it is deserializing and the shuffle block it
-    * reads are its own objects, in the heap Spark does not manage. Both pools
-    * are divided by the tasks that run at once on the executor.
+    * reads -- when the block is small enough for Spark to fetch it to memory,
+    * `fetchToMemoryBytes` -- are its own objects, in the heap Spark does not
+    * manage. Both pools are divided by the tasks that run at once on the
+    * executor. A submission whose answers are too big for a slot's own share
+    * can lower `spark.network.maxRemoteBlockSizeFetchToMem` so the blocks go
+    * through disk and every slot runs.
     *
     * The stage runs as many tasks at once as both pools hold one query each
     * for, preferring the default task slots (every core busy) and, at that
@@ -385,7 +391,8 @@ private[connector] object SearchExecutionPlan {
       layout: CandidateRuns.Layout,
       candidateBytes: Long,
       queries: Long,
-      firstStageTasks: Int
+      firstStageTasks: Int,
+      fetchToMemoryBytes: Long = SearchMerge.FetchToMemoryBytes
   ): MergeStage = {
     val slots = resources.tasksPerExecutor
     val userHeap = SearchResources.queryBudget(heapBytes, fraction, 1).bytes
@@ -400,7 +407,8 @@ private[connector] object SearchExecutionPlan {
       footprint.stateBytes <= executionHeap / running &&
       footprint.temporaryBytes + SearchMerge.blockBytes(
         1L,
-        footprint.answerBytes
+        footprint.answerBytes,
+        fetchToMemoryBytes
       ) <= userHeap / running
     }
     // The concurrencies a stage can declare: `cores` cores a task for every
@@ -434,14 +442,15 @@ private[connector] object SearchExecutionPlan {
         executionHeap / alone,
         sources,
         layout,
-        candidateBytes
+        candidateBytes,
+        fetchToMemoryBytes
       )
       val minimal = held(SearchMerge.MinRuns)
       throw new IllegalArgumentException(
         s"Merging one query's $sources answers of k=$k holds ${minimal.stateBytes} bytes " +
           s"of retained runs in the reduce-side map against an execution pool share of " +
           s"${executionHeap / alone} bytes, and ${minimal.temporaryBytes + SearchMerge
-              .blockBytes(1L, minimal.answerBytes)} bytes of its own against a heap share of " +
+              .blockBytes(1L, minimal.answerBytes, fetchToMemoryBytes)} bytes of its own against a heap share of " +
           s"${userHeap / alone} bytes" +
           (if (resources.declarable)
              " even when one task runs alone on its executor"
@@ -461,7 +470,7 @@ private[connector] object SearchExecutionPlan {
     val byState = execution.bytes / math.max(1L, footprint.stateBytes)
     val ownRoom = math.max(0L, heap.bytes - footprint.temporaryBytes)
     val byBlock =
-      if (ownRoom >= SearchMerge.FetchToMemoryBytes) Long.MaxValue
+      if (ownRoom >= math.max(0L, fetchToMemoryBytes)) Long.MaxValue
       else ownRoom / math.max(1L, footprint.answerBytes)
     val perPartition = math
       .max(
@@ -495,7 +504,8 @@ private[connector] object SearchExecutionPlan {
       executionHeapBytes: Long,
       sources: Int,
       layout: CandidateRuns.Layout,
-      candidateBytes: Long
+      candidateBytes: Long,
+      fetchToMemoryBytes: Long = SearchMerge.FetchToMemoryBytes
   ): Long = {
     def fits(k: Int): Boolean = {
       val footprint = SearchMerge
@@ -503,7 +513,8 @@ private[connector] object SearchExecutionPlan {
       footprint.stateBytes <= executionHeapBytes &&
       footprint.temporaryBytes + SearchMerge.blockBytes(
         1L,
-        footprint.answerBytes
+        footprint.answerBytes,
+        fetchToMemoryBytes
       ) <= userHeapBytes
     }
     if (!fits(1)) return 0L
