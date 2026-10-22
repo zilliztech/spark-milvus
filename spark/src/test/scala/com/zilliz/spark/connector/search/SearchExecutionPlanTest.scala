@@ -214,7 +214,7 @@ class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
     val perQuery = SearchPlan.bytesPerQuery(frameLayout, 1) +
       SearchPlan.QueryIdBytes + SearchPlan.TopKQueueBytes + rowBytes
     val groupLimit = SearchResources
-      .groupBytes(None, frameTaskHeap, 1, perQuery)
+      .groupBytes(None, frameTaskHeap, 1, perQuery, Long.MaxValue)
       .bytes
     val groups = SearchExecutionPlan.frameGroups(
       queries,

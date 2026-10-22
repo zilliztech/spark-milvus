@@ -319,13 +319,24 @@ private[connector] object SearchExecutionPlan {
       math.min(SearchResources.exactScanBatch(None).bytes, taskHeap.bytes / 4L)
     )
     val availableHeapBytes = math.max(0L, taskHeap.bytes - blockMaxBytes)
+    val framePerQuery = Math.addExact(
+      frameQueryBytes(layout, k),
+      Math.multiplyExact(k.toLong, rowBytes)
+    )
     val group = SearchResources.groupBytes(
       limits.groupMaxBytes,
       taskHeap.bytes,
       1,
-      Math.addExact(
-        frameQueryBytes(layout, k),
-        Math.multiplyExact(k.toLong, rowBytes)
+      framePerQuery,
+      // the exact scan writes its ids and scores into direct buffers too, one
+      // call at a time in each of the executor's slots
+      SearchResources.directGroupCap(
+        SearchResources.directMemoryBytes(spark, heap),
+        resources.tasksPerExecutor,
+        1,
+        layout,
+        k,
+        framePerQuery
       )
     )
     val groups = frameGroups(
@@ -713,7 +724,15 @@ private[connector] object SearchExecutionPlan {
           limits.groupMaxBytes,
           queries.bytes,
           cores,
-          SearchResources.groupBytesPerQuery(layout, k, pipelineGroups)
+          SearchResources.groupBytesPerQuery(layout, k, pipelineGroups),
+          SearchResources.directGroupCap(
+            SearchResources.directMemoryBytes(spark, heap),
+            slots,
+            limits.callsInFlight,
+            layout,
+            k,
+            SearchResources.groupBytesPerQuery(layout, k, pipelineGroups)
+          )
         ),
         pipelineGroups
       )

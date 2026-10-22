@@ -1,5 +1,6 @@
 package com.zilliz.spark.connector.search
 
+import scala.jdk.CollectionConverters._
 import scala.util.Try
 
 import org.apache.spark.network.util.JavaUtils
@@ -287,13 +288,77 @@ private[search] object SearchResources {
     */
   val GroupHeapShare: Double = 0.5
 
-  /** The most a derived group takes, whatever the heap: Knowhere writes a
-    * call's answers into Arrow buffers off the heap, queries x k x 12 bytes a
-    * segment, and a 4 GiB group of 8,800 queries at k=10,000 on a 24 GiB-heap
-    * executor exhausted the JVM's direct memory (2026-10-13, exit 52) where a 2
-    * GiB group ran. The explicit option is not capped.
+  /** What the JVM's direct memory holds besides a search's answers: Netty's
+    * buffers, the index chunks a load streams through, the row masks.
     */
-  val MaxDerivedGroupBytes: Long = 2L << 30
+  val DirectReserveBytes: Long = 1L << 30
+
+  /** The JVM's limit on direct memory, where Knowhere writes a call's answers
+    * (Arrow buffers over Netty): `-XX:MaxDirectMemorySize` when the executor's
+    * java options set it, otherwise the heap, as the JVM defaults. On a cluster
+    * the options are `spark.executor.extraJavaOptions`; in local mode they are
+    * this JVM's.
+    */
+  def directMemoryBytes(spark: SparkSession, heapBytes: Long): Long = {
+    val master = spark.sparkContext.master
+    val options =
+      if (master.startsWith("local[") || master == "local")
+        java.lang.management.ManagementFactory.getRuntimeMXBean.getInputArguments.asScala
+      else
+        spark.conf
+          .getOption("spark.executor.extraJavaOptions")
+          .toSeq
+          .flatMap(_.split("\\s+"))
+    maxDirectMemoryOption(options).getOrElse(heapBytes)
+  }
+
+  private val MaxDirectMemory =
+    """-XX:MaxDirectMemorySize=(\d+)([kKmMgGtT]?)""".r
+
+  /** The last `-XX:MaxDirectMemorySize` among `options`, in bytes. */
+  private[search] def maxDirectMemoryOption(
+      options: Iterable[String]
+  ): Option[Long] =
+    options.toSeq.reverseIterator.collectFirst {
+      case MaxDirectMemory(digits, unit) =>
+        val scale = unit.toLowerCase match {
+          case "k" => 1L << 10
+          case "m" => 1L << 20
+          case "g" => 1L << 30
+          case "t" => 1L << 40
+          case _   => 1L
+        }
+        Math.multiplyExact(digits.toLong, scale)
+    }
+
+  /** The most a derived group may take for its answers to fit the direct memory
+    * left to them, as group bytes (`perQueryBytes` a query): one call's answers
+    * are `queries x k` ids of 8 bytes and scores of 4, each buffer rounded up
+    * to a power of two (so up to twice), beside the group's vectors, and
+    * `callsInFlight + 1` calls' answers live at once in each of the executor's
+    * `tasks`; the reserve leaves room for what else is direct. A 2026-10-13 run
+    * of 8,800 queries at k=10,000 in a 4 GiB group died with an out-of-memory
+    * exit where a 2 GiB group ran; the fixed 2 GiB cap this replaces came from
+    * it.
+    */
+  def directGroupCap(
+      directBytes: Long,
+      tasks: Int,
+      callsInFlight: Int,
+      layout: VectorLayout,
+      k: Int,
+      perQueryBytes: Long
+  ): Long = {
+    val room =
+      math.max(0L, directBytes - DirectReserveBytes) / math.max(1, tasks)
+    val perQueryDirect = Math.multiplyExact(
+      Math.addExact(2L * 12L * k.toLong, layout.rowBytes.toLong),
+      math.max(1, callsInFlight).toLong + 1L
+    )
+    val queries = math.max(1L, room / perQueryDirect)
+    if (queries > Long.MaxValue / math.max(1L, perQueryBytes)) Long.MaxValue
+    else queries * math.max(1L, perQueryBytes)
+  }
 
   /** The current merger and packed output can overlap the next merger. Two
     * query groups also retain their vectors, ids and queue metadata. Native
@@ -334,7 +399,8 @@ private[search] object SearchResources {
   /** How many bytes of queries one Knowhere call takes: the explicit
     * `milvus.search.group.max.bytes` as it is, otherwise the larger of the old
     * 512 MiB default and [[GroupQueriesPerCore]] queries for every core the
-    * task holds, capped at [[GroupHeapShare]] of the task's query budget and
+    * task holds, capped at [[GroupHeapShare]] of the task's query budget and at
+    * what the direct memory holds of its answers ([[directGroupCap]]), and
     * never below one query.
     *
     * @param configured
@@ -345,25 +411,23 @@ private[search] object SearchResources {
     *   the cores the search task holds
     * @param perQueryBytes
     *   what one query costs a group: its row and its bounded top-k
+    * @param directCapBytes
+    *   the most the group may take for its answers to fit the direct memory
     */
   def groupBytes(
       configured: Option[Long],
       queryBudgetBytes: Long,
       cores: Int,
-      perQueryBytes: Long
+      perQueryBytes: Long,
+      directCapBytes: Long
   ): Choice = configured match {
     case Some(bytes) =>
       Choice(bytes, s"$bytes (option ${MilvusOption.SearchGroupMaxBytes})")
     case None =>
       val one = math.max(1L, perQueryBytes)
       val wanted = GroupQueriesPerCore.toLong * math.max(1, cores) * one
-      val cap = math.max(
-        one,
-        math.min(
-          MaxDerivedGroupBytes,
-          (math.max(0L, queryBudgetBytes) * GroupHeapShare).toLong
-        )
-      )
+      val heapCap = (math.max(0L, queryBudgetBytes) * GroupHeapShare).toLong
+      val cap = math.max(one, math.min(directCapBytes, heapCap))
       val bytes =
         math.min(cap, math.max(SearchLimits.DefaultGroupMaxBytes, wanted))
       val how =
@@ -372,13 +436,14 @@ private[search] object SearchResources {
             SearchLimits.DefaultGroupMaxBytes,
             wanted
           )
-        ) (if (cap == MaxDerivedGroupBytes) "2 GiB cap" else "heap cap")
+        ) (if (directCapBytes < heapCap) "direct cap" else "heap cap")
         else if (wanted > SearchLimits.DefaultGroupMaxBytes)
           s"$GroupQueriesPerCore queries x $cores cores"
         else "default"
       Choice(
         bytes,
-        s"${mib(bytes)} = ${bytes / one} queries of ${one}B ($how; budget ${mib(queryBudgetBytes)} x $GroupHeapShare)"
+        s"${mib(bytes)} = ${bytes / one} queries of ${one}B ($how; budget ${mib(queryBudgetBytes)} x $GroupHeapShare; " +
+          s"direct cap ${mib(directCapBytes)})"
       )
   }
 

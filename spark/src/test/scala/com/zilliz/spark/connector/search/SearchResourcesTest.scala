@@ -26,7 +26,8 @@ class SearchResourcesTest extends AnyFunSuite with Matchers {
     // and two groups' vectors, ids and queue metadata.
     perQuery shouldBe 7206416L
     val heap = SearchResources.queryBudget(24L * GiB, 0.6, 1).bytes
-    val budget = SearchResources.groupBytes(None, heap, 32, perQuery)
+    val budget =
+      SearchResources.groupBytes(None, heap, 32, perQuery, Long.MaxValue)
     val coreLimit =
       SearchResources.groupPlanBytes(budget.bytes, layout, k, true)
     val group = SearchPlan.groups(1000, layout, k, coreLimit).head
@@ -50,7 +51,8 @@ class SearchResourcesTest extends AnyFunSuite with Matchers {
     val layout = VectorLayout(VectorElementType.Float32, 768)
     val k = 1000000
     val perQuery = SearchResources.groupBytesPerQuery(layout, k, true)
-    val smallest = SearchResources.groupBytes(None, 0L, 32, perQuery)
+    val smallest =
+      SearchResources.groupBytes(None, 0L, 32, perQuery, Long.MaxValue)
     SearchPlan
       .groups(
         2,
@@ -178,42 +180,94 @@ class SearchResourcesTest extends AnyFunSuite with Matchers {
     // k=100,000 at 768 dimensions: 3,072 + 100,000 x 48 = 4,803,072 bytes a
     // query; 8 x 32 queries want 1.23 GB, more than the 512 MiB default.
     val perQuery = 3072L + 100000L * 48L
-    val large = SearchResources.groupBytes(None, budget, 32, perQuery)
+    val noDirectCap = Long.MaxValue
+    val large =
+      SearchResources.groupBytes(None, budget, 32, perQuery, noDirectCap)
     large.bytes shouldBe 8L * 32L * perQuery
     large.reason should include("256 queries")
     large.reason should include("8 queries x 32 cores")
     // k=10,000: 483,072 bytes a query, 8 x 32 want 124 MB, so the default
     // 512 MiB stands and holds 1,111 queries, 35 a core.
     val small =
-      SearchResources.groupBytes(None, budget, 32, 3072L + 10000L * 48L)
+      SearchResources.groupBytes(
+        None,
+        budget,
+        32,
+        3072L + 10000L * 48L,
+        noDirectCap
+      )
     small.bytes shouldBe SearchLimits.DefaultGroupMaxBytes
     small.reason should include("(default;")
     // S x 16 at k=100,000: a 6 GiB heap gives a 2.3 GiB budget and a 1.14 GiB
     // cap; 8 x 8 queries want 307 MB, the default 512 MiB stands.
     val sBudget = SearchResources.queryBudget(6L * GiB, 0.6, 1).bytes
-    SearchResources.groupBytes(None, sBudget, 8, perQuery).bytes shouldBe
+    SearchResources
+      .groupBytes(None, sBudget, 8, perQuery, noDirectCap)
+      .bytes shouldBe
       SearchLimits.DefaultGroupMaxBytes
     // A 1 GiB heap: the budget is 290 MB, the cap 145 MB wins over the default.
     val tiny = SearchResources.groupBytes(
       None,
       SearchResources.queryBudget(1L * GiB, 0.6, 1).bytes,
       8,
-      perQuery
+      perQuery,
+      noDirectCap
     )
     tiny.bytes shouldBe (SearchResources
       .queryBudget(1L * GiB, 0.6, 1)
       .bytes * 0.5).toLong
     tiny.reason should include("heap cap")
-    // A derived group never exceeds 2 GiB however large the heap: k=1,000,000 on
-    // 32 cores would want 12 GB.
-    val huge =
-      SearchResources.groupBytes(None, budget, 32, 3072L + 1000000L * 48L)
-    huge.bytes shouldBe SearchResources.MaxDerivedGroupBytes
-    huge.reason should include("2 GiB cap")
+    // k=1,000,000 on 32 cores would want 12 GB: with the JVM's default direct
+    // memory (the 24 GiB heap) the answers of 342 queries fit, so the heap cap
+    // of half the budget binds; a 3 GiB direct limit holds 29 queries' answers
+    // and binds instead.
+    val layout = VectorLayout(VectorElementType.Float32, 768)
+    val hugePerQuery = 3072L + 1000000L * 48L
+    val roomy = SearchResources
+      .directGroupCap(24L * GiB, 1, 2, layout, 1000000, hugePerQuery)
+    roomy shouldBe 342L * hugePerQuery
+    val huge = SearchResources.groupBytes(None, budget, 32, hugePerQuery, roomy)
+    huge.bytes shouldBe (budget * 0.5).toLong
+    huge.reason should include("heap cap")
+    val tight = SearchResources
+      .directGroupCap(3L * GiB, 1, 2, layout, 1000000, hugePerQuery)
+    tight shouldBe 29L * hugePerQuery
+    val capped =
+      SearchResources.groupBytes(None, budget, 32, hugePerQuery, tight)
+    capped.bytes shouldBe tight
+    capped.reason should include("direct cap")
+    // Slots share the direct memory: eight tasks of one call each get 5 queries
+    // of the 2 GiB left; the cap is never below one query.
+    SearchResources.directGroupCap(
+      3L * GiB,
+      8,
+      1,
+      layout,
+      1000000,
+      hugePerQuery
+    ) shouldBe
+      5L * hugePerQuery
+    SearchResources.directGroupCap(
+      0L,
+      8,
+      1,
+      layout,
+      1000000,
+      hugePerQuery
+    ) shouldBe
+      hugePerQuery
     // Never below one query, even with no budget at all.
-    SearchResources.groupBytes(None, 0L, 8, perQuery).bytes shouldBe perQuery
+    SearchResources
+      .groupBytes(None, 0L, 8, perQuery, noDirectCap)
+      .bytes shouldBe perQuery
     // The option is used as it is.
-    SearchResources.groupBytes(Some(64L * MiB), budget, 32, perQuery) shouldBe
+    SearchResources.groupBytes(
+      Some(64L * MiB),
+      budget,
+      32,
+      perQuery,
+      1L
+    ) shouldBe
       SearchResources.Choice(
         64L * MiB,
         s"${64L * MiB} (option milvus.search.group.max.bytes)"
@@ -248,6 +302,22 @@ class SearchResourcesTest extends AnyFunSuite with Matchers {
         256L * MiB,
         s"2147483648 / 8 tasks -> 256MiB (option ${MilvusOption.SearchSegmentsMaxBytes})"
       )
+  }
+
+  test(
+    "the direct memory limit is the last -XX:MaxDirectMemorySize, else none"
+  ) {
+    SearchResources.maxDirectMemoryOption(
+      Seq("-Djava.io.tmpdir=/tmp", "-XX:MaxDirectMemorySize=64g")
+    ) shouldBe Some(64L * GiB)
+    SearchResources.maxDirectMemoryOption(
+      Seq("-XX:MaxDirectMemorySize=512m", "-XX:MaxDirectMemorySize=3G")
+    ) shouldBe Some(3L * GiB)
+    SearchResources.maxDirectMemoryOption(
+      Seq("-XX:MaxDirectMemorySize=1048576")
+    ) shouldBe
+      Some(1L * MiB)
+    SearchResources.maxDirectMemoryOption(Seq("-Xmx4g")) shouldBe None
   }
 
   test(
