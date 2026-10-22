@@ -12,13 +12,12 @@ import com.zilliz.milvus.storage.schema.{
 }
 
 /** Which vectors Knowhere scores the way a [[RankingFunction]] computed in
-  * float does (design document architecture/dataframe-api.html section 2).
+  * float does.
   *
-  * Knowhere computes in float32: L2 as |x|^2 + |y|^2 - 2x.y over a whole batch
-  * (decision 27), the inner product as a dot product, COSINE over the vectors'
-  * norms. Spark's vector functions accumulate in float. A vector is in range
-  * when the largest magnitude among its elements, in the element type Knowhere
-  * receives, is
+  * Knowhere computes in float32: L2 as |x|^2 + |y|^2 - 2x.y over a whole batch,
+  * the inner product as a dot product, COSINE over the vectors' norms. Spark's
+  * vector functions accumulate in float. A vector is in range when the largest
+  * magnitude among its elements, in the element type Knowhere receives, is
   *
   *   - for L2 and IP, finite and below 2^33, so that no square, product or sum
   *     of up to 32,768 of them overflows either computation;
@@ -32,10 +31,10 @@ import com.zilliz.milvus.storage.schema.{
   * function's differ by rounding alone. Its L2 does not: |x|^2 + |y|^2 - 2x.y
   * errs by as much as the squared norms are large, whatever the distance, so
   * [[ExactScan]] takes the engine's L2 candidates as nominations the function
-  * scores (decision 37). Under COSINE a vector whose every element is zero has
-  * no value with a vector in range, the product of the squared norms being
-  * zero. Every other vector is ranked by the function. The test is one integer
-  * comparison per element.
+  * scores. Under COSINE a vector whose every element is zero has no value with
+  * a vector in range, the product of the squared norms being zero. Every other
+  * vector is ranked by the function. The test is one integer comparison per
+  * element.
   */
 object EngineRange {
 
@@ -205,7 +204,7 @@ object EngineRange {
     * @param largestSquaredNorm
     *   under L2 over float32 rows, the largest squared norm among the rows
     *   Knowhere scores, which bounds the error of its batched entry
-    *   ([[ExactScan]], decision 37); 0 otherwise
+    *   ([[ExactScan]]); 0 otherwise
     */
   final class Batch private[vector] (
       val function: RankingFunction,

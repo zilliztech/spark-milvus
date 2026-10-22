@@ -27,22 +27,20 @@ import io.milvus.grpc.schema.FieldSchema
 
 /** The two-stage search over the segments of a Milvus table input: a query set
   * in, every query's global top-k out, with the base columns the take stage
-  * reads (design document architecture/vector-search.html section 2.1).
+  * reads.
   *
   * A nearest-by join over a Milvus table runs it (`NearestBySearch`); the join
-  * is how a search is written (design document architecture/dataframe-api.html
-  * sections 2 and 4). The `exact` mode computes every distance in every
-  * segment; the `index` mode searches the persisted index the snapshot pinned.
-  * Each query id is paired with its requested base columns. A DataFrame input's
-  * search (`FrameSearch`) shares its query delivery (`SearchQueries`) and merge
-  * stage (`SearchMerge`).
+  * is how a search is written. The `exact` mode computes every distance in
+  * every segment; the `index` mode searches the persisted index the snapshot
+  * pinned. Each query id is paired with its requested base columns. A DataFrame
+  * input's search (`FrameSearch`) shares its query delivery (`SearchQueries`)
+  * and merge stage (`SearchMerge`).
   */
 object MilvusSearch extends Logging {
 
   /** The two Spark stages over segments already planned: candidates from every
     * segment set, merged into each query's best k, then the output columns
-    * taken for the hits alone (design document architecture/vector-search.html
-    * section 2.1).
+    * taken for the hits alone.
     *
     * `queries` is the query set: a frame of `query_id` and `vector`, or a set
     * the driver already packed. The nearest-by join assigns unique association
@@ -51,10 +49,10 @@ object MilvusSearch extends Logging {
     * was found for it, which is what a LEFT OUTER nearest-by join whose query
     * rows the driver holds needs. `filter` and `predicate` exclude rows before
     * the top k: the Milvus filter, and what Spark pushed into the scan whose
-    * partitions these are (design document architecture/dataframe-api.html
-    * section 4). An index search scans exactly a segment it has no usable index
-    * for, and `metrics` is where the tasks count. `function` is what the join
-    * ranks by where Knowhere does not score a pair as it does (section 2).
+    * partitions these are. An index search scans exactly a segment it has no
+    * usable index for, and `metrics` is where the tasks count. `function` is
+    * what the join ranks by where Knowhere does not score a pair as it does
+    * (section 2).
     */
   private[connector] def execute(
       spark: SparkSession,
@@ -290,8 +288,7 @@ object MilvusSearch extends Logging {
   }
 
   /** The candidates of the first stage: each task searches one segment set over
-    * one query range, reading the groups of its range one at a time (design
-    * document architecture/vector-search.html section 2.1).
+    * one query range, reading the groups of its range one at a time.
     */
   private def candidates(
       spark: SparkSession,

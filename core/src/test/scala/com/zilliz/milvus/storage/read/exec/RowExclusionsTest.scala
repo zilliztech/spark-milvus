@@ -21,8 +21,7 @@ import com.zilliz.milvus.storage.snapshot.SegmentLayout
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
-/** Which rows a search must not see, decided before any search path runs
-  * (design document architecture/vector-search.html sections 2.3 and 2.4).
+/** Which rows a search must not see, decided before any search path runs.
   */
 class RowExclusionsTest extends AnyFunSuite with Matchers {
 

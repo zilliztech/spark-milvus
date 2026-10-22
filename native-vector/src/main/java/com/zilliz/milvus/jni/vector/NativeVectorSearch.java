@@ -30,7 +30,7 @@ public final class NativeVectorSearch {
     /**
      * The batched entry for FLOAT32 vectors without an exclusion bitmap: every query goes
      * to the bundled faiss in one call, which takes its BLAS path, and the call runs
-     * single-threaded on the calling thread (decision 27). The caller excludes rows by
+     * single-threaded on the calling thread. The caller excludes rows by
      * leaving them out of {@code vectors}. Buffers and output follow {@link #bruteForce}.
      */
     public static void bruteForceBatched(DType dtype, ByteBuffer vectors, long rows,
@@ -42,11 +42,11 @@ public final class NativeVectorSearch {
     }
 
     /**
-     * {@link #bruteForceBatched} for L2, followed by a direct pass over its candidates
-     * (decision 37): the ids and the estimated distances are written as there, and then,
-     * for each query, the candidates whose estimate is below the query's float32 cutoff,
-     * taken in order from the first, receive their squared distance computed pair by pair
-     * in the same slot of {@code direct}; {@code counts} receives one int32 per query with
+     * {@link #bruteForceBatched} for L2, followed by a direct pass over its candidates:
+     * the ids and the estimated distances are written as there, and then, for each
+     * query, the candidates whose estimate is below the query's float32 cutoff, taken
+     * in order from the first, receive their squared distance computed pair by pair in
+     * the same slot of {@code direct}; {@code counts} receives one int32 per query with
      * how many were computed. A null {@code cutoffs} computes every candidate. Buffers
      * follow {@link #bruteForce}.
      */

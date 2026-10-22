@@ -15,8 +15,7 @@ import io.knowhere.DType
 
 /** The batched distance entry answers the same queries as Knowhere's per-query
   * brute force: the contract of vector-search.html section 2.2 for float32,
-  * checked against the real library on both sides of faiss's BLAS threshold
-  * (decision 27).
+  * checked against the real library on both sides of faiss's BLAS threshold.
   */
 class NativeVectorSearchBatchedTest
     extends AnyFunSuite

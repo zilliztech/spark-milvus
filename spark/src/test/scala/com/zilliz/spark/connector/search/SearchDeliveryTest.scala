@@ -23,7 +23,7 @@ import com.zilliz.spark.connector.options.TaskResources
   * large for that, packed by group on the executors into a shuffle, one
   * partition per group, and read by every first-stage task one group at a time,
   * so a task holds the group it searches and the one being read, never the
-  * query set (section 2.1 of design document architecture/vector-search.html).
+  * query set.
   */
 class SearchDeliveryTest
     extends AnyFunSuite
@@ -132,9 +132,9 @@ class SearchDeliveryTest
   }
 
   test("packing follows the planned groups when the longer ones come first") {
-    // An even cut of ten queries into four groups (decision 32): a group's
-    // start says which queries it takes, not its index times the size of the
-    // first group, which puts query 8 in the third group.
+    // An even cut of ten queries into four groups: a group's start says which
+    // queries it takes, not its index times the size of the first group, which
+    // puts query 8 in the third group.
     val even = SearchPlan.evenGroups(10, 4)
     even.map(_.queries) shouldBe Seq(3, 3, 2, 2)
     val delivered =

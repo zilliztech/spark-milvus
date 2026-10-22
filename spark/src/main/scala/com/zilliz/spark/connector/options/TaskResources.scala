@@ -7,16 +7,14 @@ import org.apache.spark.resource.{
 }
 import org.apache.spark.sql.SparkSession
 
-/** The executors a job runs on and the cores a stage's tasks take.
-  *
-  * A stage whose tasks call Knowhere -- an index search, an index build --
-  * needs one task per executor: Knowhere spreads one call over a thread pool
-  * the size of the machine, so a second task on the same executor adds no speed
-  * and a second index's memory. Rather than asking the submission to set
+/** The executors a job runs on and the cores a stage's tasks take. A stage
+  * whose tasks call Knowhere -- an index search, an index build -- needs one
+  * task per executor: Knowhere spreads one call over a thread pool the size of
+  * the machine, so a second task on the same executor adds no speed and a
+  * second index's memory. Rather than asking the submission to set
   * `spark.task.cpus` for the whole job, which holds every other stage to one
   * task per executor too, such a stage declares its own cores per task through
-  * Spark's stage-level scheduling (`TaskResourceProfile`, design document
-  * architecture/vector-search.html section 1.1).
+  * Spark's stage-level scheduling.
   *
   * Spark runs a task-only profile on the default executors only when dynamic
   * allocation is off (`ResourceProfileManager.canBeScheduled`, 3.5 and 4.x),

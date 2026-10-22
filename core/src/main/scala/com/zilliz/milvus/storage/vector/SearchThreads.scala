@@ -18,8 +18,7 @@ import scala.collection.mutable.ArrayBuffer
   * A search task's Knowhere call takes every core of its executor; between two
   * calls the cores are free, and this is what fills them. One pool for the JVM,
   * as wide as the processors it may use (`-XX:ActiveProcessorCount` on the
-  * executors), daemon threads named for the log (design document
-  * architecture/vector-search.html section 2.1, 2026-09-27 decision).
+  * executors), daemon threads named for the log.
   */
 object SearchThreads {
 

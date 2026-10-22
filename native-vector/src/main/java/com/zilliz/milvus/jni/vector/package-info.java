@@ -18,6 +18,5 @@
  * The pinned io.knowhere.Knowhere also exposes resizeSearchThreadPool and
  * resizeBuildThreadPool; the connector does not call them until the G4 session
  * options exist. No GPU switch is exposed upstream.
- * <p>Capabilities: V1, V2, V5 (see design document capabilities.md).
  */
 package com.zilliz.milvus.jni.vector;

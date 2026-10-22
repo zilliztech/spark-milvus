@@ -2,15 +2,13 @@ package com.zilliz.milvus.storage.read.exec
 
 import java.util.BitSet
 
-/** What an index label means in the segment it was built from.
-  *
-  * Milvus builds a vector index over the rows that have a value, so a nullable
-  * column's index holds fewer rows than its segment and label `i` is the `i`-th
-  * row with a value. The `valid_data` bitmap the index files carry says which
-  * rows those are, least significant bit first, and this turns it into the two
-  * directions a search needs: a returned label becomes a segment row number,
-  * and the rows a search must skip become the labels to mask (design document
-  * architecture/vector-search.html section 2.4).
+/** What an index label means in the segment it was built from. Milvus builds a
+  * vector index over the rows that have a value, so a nullable column's index
+  * holds fewer rows than its segment and label `i` is the `i`-th row with a
+  * value. The `valid_data` bitmap the index files carry says which rows those
+  * are, least significant bit first, and this turns it into the two directions
+  * a search needs: a returned label becomes a segment row number, and the rows
+  * a search must skip become the labels to mask.
   *
   * A column without nulls maps label to row directly, which is what
   * [[IndexRowMapping.identity]] carries.

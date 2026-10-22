@@ -12,27 +12,23 @@ import com.zilliz.milvus.storage.schema.MetricType
 
 import io.knowhere.DType
 
-/** Searches a unit by computing every distance, one native call per batch.
-  *
-  * The batches, their exclusion bitmaps and their row offsets come from the
-  * input: a Milvus segment's from the format side, a DataFrame input's from its
-  * rows ([[VectorBatch]]). This only calls the engine and turns what comes back
-  * into candidates, a candidate's place being the unit's id and the row's
-  * position in it (design document architecture/vector-search.html section
-  * 2.3).
+/** Searches a unit by computing every distance, one native call per batch. The
+  * batches, their exclusion bitmaps and their row offsets come from the input:
+  * a Milvus segment's from the format side, a DataFrame input's from its rows
+  * ([[VectorBatch]]). This only calls the engine and turns what comes back into
+  * candidates, a candidate's place being the unit's id and the row's position
+  * in it.
   *
   * A float32 batch goes to the batched distance entry, which hands every query
   * of the group to the bundled faiss in one call so that it takes its SGEMM
-  * path (decision 27). That entry takes no bitmap, so a batch with excluded
-  * rows is compacted first: its visible rows are copied in order into one
-  * buffer and the row numbers the engine returns are mapped back. Every other
-  * element type goes to Knowhere's per-query brute force with the bitmap as it
-  * is.
+  * path. That entry takes no bitmap, so a batch with excluded rows is compacted
+  * first: its visible rows are copied in order into one buffer and the row
+  * numbers the engine returns are mapped back. Every other element type goes to
+  * Knowhere's per-query brute force with the bitmap as it is.
   *
   * A search ranked by a [[RankingFunction]] hands Knowhere only the rows in
   * [[EngineRange]]; the function scores the batch's other rows against every
-  * query of the group, and both kinds of score meet in the group's merger
-  * (design document architecture/dataframe-api.html section 2).
+  * query of the group, and both kinds of score meet in the group's merger.
   *
   * Under L2 the batched entry computes |x|^2 + |y|^2 - 2x.y in float32, which
   * errs by as much as the squared norms are large, whatever the distance, and
@@ -41,8 +37,7 @@ import io.knowhere.DType
   * variant computes again, pair by pair, those that can still be kept, a bound
   * on the entry's error shows that the rows it did not name cannot beat them,
   * and a query it cannot show that for is searched over the batch again pair by
-  * pair (decision 37, design document
-  * architecture/exact-search-and-index-build-internals.html section 1.8).
+  * pair.
   */
 object ExactScan {
 
@@ -313,7 +308,7 @@ object ExactScan {
       threads: Int
   ): Unit = {
     val parameters = s"""{"metric_type":"${metric.name}"}"""
-    // Under L2 the entry's candidates are only nominations (decision 37).
+    // Under L2 the entry's candidates are only nominations.
     val nominating = ranked.filter(_ => metric == MetricType.L2)
     val count = math.min(
       nominating.fold(k)(_ =>
@@ -435,15 +430,15 @@ object ExactScan {
   }
 
   /** L2 over the batched entry, whose ||x||^2 + ||y||^2 - 2x.y errs by as much
-    * as the squared norms are large (decision 37). Its candidates are only
-    * nominations: the rescored entry computes again, pair by pair, every
-    * candidate of a query that keeps fewer than k, and of a full query those
-    * whose estimate less the entry's error could still beat its worst, and the
-    * merger takes those distances. When the entry named as many rows as it was
-    * asked for, the rest of the batch estimates no nearer than its last; if
-    * even that row's bound could still be kept, the query is to be searched
-    * over the batch again pair by pair. Returns those queries in ascending
-    * order, with the rows each was given here, sorted.
+    * as the squared norms are large. Its candidates are only nominations: the
+    * rescored entry computes again, pair by pair, every candidate of a query
+    * that keeps fewer than k, and of a full query those whose estimate less the
+    * entry's error could still beat its worst, and the merger takes those
+    * distances. When the entry named as many rows as it was asked for, the rest
+    * of the batch estimates no nearer than its last; if even that row's bound
+    * could still be kept, the query is to be searched over the batch again pair
+    * by pair. Returns those queries in ascending order, with the rows each was
+    * given here, sorted.
     */
   private def nominate(
       current: VectorBatch,

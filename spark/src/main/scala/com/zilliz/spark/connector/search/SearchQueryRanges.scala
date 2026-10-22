@@ -4,8 +4,7 @@ import org.apache.spark.{NarrowDependency, Partition, TaskContext}
 import org.apache.spark.rdd.RDD
 
 /** The first stage's view of a delivered query set: partition `set × ranges +
-  * range` holds the query groups of that range, in order, for that segment set
-  * (design document architecture/vector-search.html section 2.1, decision 28).
+  * range` holds the query groups of that range, in order, for that segment set.
   *
   * `groups` holds one partition per group, as [[SearchQueries.Delivery]] made
   * them: slices of a set broadcast whole, cut as a task reads them, or the

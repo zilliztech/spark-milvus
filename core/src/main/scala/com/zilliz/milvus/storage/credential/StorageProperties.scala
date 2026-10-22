@@ -53,8 +53,8 @@ object StorageProperties {
     *
     * A missing bucket or endpoint used to fall back to the MinIO values a
     * developer runs locally, so a deployment that forgot one option connected
-    * to the wrong place and failed at request time. Decision 21 settled this:
-    * missing means fail at startup.
+    * to the wrong place and failed at request time. The rule is that a missing
+    * value fails at startup.
     */
   def from(
       options: scala.collection.Map[String, String]

@@ -3,14 +3,8 @@
 Orientation for anyone opening this repository, human or agent. `CLAUDE.md` is
 a symlink to this file, so every tool reads the same page; edit this one.
 
-The full guide — where the work stands, which document governs which
-subsystem, the design principles and the index-maintenance rules — is kept by
-the maintainers outside this repository. A comment that cites a "design
-document" or "the maintainers' ... design" names a page in that document set;
-nothing in this repository contains or links to those pages. Maintainers read
-that set's project orientation before anything else; it continues this page.
-Otherwise this page and [docs/contributing.md](docs/contributing.md) are what
-you have, and they are enough to build, test and change the code.
+This page and [docs/contributing.md](docs/contributing.md) are what you need
+to build, test and change the code.
 
 ## What this project is
 
@@ -51,8 +45,7 @@ source JARs contain only the selected roots. See [README.md](README.md).
 
 Three git submodules: `milvus-proto`, `milvus-storage` and `knowhere` supply
 the protobuf definitions and the two native engines and must be initialized to
-build. The maintainers' design documents are not a submodule and are not
-needed by the build or by CI.
+build.
 
 ## Rules any change has to satisfy
 
@@ -63,11 +56,9 @@ needed by the build or by CI.
    does not.
 3. **Dependencies point downward only.** If a lower layer needs something from a
    higher one, the thing is in the wrong layer. Move it; do not add a back edge.
-4. **Every decision is written down** in the project's design directory before the code
-   that depends on it is written, and every capability the connector commits
-   to has a row in its `capabilities.md`; each `package.scala` names the
-   capability ids its package carries, and `sbt checkCapabilityIndex` checks
-   the two against each other.
+4. **Every decision is written down** before the code that depends on it is
+   written: each `package.scala` states what its package is responsible for,
+   and a change that alters a responsibility updates it in the same commit.
 
 Two habits follow from the same idea. **No compatibility shims**: when code
 moves, update the call sites, because a forwarding stub hides the move and
@@ -91,9 +82,6 @@ Apply [.agents/skills/spark-milvus-sbt/SKILL.md](.agents/skills/spark-milvus-sbt
 The [formatting](docs/contributing.md#formatting) and
 [unit tests](docs/contributing.md#unit-tests) sections of the contributing guide
 hold the required commands: the formatter and its check with Java 21, `git diff
---check`, then the full root unit test suite. A change to a `package.scala` or
-to the capability index in the maintainers' design documents also runs
-`sbt checkCapabilityIndex`, which reads those documents from the directory
-named by `SPARK_MILVUS_DESIGN_DIR`. A document change is committed where the
-documents live; this repository records no gitlink for them
+--check`, then the full root unit test suite. A change to a `package.scala`
+keeps its responsibility statement current
 ([Documents](docs/contributing.md#documents)).

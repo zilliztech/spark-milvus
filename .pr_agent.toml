@@ -13,7 +13,7 @@ Review focus areas:
 - JNI/native boundary: resource lifecycle (close/free), thread safety and error propagation from milvus-storage
 - CLI/config changes must follow the target branch's compatibility policy and update the user-facing references
 - Follow the target branch's documented test layout
-- Check documentation against code, commands, options, links and capability/package indexes
+- Check documentation against code, commands, options and links
 """
 num_code_suggestions = 5
 inline_code_comments = true

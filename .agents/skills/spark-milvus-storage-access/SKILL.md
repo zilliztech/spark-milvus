@@ -5,9 +5,7 @@ description: Use when opening, reading, listing or writing a file in object stor
 
 # Storage access
 
-Read [AGENTS.md](../../../AGENTS.md), then the maintainers' storage-access
-design. That document owns the decision and the evidence; this skill applies
-it. Credentials
+Read [AGENTS.md](../../../AGENTS.md). Credentials
 under Hadoop are in
 [spark-milvus-storage-auth](../spark-milvus-storage-auth/SKILL.md).
 
@@ -133,10 +131,10 @@ There is no row-group parameter anywhere in the FFI. `loon_segment_reader_open`
 takes segment path, version, schema, needed columns, config and properties —
 nothing that says "read only these row groups". Reading parquet footers on the
 JVM side and computing which groups to skip produces a result with nowhere to
-go, so R10 is not a question of where to put the code: pruning has to happen on
-the side that reads. It needs Milvus to write statistics files registered in the
-manifest's `stats`, and milvus-storage's reader to prune with them. Section 5 of
-the maintainers' design log tracks both.
+go, so row-group pruning is not a question of where to put the code: pruning
+has to happen on the side that reads. It needs Milvus to write statistics files
+registered in the manifest's `stats`, and milvus-storage's reader to prune with
+them.
 
 Do not reach for `Manifest.stats` expecting min/max. It maps a stat name
 (`"bloom_filter.100"`) to `{paths, metadata}` — paths to auxiliary files.

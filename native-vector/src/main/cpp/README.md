@@ -17,5 +17,4 @@ loader owns platform selection, checksums, extraction and dependency loading.
 Do not relocate the `io.knowhere` Java package when building an assembly.
 Preload the JRE's `libjsig` before starting the JVM, as required by this build.
 
-Persisted Milvus index decoding and search are subsequent work. The governing
-design is the maintainers' vector-search design, library loading section.
+Persisted Milvus index decoding and search are subsequent work.

@@ -5,16 +5,13 @@ import org.apache.spark.SparkContext
 
 import com.zilliz.milvus.storage.vector.SegmentSearch
 
-/** What a vector search counted.
-  *
-  * A search runs as RDD stages rather than as a DataSource V2 scan, so its
-  * numbers do not reach Spark through the `CustomMetric` classes above. The
-  * nearest-by join that runs it counts into the SQL metrics of its plan node,
-  * which the SQL tab shows on that node and the stage page lists under the
-  * names below (design document architecture/dataframe-api.html section 4).
-  * Knowhere computes in its own thread pool, which Spark's task CPU time does
-  * not cover; `milvus.search.knowhere.nanos` is where that time shows up
-  * (design document architecture/vector-search.html section 1.3).
+/** What a vector search counted. A search runs as RDD stages rather than as a
+  * DataSource V2 scan, so its numbers do not reach Spark through the
+  * `CustomMetric` classes above. The nearest-by join that runs it counts into
+  * the SQL metrics of its plan node, which the SQL tab shows on that node and
+  * the stage page lists under the names below. Knowhere computes in its own
+  * thread pool, which Spark's task CPU time does not cover;
+  * `milvus.search.knowhere.nanos` is where that time shows up.
   */
 final class SearchMetrics private (
     val segmentSearches: SearchMetrics.Counter,
@@ -87,9 +84,9 @@ object SearchMetrics {
   val ComparedPairs = "milvus.search.compared.pairs"
 
   /** The batch and query pairs an L2 exact scan searched again pair by pair,
-    * because the batched entry's error could hide a nearer row (decision 37).
-    * Near zero for most data; a high count marks vectors far from the origin
-    * and near each other.
+    * because the batched entry's error could hide a nearer row. Near zero for
+    * most data; a high count marks vectors far from the origin and near each
+    * other.
     */
   val ExactRescans = "milvus.search.exact.rescans"
   val Candidates = "milvus.search.candidates"

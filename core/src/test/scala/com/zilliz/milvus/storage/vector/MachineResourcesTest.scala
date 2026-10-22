@@ -6,8 +6,7 @@ import java.nio.file.{Files, Path}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-/** The memory limit read from cgroup and procfs laid out as Linux writes them
-  * (design document architecture/search-resources.html section 3.1).
+/** The memory limit read from cgroup and procfs laid out as Linux writes them.
   */
 class MachineResourcesTest extends AnyFunSuite with Matchers {
 

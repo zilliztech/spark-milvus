@@ -31,8 +31,7 @@ object MilvusOption {
   // group (default 2): the next segment's call fills the tail of the current one
   val SearchCallsInFlight = "milvus.search.calls.in.flight"
   // An index's search tuning, given with the base input of a NEAREST BY:
-  // ef for the HNSW family, nprobe for the IVF family
-  // (design document architecture/dataframe-api.html section 5).
+  // ef for the HNSW family, nprobe for the IVF family.
   val SearchParams = "milvus.search.params"
   val MilvusFilter = "milvus.filter"
 
@@ -259,12 +258,11 @@ object MilvusOption {
     readApplyDeletesFrom(key => Option(options.get(key)))
   }
 
-  /** Whether vector columns come out as the bytes Milvus stored.
-    *
-    * Default false: vectors are decoded into Spark's own types (decision 6).
-    * True hands the stored bytes over as BinaryType, which is what a job that
-    * feeds them straight to a native library wants — converting to Array[Float]
-    * and back again is pure waste there.
+  /** Whether vector columns come out as the bytes Milvus stored. Default false:
+    * vectors are decoded into Spark's own types. True hands the stored bytes
+    * over as BinaryType, which is what a job that feeds them straight to a
+    * native library wants — converting to Array[Float] and back again is pure
+    * waste there.
     */
   private def readVectorRawFrom(
       getOption: String => Option[String]
@@ -279,12 +277,11 @@ object MilvusOption {
     readVectorRawFrom(key => Option(options.get(key)))
   }
 
-  /** Whether the scan hands Spark whole batches instead of rows.
-    *
-    * Columnar output is the default. Row and columnar readers share the V3
-    * format and delete contracts, covered by fixed read fixtures. `false`
-    * selects the row path. A nearest-by join executed by the connector reads
-    * segments directly, so this option does not affect vector search.
+  /** Whether the scan hands Spark whole batches instead of rows. Columnar
+    * output is the default. Row and columnar readers share the V3 format and
+    * delete contracts, covered by fixed read fixtures. `false` selects the row
+    * path. A nearest-by join executed by the connector reads segments directly,
+    * so this option does not affect vector search.
     */
   private def readColumnarFrom(
       getOption: String => Option[String]

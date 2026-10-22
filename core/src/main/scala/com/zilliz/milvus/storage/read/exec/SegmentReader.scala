@@ -18,11 +18,9 @@ import io.milvus.storage.{
   MilvusStorageRuntime
 }
 
-/** Pulls Arrow batches out of one segment.
-  *
-  * The only thing in core that opens a native handle. A batch arrives as a
-  * freshly owned `VectorSchemaRoot`: the caller closes each one and closes the
-  * reader when it is done.
+/** Pulls Arrow batches out of one segment. The only thing in core that opens a
+  * native handle. A batch arrives as a freshly owned `VectorSchemaRoot`: the
+  * caller closes each one and closes the reader when it is done.
   */
 trait SegmentReader extends AutoCloseable {
 
@@ -153,15 +151,13 @@ object SegmentReader {
   private[exec] val PrebufferRangeSizeLimit =
     "reader.parquet.prebuffer.range_size_limit"
 
-  /** Object storage requests one batch read makes at once.
-    *
-    * A batch is one Parquet read call over the row groups it covers. Arrow
-    * coalesces their column chunks into ranges of at most the range size, and
-    * each range is one GET on one connection, which moves 40 to 60 MB/s from
-    * S3. Arrow's default cache requests the ranges one at a time as decoding
-    * reaches them, so a task read at one connection's speed whatever the range
-    * size; requested together, eight ranges use eight connections (design
-    * document architecture/search-resources.html section 3.6).
+  /** Object storage requests one batch read makes at once. A batch is one
+    * Parquet read call over the row groups it covers. Arrow coalesces their
+    * column chunks into ranges of at most the range size, and each range is one
+    * GET on one connection, which moves 40 to 60 MB/s from S3. Arrow's default
+    * cache requests the ranges one at a time as decoding reaches them, so a
+    * task read at one connection's speed whatever the range size; requested
+    * together, eight ranges use eight connections.
     */
   private[exec] val RangesPerBatch = 8
 
@@ -211,10 +207,9 @@ object SegmentReader {
       MilvusStorageRuntime.setArrowIoThreadPoolCapacity(wanted)
   }
 
-  /** Opens a [[SegmentReader]] for a segment's layout.
-    *
-    * Dispatch lives here rather than in the Spark layer, so the two layouts
-    * have one entry point instead of a branch per call site.
+  /** Opens a [[SegmentReader]] for a segment's layout. Dispatch lives here
+    * rather than in the Spark layer, so the two layouts have one entry point
+    * instead of a branch per call site.
     *
     * Column naming is the caller's, and the two lines genuinely differ: a
     * manifest matches columns by field id and its schema carries ids as names,
@@ -432,10 +427,8 @@ private[exec] final class ExpectedRowsSegmentReader(
   }
 }
 
-/** [[SegmentReader]] over milvus-storage's C reader.
-  *
-  * Three rules this class exists to keep, all of them from getting them wrong
-  * once (see design document architecture/storage-io.html section 3):
+/** [[SegmentReader]] over milvus-storage's C reader. Three rules this class
+  * exists to keep, all of them from getting them wrong once:
   *
   *   - A handle never crosses a serialization boundary. It is opened here, on
   *     the executor, from a physical source description.

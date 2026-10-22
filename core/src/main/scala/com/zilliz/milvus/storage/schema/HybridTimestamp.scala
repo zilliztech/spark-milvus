@@ -10,7 +10,7 @@ object HybridTimestamp {
   private val MaxPhysicalMillis = Long.MaxValue >>> LogicalBits
 
   /** The first HybridTS of a physical millisecond, which is what a write stamps
-    * its rows with (decision 22).
+    * its rows with.
     */
   def ofMillis(millis: Long): Long =
     if (millis < 0L) 0L

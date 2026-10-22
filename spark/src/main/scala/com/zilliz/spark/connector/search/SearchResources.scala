@@ -13,10 +13,9 @@ import com.zilliz.spark.connector.options.{MilvusOption, SearchLimits}
   * block and what one task may keep, off the heap and on it.
   *
   * One exact-scan call hands the batched distance entry one block of base
-  * vectors, and the entry tiles the block itself (4,096 queries by 1,024 rows,
-  * decision 27), so the block only sets the fixed cost of a call and the memory
-  * a task holds: it is a constant 32 MiB, measured the same per core as 128 MiB
-  * (design document architecture/search-resources.html section 3.2). The
+  * vectors, and the entry tiles the block itself (4,096 queries by 1,024 rows),
+  * so the block only sets the fixed cost of a call and the memory a task holds:
+  * it is a constant 32 MiB, measured the same per core as 128 MiB. The
   * L3-derived rule that preceded it served the per-query kernel and went with
   * it.
   *
@@ -31,14 +30,12 @@ private[search] object SearchResources {
 
   final case class Choice(bytes: Long, reason: String)
 
-  /** The executor's memory: its limit, when it can be known, and its heap.
-    *
-    * In local mode the executor is this JVM, so the limit is the cgroup's or
-    * the machine's and the heap is this runtime's. On a cluster the driver
-    * cannot read the executor's cgroup, but the container Spark asked for is
-    * its limit: `spark.executor.memory` plus the overhead and, when enabled,
-    * the off-heap size (design document architecture/search-resources.html
-    * section 3.3).
+  /** The executor's memory: its limit, when it can be known, and its heap. In
+    * local mode the executor is this JVM, so the limit is the cgroup's or the
+    * machine's and the heap is this runtime's. On a cluster the driver cannot
+    * read the executor's cgroup, but the container Spark asked for is its
+    * limit: `spark.executor.memory` plus the overhead and, when enabled, the
+    * off-heap size.
     */
   def executorMemory(spark: SparkSession): (Option[Long], Long) = {
     val master = spark.sparkContext.master
@@ -219,8 +216,7 @@ private[search] object SearchResources {
     * JVM side) is what the task spends its time on. The executor scaling test
     * of 2026-10-08 measured 13 queries a call on 32 cores at k=100,000 (the 64
     * MiB group of the harness): search-stage CPU 35% on L x 4, 77% on L x 16 at
-    * k=10,000 against 92% on 8-core executors (design document
-    * enhance/2026-10-13-search-path-optimizations.html section 2).
+    * k=10,000 against 92% on 8-core executors.
     */
   val GroupQueriesPerCore: Int = 8
 

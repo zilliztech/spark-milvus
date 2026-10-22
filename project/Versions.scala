@@ -16,7 +16,7 @@ object Versions {
       /** The Hadoop and Netty versions the Spark distribution ships. A line's
         * test classpath pins every Hadoop and Netty artifact to them, because
         * Arrow's Netty allocation manager reads Netty internals: Arrow 12 on
-        * Netty 4.1.118 fails at the first buffer (work item 19).
+        * Netty 4.1.118 fails at the first buffer.
         */
       hadoop: String,
       netty: String

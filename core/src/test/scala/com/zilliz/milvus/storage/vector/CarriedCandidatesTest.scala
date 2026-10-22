@@ -16,7 +16,7 @@ import com.zilliz.milvus.storage.schema.MetricType
 
 /** Candidates that carry their rows, as a DataFrame input's first stage sends
   * them and its merge joins them, and the batches such an input builds from
-  * float vectors (design document architecture/dataframe-api.html section 4).
+  * float vectors.
   */
 class CarriedCandidatesTest extends AnyFunSuite with Matchers {
 

@@ -4,13 +4,11 @@ import java.lang.{Float => JavaFloat, Long => JavaLong}
 
 import com.zilliz.milvus.storage.schema.MetricType
 
-/** One candidate row for one query: where it is and what it scored.
-  *
-  * `score` is the metric score rounded to Float32 before local selection,
-  * shared by local and global ranking (design document
-  * architecture/vector-search.html section 2.6). [[TopKMerger]] does not hold
-  * these: it holds the three numbers in primitive arrays, and builds a
-  * `Candidate` only where a caller asks for one.
+/** One candidate row for one query: where it is and what it scored. `score` is
+  * the metric score rounded to Float32 before local selection, shared by local
+  * and global ranking. [[TopKMerger]] does not hold these: it holds the three
+  * numbers in primitive arrays, and builds a `Candidate` only where a caller
+  * asks for one.
   */
 final case class Candidate(
     query: Int,
@@ -39,12 +37,10 @@ object Candidate {
   }
 }
 
-/** Keeps the best k candidates of every query and nothing else.
-  *
-  * A stage-one task merges its segments into one of these, and adding
-  * candidates in any order gives the same result. Memory is bounded by `queries
-  * * k` candidates, which is what `milvus.search.group.max.bytes` sizes a query
-  * group against.
+/** Keeps the best k candidates of every query and nothing else. A stage-one
+  * task merges its segments into one of these, and adding candidates in any
+  * order gives the same result. Memory is bounded by `queries * k` candidates,
+  * which is what `milvus.search.group.max.bytes` sizes a query group against.
   *
   * Each query's k slots are a binary heap whose root is the worst candidate
   * kept, laid out in three primitive arrays rather than `Candidate` objects in
@@ -59,7 +55,7 @@ object Candidate {
   * sorts only when the caller requests [[sort]], and only for the k it kept.
   * [[results]] reads the current order without ending collection; [[sort]]
   * finalizes one query before its ordered output, and [[takePacked]] requires
-  * that explicit step (design document architecture/topk-merger.html).
+  * that explicit step.
   */
 final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
     extends Serializable {
@@ -154,11 +150,10 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
     candidate.score
   )
 
-  /** Keeps this candidate when it is one of the query's best k.
-    *
-    * A full heap rejects on one comparison against its root, which is what most
-    * candidates of most segments do once a query has seen one segment; one that
-    * is kept replaces the root and sinks.
+  /** Keeps this candidate when it is one of the query's best k. A full heap
+    * rejects on one comparison against its root, which is what most candidates
+    * of most segments do once a query has seen one segment; one that is kept
+    * replaces the root and sinks.
     */
   def add(query: Int, segmentId: Long, rowOffset: Long, score: Float): Unit = {
     require(
@@ -274,7 +269,6 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
   }
 
   /** An independent snapshot of this query's candidates in their current order.
-    *
     * This neither sorts nor ends collection. Before [[sort]], the order is the
     * heap's and further additions are allowed; afterwards it is best first.
     * Later additions or sorting do not change the returned objects.

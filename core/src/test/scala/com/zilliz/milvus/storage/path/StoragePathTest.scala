@@ -3,9 +3,8 @@ package com.zilliz.milvus.storage.path
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-/** The seven spellings listed in design document
-  * architecture/storage-access.html 1.1, plus the rules the C layer's
-  * StorageUri::Parse follows.
+/** The seven storage path spellings the connector accepts, plus the rules the C
+  * layer's StorageUri::Parse follows.
   */
 class StoragePathTest extends AnyFunSuite with Matchers {
 

@@ -14,9 +14,8 @@ import com.zilliz.spark.connector.extensions.{
 }
 
 /** The connector's `vector_l2_distance`, `vector_cosine_similarity` and
-  * `vector_inner_product`, which the lines before 4.2 register (design document
-  * architecture/dataframe-api.html section 6): Spark 4.2's NULL, empty-array
-  * and dimension rules, and Spark 4.3's double sums.
+  * `vector_inner_product`, which the lines before 4.2 register: Spark 4.2's
+  * NULL, empty-array and dimension rules, and Spark 4.3's double sums.
   */
 class VectorFunctionsTest
     extends AnyFunSuite

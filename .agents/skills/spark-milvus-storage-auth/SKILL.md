@@ -5,9 +5,7 @@ description: Use when touching object storage credentials, provider chains, per-
 
 # Object storage authentication
 
-Read [AGENTS.md](../../../AGENTS.md), then the maintainers' storage-auth
-design. That document owns the conventions and records the measured facts
-behind them; this skill applies it.
+Read [AGENTS.md](../../../AGENTS.md).
 
 The connector reaches object storage through milvus-storage's C filesystem: see
 [spark-milvus-storage-access](../spark-milvus-storage-access/SKILL.md). Hadoop
@@ -49,9 +47,7 @@ query-file reads still go through Hadoop in the same pod. Both discover the same
 identity when neither is explicitly configured. They diverge when one side is
 configured and the other is not, so configure both consistently or leave both
 alone. The native side takes
-location and mode and, when IAM is in use, no secrets; the full key-name table
-is section 3.3 of
-the maintainers' storage-access design.
+location and mode and, when IAM is in use, no secrets.
 
 ## Verifying a change
 

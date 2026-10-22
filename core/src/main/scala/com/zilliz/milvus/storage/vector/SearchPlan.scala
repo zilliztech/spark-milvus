@@ -4,22 +4,20 @@ import scala.collection.mutable
 
 import com.zilliz.milvus.storage.schema.VectorLayout
 
-/** Splits one search into the tasks of its first stage.
-  *
-  * A task takes one segment set and a range of query groups and answers every
-  * group of the range on every segment of the set. A group is sized so that its
-  * query matrix and its top-k fit `milvus.search.group.max.bytes`.
+/** Splits one search into the tasks of its first stage. A task takes one
+  * segment set and a range of query groups and answers every group of the range
+  * on every segment of the set. A group is sized so that its query matrix and
+  * its top-k fit `milvus.search.group.max.bytes`.
   *
   * How many sets there are, and which side a task keeps in memory, follow from
   * how many tasks the search runs at once and the two budgets of one task: its
-  * queries' budget on the heap and its segments' budget off it (design document
-  * architecture/vector-search.html section 2.1, search-resources .html section
-  * 3.3). A task that can keep its queries reads every segment of its set once,
-  * one at a time, so there are as many sets as tasks run at once: each set is
-  * then read once and the query set is taken once per set, which is the least
-  * either costs. A task that cannot keeps its segment set and the query groups
-  * pass through it, so a set holds no more than the segment budget and there
-  * are more sets when the segments need them.
+  * queries' budget on the heap and its segments' budget off it. A task that can
+  * keep its queries reads every segment of its set once, one at a time, so
+  * there are as many sets as tasks run at once: each set is then read once and
+  * the query set is taken once per set, which is the least either costs. A task
+  * that cannot keeps its segment set and the query groups pass through it, so a
+  * set holds no more than the segment budget and there are more sets when the
+  * segments need them.
   *
   * An exact search with fewer sets than tasks run at once cuts its queries into
   * contiguous ranges, one task per (set, range): the batched distance entry
@@ -38,9 +36,8 @@ object SearchPlan {
     */
   final case class Segment(segmentId: Long, rows: Option[Long])
 
-  /** What one candidate is planned to cost a task while the search runs.
-    *
-    * A planning constant. The figure dates from when a candidate was a
+  /** What one candidate is planned to cost a task while the search runs. A
+    * planning constant. The figure dates from when a candidate was a
     * `Candidate` object in the query's own priority queue: on a 64-bit JVM with
     * compressed ordinary object pointers a 12-byte header over an `Int`, two
     * `Long`s and a `Double`, 40 bytes once aligned, plus the queue's reference
@@ -89,7 +86,6 @@ object SearchPlan {
   }
 
   /** What one segment costs, off the heap, the task that searches it.
-    *
     * @param kept
     *   the bytes the segment holds while a task keeps it -- its loaded index,
     *   or its vector batches -- or None when nothing recorded its size and the
@@ -222,7 +218,7 @@ object SearchPlan {
   /** The share of a task's segment budget an unknown-sized segment is planned
     * at. Half the budget, before reserving the query matrix and working
     * buffers. A task streams instead of holding when the segments turn out
-    * larger (design document architecture/search-resources.html section 3.3).
+    * larger.
     */
   val UnknownSegmentShare: Double = 0.5
 
@@ -267,18 +263,17 @@ object SearchPlan {
     )
   }
 
-  /** Splits the segments into the sets one task each reads.
-    *
-    * A set keeps at most `capacity` bytes, as `size` counts them; there are at
-    * least as many sets as `slots`, so every task that runs at once has work,
-    * unless the search has fewer segments than that. The count is rounded up to
-    * a multiple of `slots`: the sets are the first stage's tasks and the slots
-    * run them in waves, and 13 or 15 sets on 8 slots leave the second wave half
-    * empty for a whole task's time, while 16 fill both waves with sets that are
-    * each a little lighter (2026-09-27 decision). Segments go in largest first
-    * and each one joins the lightest set that still has room, which spreads
-    * equal segments one per set, and a segment that fits no set opens one of
-    * its own. Segments keep their order inside a set.
+  /** Splits the segments into the sets one task each reads. A set keeps at most
+    * `capacity` bytes, as `size` counts them; there are at least as many sets
+    * as `slots`, so every task that runs at once has work, unless the search
+    * has fewer segments than that. The count is rounded up to a multiple of
+    * `slots`: the sets are the first stage's tasks and the slots run them in
+    * waves, and 13 or 15 sets on 8 slots leave the second wave half empty for a
+    * whole task's time, while 16 fill both waves with sets that are each a
+    * little lighter (2026-09-27 decision). Segments go in largest first and
+    * each one joins the lightest set that still has room, which spreads equal
+    * segments one per set, and a segment that fits no set opens one of its own.
+    * Segments keep their order inside a set.
     */
   def segmentSets(
       tasks: Seq[Segment],
@@ -337,15 +332,13 @@ object SearchPlan {
   ): Long =
     math.max(layout.rowBytes.toLong, (budget * UnknownSegmentShare).toLong)
 
-  /** The fewest queries a range of an exact search holds.
-    *
-    * A range reads its whole segment set, and computing a block takes the time
-    * reading it does once a range holds about 2,300 queries: a float32 row is
-    * 4d bytes read at the 110 MB/s one task reads (decision 31) against 2d
-    * floating-point operations a query at the 125 GFLOP/s of one core in the
-    * batched entry (decision 27), whatever the dimension d. A range under that
-    * waits on its reads, so another range only reads the set once more; rounded
-    * down to a power of two (decision 32).
+  /** The fewest queries a range of an exact search holds. A range reads its
+    * whole segment set, and computing a block takes the time reading it does
+    * once a range holds about 2,300 queries: a float32 row is 4d bytes read at
+    * the 110 MB/s one task reads against 2d floating-point operations a query
+    * at the 125 GFLOP/s of one core in the batched entry, whatever the
+    * dimension d. A range under that waits on its reads, so another range only
+    * reads the set once more; rounded down to a power of two.
     */
   val MinRangeQueries: Int = 2048
 
@@ -410,7 +403,7 @@ object SearchPlan {
 
   /** The first-stage tasks of one search: the segment sets, the query groups,
     * the ranges of groups each task answers on its set, and the side a task
-    * keeps (design document architecture/vector-search.html section 2.1).
+    * keeps.
     *
     * @param concurrency
     *   how many first-stage tasks run at once in the whole search
@@ -468,7 +461,7 @@ object SearchPlan {
     }
     // The groups and ranges for `sets` sets. When the byte limit cuts fewer
     // groups than the ranges, the query set is cut into one group per range,
-    // each smaller than the limit's (decision 32).
+    // each smaller than the limit's.
     def cut(sets: Int): (Seq[QueryGroup], Seq[Range]) = {
       val count =
         if (rangesWanted > 0) math.max(1, math.min(rangesWanted, queries))

@@ -30,12 +30,10 @@ import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.read.{ColumnBinding, MilvusInputPartition}
 import com.zilliz.spark.connector.types.{ArrowAllocator, ArrowConverter}
 
-/** The second stage: the output columns of the rows a search selected.
-  *
-  * Only the rows that survived the merge are read, one segment at a time and
-  * each row once however many queries hit it. Reading them is the Milvus format
-  * side taking rows by address (design document architecture/vector-search.html
-  * section 2.1).
+/** The second stage: the output columns of the rows a search selected. Only the
+  * rows that survived the merge are read, one segment at a time and each row
+  * once however many queries hit it. Reading them is the Milvus format side
+  * taking rows by address.
   */
 private[search] object SearchTake {
 
@@ -63,8 +61,7 @@ private[search] object SearchTake {
     * a task's take reads that run and the buckets together read the segment
     * once. Hashing the offset instead spread every task over every row group of
     * its segment: at k=100,000 each of 109 bucket tasks read the whole segment
-    * again, 31 TB in all against 8 GB of primary keys (design document
-    * enhance/2026-10-13-search-take-stage.html section 5).
+    * again, 31 TB in all against 8 GB of primary keys.
     */
   def rangeBucket(offset: Long, rows: Long, buckets: Int): Int = {
     require(rows > 0 && buckets > 0, s"$rows rows, $buckets buckets")
@@ -88,21 +85,19 @@ private[search] object SearchTake {
     }
   }
 
-  /** The hits of one search, with their output columns.
-    *
-    * The hits are shuffled by segment so that a task holds every hit of the
-    * segments it reads, and then grouped by segment in the task rather than
-    * sorted into groups. Sorting them was the expensive half of this stage: a
-    * JFR profile of one P3 chunk put 10% of the executor's Java samples in
-    * `UnsafeExternalRowSorter` for 25 million hit rows whose order this stage
-    * then threw away, since `take` asks the reader for the distinct offsets in
-    * ascending order and derives that order itself. What the sort did buy was a
-    * bound on memory -- a task held one segment's hits at a time -- so the hits
-    * are buffered as `InternalRow` instead of `Row`, which is the same 25
-    * million rows in about half the bytes, and the number of tasks and the
-    * buckets a segment is cut into come from
-    * [[SearchExecutionPlan.takePartitioning]], sized so that what one task
-    * buffers fits the heap it has.
+  /** The hits of one search, with their output columns. The hits are shuffled
+    * by segment so that a task holds every hit of the segments it reads, and
+    * then grouped by segment in the task rather than sorted into groups.
+    * Sorting them was the expensive half of this stage: a JFR profile of one P3
+    * chunk put 10% of the executor's Java samples in `UnsafeExternalRowSorter`
+    * for 25 million hit rows whose order this stage then threw away, since
+    * `take` asks the reader for the distinct offsets in ascending order and
+    * derives that order itself. What the sort did buy was a bound on memory --
+    * a task held one segment's hits at a time -- so the hits are buffered as
+    * `InternalRow` instead of `Row`, which is the same 25 million rows in about
+    * half the bytes, and the number of tasks and the buckets a segment is cut
+    * into come from [[SearchExecutionPlan.takePartitioning]], sized so that
+    * what one task buffers fits the heap it has.
     *
     * Each query id comes out with its requested base columns in an owned row.
     * `positions` selects them from the hit columns followed by `output`,

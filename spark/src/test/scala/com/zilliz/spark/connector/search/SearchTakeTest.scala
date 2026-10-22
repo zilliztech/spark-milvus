@@ -12,8 +12,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 /** How the take stage spreads its hits over tasks so that what one task buffers
-  * fits its heap (design document architecture/vector-search.html section 2.1,
-  * 2026-09-25 decision).
+  * fits its heap.
   */
 class SearchTakeTest extends AnyFunSuite with Matchers {
   private val MiB = 1L << 20

@@ -559,7 +559,7 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
   private val wide = VectorLayout(VectorElementType.Float32, 768)
 
   /** 1 GiB of 768-dimension queries on two segments of 1.94 million rows and 16
-    * slots: the 1g x 10g exact search (decision 32).
+    * slots: the 1g x 10g exact search.
     */
   private def tenGiB(groupMaxBytes: Long): SearchPlan.Plan = SearchPlan.of(
     Seq(task(1L, 1940000L), task(2L, 1940000L)),

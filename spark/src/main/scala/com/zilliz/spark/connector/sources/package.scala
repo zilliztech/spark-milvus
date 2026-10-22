@@ -6,7 +6,5 @@ package com.zilliz.spark.connector
   * It stays at this fully qualified name because apps and user jobs name it by
   * the string `com.zilliz.spark.connector.sources.MilvusDataSource`. Everything
   * else that used to live here is in `table`, `read` and `options`.
-  *
-  * Capabilities: R1 (see design document capabilities.md).
   */
 package object sources

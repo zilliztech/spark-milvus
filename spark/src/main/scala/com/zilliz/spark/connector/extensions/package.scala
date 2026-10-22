@@ -6,7 +6,5 @@ package com.zilliz.spark.connector
   * Shared logical and physical search plans live here; explicit scala-shims
   * roots adapt Datasets, NearestByExtensions and NearestByEntry to each
   * supported Spark API. No management SQL parser or procedure is registered.
-  *
-  * Capabilities: V5, V7, V9 (see design document capabilities.md).
   */
 package object extensions

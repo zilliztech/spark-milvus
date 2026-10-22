@@ -1,8 +1,7 @@
 package com.zilliz.milvus.storage
 
-/** Turns user options into the `fs.*` property map the C layer takes.
-  *
-  * The output is a plain Map[String, String] whose keys are all `fs.*`, or
+/** Turns user options into the `fs.*` property map the C layer takes. The
+  * output is a plain Map[String, String] whose keys are all `fs.*`, or
   * `extfs.<name>.*` when one job reaches more than one bucket. This package
   * validates what is required, rejects blank values, and accepts only `true` or
   * `false` for known boolean properties; it does not branch on cloud, and no
@@ -13,8 +12,6 @@ package com.zilliz.milvus.storage
   * done here. It belongs to whoever produces the configuration, or to a layer-3
   * shim with a written exit condition.
   *
-  * Main types: StorageProperties. Capabilities: R3 (see design document
-  * capabilities.md). Design: design document architecture/storage-access.html
-  * section 3 and storage-auth.html.
+  * Main types: StorageProperties.
   */
 package object credential

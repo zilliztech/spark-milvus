@@ -588,12 +588,8 @@ real object store. Additional Scala
 cross-version checks, integration tests, native
 builds and publication follow the task's scope and authorization.
 
-Run `sbt checkCapabilityIndex` before every commit that touches the capability
-index in the maintainers' design documents or a `package.scala`; it reads those
-documents from the directory named by `SPARK_MILVUS_DESIGN_DIR`, and CI does not
-run it. CI does run
-`python3 -m unittest discover -s native-build -p 'test_*.py'` plus the same
-discovery over `scripts/tests`; run them when touching `native-build/`.
+CI runs `python3 -m unittest discover -s native-build -p 'test_*.py'` plus the
+same discovery over `scripts/tests`; run them when touching `native-build/`.
 
 ## Storage protobufs
 
@@ -615,29 +611,16 @@ which throws the same way from the other direction.
 ## Commits
 
 Write the message in English, explain why rather than what, and name the
-verification you actually ran. When a change contradicts a design document, say
-so in the message and fix the document in the same commit.
+verification you actually ran. When a change contradicts a document in this
+repository, say so in the message and fix the document in the same commit.
 
 ## Documents
 
 Public documents are English Markdown files in `docs/`, including this
 guide, [reference-en.md](reference-en.md), and the
 [release guide](releasing.md). They describe the connector, its use, build and
-release process. Public contributions may include design proposals, decisions
-and the rationale needed to review a change in the same pull request. External
-contributors do not need access to the maintainers' design documents to propose
-or document a change.
-
-The maintainers keep the design documents, decision log and capability index
-outside this repository; this repository does not mount or link to them, and
-the build and CI do not read them. A comment that cites a "design document" or
-"the maintainers' ... design" names a page in that set. Maintainers reconcile
-accepted public proposals with the design records and capability index, and
-run `sbt checkCapabilityIndex` when that index or a `package.scala` changes,
-with `SPARK_MILVUS_DESIGN_DIR` naming the directory that holds the documents.
-Public CI does not fetch those documents or claim to perform the index check. A
-document change is committed where the documents live; this repository records
-no gitlink for them.
+release process. Contributions may include design proposals, decisions and the
+rationale needed to review a change in the same pull request.
 
 ### Repository-local document references
 

@@ -19,14 +19,13 @@ import org.apache.spark.scheduler.{
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.spark.connector.metrics.SearchMetrics
 
-/** Writes what a running search has counted to the driver log.
-  *
-  * A first-stage task runs for as long as its vectors take, and until it ends
-  * Spark shows nothing of what it has done: executors put every one of a
-  * running task's accumulators on the heartbeat, but `AppStatusListener` keeps
-  * only the names under `internal.metrics.`, so the stage page and the REST API
-  * hold no `milvus.search.*` value until the task is over. A listener of our
-  * own reads the same heartbeat and reports it.
+/** Writes what a running search has counted to the driver log. A first-stage
+  * task runs for as long as its vectors take, and until it ends Spark shows
+  * nothing of what it has done: executors put every one of a running task's
+  * accumulators on the heartbeat, but `AppStatusListener` keeps only the names
+  * under `internal.metrics.`, so the stage page and the REST API hold no
+  * `milvus.search.*` value until the task is over. A listener of our own reads
+  * the same heartbeat and reports it.
   *
   * The heartbeat carries each task's value so far, not what changed since the
   * last one, so a task's report replaces its previous one rather than adding to
@@ -40,7 +39,7 @@ import com.zilliz.spark.connector.metrics.SearchMetrics
   * session counts under the same names, and it leaves the listener bus when the
   * job that runs the search's first stage ends, whether that job succeeded or
   * not; a listener left behind would see every later event and count every
-  * later search (design document architecture/vector-search.html section 1.3).
+  * later search.
   *
   * @param context
   *   the bus the listener is on
@@ -143,13 +142,12 @@ private[search] final class SearchProgress private (
     }
   }
 
-  /** The last word on a stage, which no heartbeat can give.
-    *
-    * A line is written when a heartbeat arrives, and the heartbeat carries only
-    * running tasks: when the last of them end between two heartbeats, the run's
-    * own totals are never reported and the reader is left with whatever the
-    * second to last reading said. A completed stage is that reading, so it is
-    * written whether or not a line is due.
+  /** The last word on a stage, which no heartbeat can give. A line is written
+    * when a heartbeat arrives, and the heartbeat carries only running tasks:
+    * when the last of them end between two heartbeats, the run's own totals are
+    * never reported and the reader is left with whatever the second to last
+    * reading said. A completed stage is that reading, so it is written whether
+    * or not a line is due.
     */
   override def onStageCompleted(event: SparkListenerStageCompleted): Unit = {
     if (running.isEmpty && !ended.isEmpty) report(force = true)
@@ -279,9 +277,8 @@ private[search] object SearchProgress {
   private[search] def grouped(value: Long): String =
     String.format(Locale.ROOT, "%,d", java.lang.Long.valueOf(value))
 
-  /** This search's values in one report, by counter name, as longs.
-    *
-    * An accumulable arrives with its id and its value as `Any`. It is this
+  /** This search's values in one report, by counter name, as longs. An
+    * accumulable arrives with its id and its value as `Any`. It is this
     * search's when the id is one of `counters`: every search in a session
     * counts under the same names, so a name does not say whose task it was. A
     * value that is not a number is not a counter's. A negative value is a

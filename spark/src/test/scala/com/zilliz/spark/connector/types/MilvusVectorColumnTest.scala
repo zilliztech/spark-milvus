@@ -9,11 +9,10 @@ import org.scalatest.matchers.should.Matchers
 import com.zilliz.milvus.storage.codec.FloatConverter
 import io.milvus.grpc.schema.DataType
 
-/** The columnar side of decision 6.
-  *
-  * Every case checks against `FloatConverter`, which is what the row path uses,
-  * so the two paths cannot drift: the same stored bytes have to read back as
-  * the same values whichever one the scan took.
+/** The columnar side of the vector column typing. Every case checks against
+  * `FloatConverter`, which is what the row path uses, so the two paths cannot
+  * drift: the same stored bytes have to read back as the same values whichever
+  * one the scan took.
   */
 class MilvusVectorColumnTest extends AnyFunSuite with Matchers {
 
@@ -198,7 +197,7 @@ class MilvusVectorColumnTest extends AnyFunSuite with Matchers {
     }
   }
 
-  test("the presented Spark type follows decision 6") {
+  test("the presented Spark type follows the vector column typing") {
     MilvusVectorColumn.sparkType(DataType.FloatVector, raw = false) shouldBe
       ArrayType(FloatType, containsNull = false)
     MilvusVectorColumn.sparkType(DataType.Float16Vector, raw = false) shouldBe

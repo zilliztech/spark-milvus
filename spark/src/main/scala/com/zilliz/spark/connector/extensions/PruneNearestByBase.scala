@@ -14,7 +14,7 @@ import org.apache.spark.sql.catalyst.rules.Rule
   * answered by the index or by the search task. This rule runs in the same
   * optimizer batch as `ColumnPruning` and keeps in the join's output only the
   * base columns the project above it references; the base keeps the vector for
-  * the ranking (design document enhance/2026-10-13-search-take-stage.html).
+  * the ranking.
   */
 object PruneNearestByBase extends Rule[LogicalPlan] {
   override def apply(plan: LogicalPlan): LogicalPlan = plan.transform {

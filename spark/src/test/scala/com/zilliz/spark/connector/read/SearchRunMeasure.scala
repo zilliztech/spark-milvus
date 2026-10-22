@@ -7,11 +7,10 @@ import org.apache.spark.sql.SparkSession
 
 import com.zilliz.spark.connector.metrics.SearchMetrics
 
-/** What one NEAREST BY run costs, as the scale programs report it (design
-  * document architecture/dataframe-api.html sections 7 and 10): the wall time,
-  * the bytes every shuffle of the run wrote, and what the take stage did -- the
-  * rows it took and the bytes it read, counted in the stages whose tasks took
-  * rows, since the first stage reports its reads under the same counter.
+/** What one NEAREST BY run costs, as the scale programs report it: the wall
+  * time, the bytes every shuffle of the run wrote, and what the take stage did
+  * -- the rows it took and the bytes it read, counted in the stages whose tasks
+  * took rows, since the first stage reports its reads under the same counter.
   */
 private[read] object SearchRunMeasure {
 

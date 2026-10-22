@@ -14,10 +14,8 @@ import io.milvus.grpc.schema.FieldSchema
   * [[Files]] is what the planner emits: the delete files that apply to the
   * segment, its own and the partition's L0 ones, read on the executor by
   * `core.read.exec.DeletePlans`. [[Materialized]] carries a plan already read;
-  * nothing on the driver produces it any more (it used to ship every
-  * primary-key map inside every partition, one of the costs section 1 of design
-  * document README.md lists against 1.x), but a caller that has a plan in hand,
-  * a test above all, can still hand it over.
+  * nothing on the driver produces it any more, but a caller that has a plan in
+  * hand, a test above all, can still hand it over.
   */
 sealed trait DeleteSource extends Serializable {
 

@@ -11,8 +11,7 @@ import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
 /** One query group, packed the way Knowhere reads a base: the queries lie end
   * to end in one buffer, in the element type of the field.
   *
-  * A task builds this once and every segment it searches uses it again (design
-  * document architecture/vector-search.html section 2.2).
+  * A task builds this once and every segment it searches uses it again.
   */
 final class QueryMatrix private (
     val buffer: ByteBuffer,
@@ -98,8 +97,7 @@ object QueryMatrix {
   }
 
   /** The whole query set as one byte array, in the field's element type: what
-    * the driver packs once and ships, by broadcast or with the shuffle (design
-    * document architecture/vector-search.html section 2.1).
+    * the driver packs once and ships, by broadcast or with the shuffle.
     */
   def packFloats(
       queries: Seq[Array[Float]],

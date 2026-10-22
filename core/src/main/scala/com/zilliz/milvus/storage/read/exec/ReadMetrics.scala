@@ -1,7 +1,7 @@
 package com.zilliz.milvus.storage.read.exec
 
 /** What one segment read cost on the C/JVM crossing, as far as this side can
-  * see it. Design: design document architecture/storage-io.html section 5.
+  * see it.
   *
   * @param jniCalls
   *   calls into the upstream milvus-storage binding by this reader, the opens
@@ -19,7 +19,7 @@ package com.zilliz.milvus.storage.read.exec
   *   bytes those copies produced
   * @param allocatedMax
   *   the allocator's high-water mark seen after a batch: JVM buffers plus the C
-  *   buffers registered on import, the number capability G3 budgets
+  *   buffers registered on import, the number the read memory budget bounds
   */
 final case class ReadMetrics(
     jniCalls: Long,

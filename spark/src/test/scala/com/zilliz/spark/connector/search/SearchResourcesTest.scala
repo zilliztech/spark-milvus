@@ -8,11 +8,10 @@ import com.zilliz.milvus.storage.vector.SearchPlan
 import com.zilliz.spark.connector.options.{MilvusOption, SearchLimits}
 
 /** The exact scan's base block and what one task may keep, off the heap and on
-  * it, for an executor's memory (design document
-  * architecture/search-resources.html sections 3.2 and 3.3). The exact rows are
-  * the design's worked examples on the measured machine, 128 CPUs and 503 GiB;
-  * the index rows are the UAT executors of the perf_laion_31m runs, a 4 GiB
-  * heap and 28 GiB overhead.
+  * it, for an executor's memory. The exact rows are the design's worked
+  * examples on the measured machine, 128 CPUs and 503 GiB; the index rows are
+  * the UAT executors of the perf_laion_31m runs, a 4 GiB heap and 28 GiB
+  * overhead.
   */
 class SearchResourcesTest extends AnyFunSuite with Matchers {
 

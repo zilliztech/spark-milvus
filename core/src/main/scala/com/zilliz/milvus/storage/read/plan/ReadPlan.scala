@@ -6,9 +6,9 @@ import com.zilliz.milvus.storage.Logging
 /** A whole read: one [[SegmentReadTask]] per partition, plus what planning
   * already knows about the total.
   *
-  * The totals are what a Spark `Statistics` reports (capability R13). They are
-  * options because some sources provide neither snapshot Avro row counts nor
-  * materialized column groups. A missing count must not be guessed.
+  * The totals are what a Spark `Statistics` reports. They are options because
+  * some sources provide neither snapshot Avro row counts nor materialized
+  * column groups. A missing count must not be guessed.
   */
 final case class ReadPlan(specs: Seq[SegmentReadTask]) extends Serializable {
 

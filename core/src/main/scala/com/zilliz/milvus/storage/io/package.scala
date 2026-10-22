@@ -1,7 +1,6 @@
 package com.zilliz.milvus.storage
 
 /** Opens files in object storage and owns the single native session.
-  *
   * NativeObjectStore owns the upstream MilvusStorageFileSystem and its
   * MilvusStorageProperties until close, and offers readAll, readAt, size, list,
   * exists and a scoped low-level filesystem operation. Business mutations
@@ -33,8 +32,6 @@ package com.zilliz.milvus.storage
   * several threads at once.
   *
   * Main types: ObjectStore, ObjectStoreFactory, NativeObjectStore, FileInfo,
-  * ConcurrentRangeReads. Capabilities: R2, R3 (see design document
-  * capabilities.md). Design: design document architecture/storage-access.html
-  * section 4.
+  * ConcurrentRangeReads.
   */
 package object io

@@ -4,8 +4,7 @@ import org.apache.spark.resource.ResourceProfile
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-/** The task cores a stage declares for itself (design document
-  * architecture/vector-search.html section 1.1): every core for a stage of
+/** The task cores a stage declares for itself: every core for a stage of
   * Knowhere calls, enough to bound how many run at once for a stage bounded by
   * the heap, and nothing where Spark would not run it or the default already
   * does.

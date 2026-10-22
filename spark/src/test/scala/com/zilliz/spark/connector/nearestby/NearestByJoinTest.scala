@@ -40,8 +40,7 @@ import com.zilliz.spark.connector.testkit.LocalMilvusCollection.{
 
 /** A nearest-by join over a Milvus table, taken over by the connector, on every
   * Spark line: Spark 4.2's own NEAREST BY, and the connector's `nearestByJoin`
-  * and `nearest_by_join` before it (design document
-  * architecture/dataframe-api.html sections 2 to 6).
+  * and `nearest_by_join` before it.
   *
   * Every result is checked against the join over the same rows as a table that
   * is not a Milvus table, which the connector does not take over: Spark's own
@@ -124,7 +123,7 @@ class NearestByJoinTest
 
   /** Six rows near a point at 10^6 in each of 16 dimensions, at squared
     * distances 25, 25, 0.25, 2500, 3600 and 4900 from it, which the engine's
-    * batched L2 cannot tell apart (decision 37).
+    * batched L2 cannot tell apart.
     */
   private val farCenter = Array.fill(16)(1000000f)
   private val far = Seq(
@@ -831,7 +830,7 @@ class NearestByJoinTest
     // |y|^2 - 2x.y, which cannot tell these rows apart. Its candidates are
     // computed again pair by pair, and over the Milvus table, where the segment
     // is one batch of six rows and k is 2, every query is searched again pair
-    // by pair (decision 37).
+    // by pair.
     val read = spark.read.format("milvus").options(farOptions).load()
     val query = rawQueries(
       (0 until 20).map(i =>

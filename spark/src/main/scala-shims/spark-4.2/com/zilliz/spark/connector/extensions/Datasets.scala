@@ -9,9 +9,8 @@ import org.apache.spark.sql.execution.LogicalRDD
 import org.apache.spark.sql.SparkSession
 
 /** A relation over rows on this line, which `RewrittenNearestBy` puts in place
-  * of a join's query side (design document architecture/dataframe-api.html
-  * section 4). It needs the classic session, which a plan only ever runs in;
-  * Spark 4.2's own `nearestByJoin` builds the DataFrames.
+  * of a join's query side. It needs the classic session, which a plan only ever
+  * runs in; Spark 4.2's own `nearestByJoin` builds the DataFrames.
   */
 private[connector] object Datasets {
 

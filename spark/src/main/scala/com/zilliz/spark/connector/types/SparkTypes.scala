@@ -17,7 +17,7 @@ import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
 /** Arrow type to Spark type, and the field metadata a Milvus field carries into
   * a Spark schema. The Milvus-to-Arrow half of the mapping is core's
   * `com.zilliz.milvus.storage.schema.ArrowTypes`; a field's Spark type is the
-  * composition of the two (capability R15).
+  * composition of the two.
   */
 object SparkTypes {
 
@@ -78,7 +78,6 @@ object SparkTypes {
   }
 
   /** The Spark type a field is presented as.
-    *
     * @param rawVectors
     *   `milvus.read.vector.raw`: hand vector columns over as the bytes Milvus
     *   stored rather than decoding them. Scalar columns are unaffected.

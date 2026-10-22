@@ -10,11 +10,10 @@ import org.apache.arrow.memory.{ArrowBuf, BufferAllocator}
 
 import com.zilliz.milvus.storage.schema.MetricType
 
-/** Searches a segment through the index the Milvus format side opened.
-  *
-  * One call answers a whole query group. A query that comes back with fewer
-  * visible hits than it asked for is retried with a wider `ef`, up to eight
-  * times, which is what section 2.4 fixes.
+/** Searches a segment through the index the Milvus format side opened. One call
+  * answers a whole query group. A query that comes back with fewer visible hits
+  * than it asked for is retried with a wider `ef`, up to eight times, which is
+  * what section 2.4 fixes.
   *
   * A segment's groups go through a [[Pipeline]]: the task thread hands the
   * index one group after another, and a second thread checks and collects each
@@ -22,8 +21,7 @@ import com.zilliz.milvus.storage.schema.MetricType
   * that was profiled a group's search took 238 ms of native time and its
   * checking and collecting 30 ms of Java time, one after the other on the task
   * thread while the other cores waited; pipelined, the Java time hides behind
-  * the next search (design document architecture/vector-search.html section
-  * 2.1, 2026-09-24 decision).
+  * the next search.
   *
   * At k = 10,000 the same chunk's answer holds a hundred times the candidates
   * of the profiled k = 100 and its checking and collecting take longer than the
@@ -75,8 +73,7 @@ object IndexSearch {
 
   /** How wide the HNSW search is: `ef` if the caller named it, otherwise
     * `max(64, k)`. It is the only search parameter this connector accepts, and
-    * it cannot be smaller than k (design document
-    * architecture/vector-search.html section 2.4).
+    * it cannot be smaller than k.
     */
   def searchEf(topK: Int, parameters: Map[String, String]): Int = {
     require(
@@ -123,9 +120,8 @@ object IndexSearch {
     * is how many shards of queries an answer is checked and collected in at
     * once; one keeps everything on the worker thread. With `rankNonFinite` a
     * NaN or infinite score is a value like any other, ranked by
-    * `Float.compare`, as the ranking function of a nearest-by join ranks it
-    * (design document architecture/dataframe-api.html section 2); without it
-    * such a score fails the search.
+    * `Float.compare`, as the ranking function of a nearest-by join ranks it;
+    * without it such a score fails the search.
     */
   /** A group's search in progress on one pipeline: handed out by
     * [[Pipeline.begin]], run by [[Pipeline.search]] on any thread, handed to
@@ -592,7 +588,6 @@ object IndexSearch {
   }
 
   /** Offers this segment's answer to the merger, three primitives at a time.
-    *
     * Nothing here builds a `Candidate`: the merger keeps its runs in primitive
     * columns, so a candidate that cannot be kept costs one comparison and no
     * allocation. That is what most candidates of most segments are once a query

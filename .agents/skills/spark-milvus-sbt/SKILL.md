@@ -7,9 +7,7 @@ description: Use when preparing any Spark-Milvus commit, or reviewing or changin
 
 Read the repository [AGENTS.md](../../../AGENTS.md), then the comments in
 `build.sbt` and `project/*.scala`; the build constraints that are written down
-live there, and this skill applies them. Section 4 of the maintainers' modules
-design records the module and compatibility constraints; consult it when a
-change affects module boundaries or compatibility, and
+live there, and this skill applies them. Consult
 [contributing.md](../../../docs/contributing.md) for build commands and
 environment constraints.
 
@@ -48,10 +46,9 @@ consistent with the candidate verifier.
 Follow AGENTS.md's removal rule; a grep result alone does not authorize removing
 a user-facing contract.
 
-Record a changed convention in section 4 of the maintainers' modules design
-when it is a build constraint, and record the decision in their design log.
-Link to existing policy instead of copying it into AGENTS.md or this skill.
-Keep code and build comments in English, and the design documents in Chinese.
+Record a changed convention in the build comment that enforces it. Link to
+existing policy instead of copying it into AGENTS.md or this skill. Keep code
+and build comments in English.
 
 ## Validate before committing
 

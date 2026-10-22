@@ -6,9 +6,9 @@ import java.util.BitSet
 /** A batch of vectors as a search computes over it, whichever input it came
   * from: `rows` vectors laid out end to end in a buffer Knowhere reads, the
   * rows the search skips, and where the batch starts in its unit, so that row
-  * `firstRow + i` of the unit is row `i` of the batch (design document
-  * architecture/table-version.html section 3). A Milvus segment's batches come
-  * from `SegmentVectors`, a DataFrame input's from [[VectorBatch.borrow]].
+  * `firstRow + i` of the unit is row `i` of the batch. A Milvus segment's
+  * batches come from `SegmentVectors`, a DataFrame input's from
+  * [[VectorBatch.borrow]].
   */
 trait VectorBatch extends AutoCloseable {
   def base: KnowhereBuffers.Base

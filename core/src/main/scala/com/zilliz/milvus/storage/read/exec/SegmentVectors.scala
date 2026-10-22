@@ -21,18 +21,15 @@ import com.zilliz.milvus.storage.vector.{
 }
 
 /** One segment's vectors, batch by batch, with the rows a search must skip.
-  *
   * This is the Milvus format side of an exact scan: it opens the segment, reads
   * the vector column together with the columns deletes and the filter need, and
   * hands out the buffer Knowhere reads, the exclusion bitmap of that batch and
   * where the batch starts in the segment. The computation never sees the
-  * reader, the columns or the delete rules (design document
-  * architecture/vector-search.html section 2.3).
+  * reader, the columns or the delete rules.
   *
   * The block after the one handed out is read on this segment's own thread
   * while the caller computes, so reading and the engine overlap; a segment
-  * holds at most two blocks at once (design document
-  * architecture/search-resources.html section 3.5).
+  * holds at most two blocks at once.
   */
 final class SegmentVectors private (
     reader: SegmentReader,
@@ -229,10 +226,9 @@ object SegmentVectors {
     }
   }
 
-  /** Several read batches as one, contiguous in rows and in bytes.
-    *
-    * The exclusion bitmaps move with the rows: a row excluded at position `i`
-    * of the third part is excluded at `rowsBefore + i` of the result. The parts
+  /** Several read batches as one, contiguous in rows and in bytes. The
+    * exclusion bitmaps move with the rows: a row excluded at position `i` of
+    * the third part is excluded at `rowsBefore + i` of the result. The parts
     * are borrowed while their bytes are copied, then closed on both success and
     * failure. Only the resulting buffer remains owned by the caller.
     */

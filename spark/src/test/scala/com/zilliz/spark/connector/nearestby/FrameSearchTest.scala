@@ -37,8 +37,7 @@ import com.zilliz.spark.connector.search.{
 /** A DataFrame input's search with limits small enough to cut its queries into
   * several groups and to keep them off the driver: every base partition meets
   * every group, the groups arrive by broadcast or by shuffle, and the query
-  * rows meet their hits by number either way (design document
-  * architecture/dataframe-api.html section 4). The answer is a brute-force
+  * rows meet their hits by number either way. The answer is a brute-force
   * search's.
   */
 class FrameSearchTest

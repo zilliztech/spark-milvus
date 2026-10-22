@@ -5,7 +5,6 @@ import scala.collection.mutable.ArrayBuffer
 import com.zilliz.milvus.storage.schema.MetricType
 
 /** A bounded batch of one query's sorted answers, compacted into its best k.
-  *
   * Inputs contain at most k candidates and share a metric and layout. Their
   * arrays, including arrays returned by finish, are read-only: a single run may
   * be returned directly. The caller owns this mutable state exclusively.
@@ -14,8 +13,6 @@ import com.zilliz.milvus.storage.schema.MetricType
   * oversized answer is retained intact, and old inputs coexist with a new
   * output during compaction. Only runs and pure parameters are serialized;
   * merge cursors and heaps are local to a compaction call.
-  *
-  * See design document architecture/candidate-merge.html sections 4-6.
   */
 final class CandidateRuns(
     val k: Int,

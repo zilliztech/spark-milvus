@@ -21,8 +21,7 @@ import com.zilliz.milvus.storage.snapshot.{
   SegmentLayout
 }
 
-/** What the Milvus format side accepts before it opens an index (design
-  * document architecture/vector-search.html sections 2.4 and 2.5).
+/** What the Milvus format side accepts before it opens an index.
   */
 class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
   private val layout = VectorLayout(VectorElementType.Float32, 4)

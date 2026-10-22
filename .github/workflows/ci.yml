@@ -226,10 +226,6 @@ jobs:
       - name: Check formatting
         run: sbt scalafmtCheckAll scalafmtSbtCheck
 
-      # `sbt checkCapabilityIndex` is not run here: it reads the capability
-      # index from a local checkout of the maintainers' design documents. It
-      # runs before every commit instead (docs/contributing.md, Unit tests).
-
       # The selected default line is 4.0; the exported matrix covers all other
       # combinations. Object-storage integration stays outside the aggregate.
       - name: Compile every module

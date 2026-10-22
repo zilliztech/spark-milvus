@@ -29,11 +29,10 @@ import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
-/** The columnar outlet, decision 12's mechanism included.
-  *
-  * Driven by a fake [[SegmentReader]] rather than the native one, so the batch
-  * shaping is tested on its own: whether a deleted row disappears and every
-  * other value still lands in the right place does not depend on C.
+/** The columnar outlet. Driven by a fake [[SegmentReader]] rather than the
+  * native one, so the batch shaping is tested on its own: whether a deleted row
+  * disappears and every other value still lands in the right place does not
+  * depend on C.
   *
   * Every batch is built from a schema [[SchemaMapper]] produced, never a
   * hand-written one. A hand-written Arrow schema names its columns after the
@@ -424,8 +423,8 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
     } finally allocator.close()
   }
 
-  // Decision 12: ColumnarBatch has no way to mark a row invalid, so the batch
-  // delivered is the surviving rows and nothing else.
+  // ColumnarBatch has no way to mark a row invalid, so the batch delivered is
+  // the surviving rows and nothing else.
   test("a deleted row is gone and the rest keep their values") {
     val allocator = new RootAllocator(Long.MaxValue)
     try {

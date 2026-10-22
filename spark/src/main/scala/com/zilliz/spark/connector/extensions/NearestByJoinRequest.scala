@@ -19,8 +19,7 @@ object RankingDirection {
 
 /** A nearest-by join as written on a Spark line without Spark's
   * `NearestByJoin`, 3.5 to 4.1: the same fields, built by `nearestByJoin` and
-  * by the table function `nearest_by_join` (design document
-  * architecture/dataframe-api.html section 6).
+  * by the table function `nearest_by_join`.
   *
   * The analyzer resolves its ranking expression against the two sides, and
   * `ReplaceNearestByJoinRequest` then replaces it, with [[MilvusNearestByJoin]]
@@ -50,8 +49,7 @@ final case class NearestByJoinRequest(
 
 /** Spark 4.2's checks of a nearest-by join's arguments, with its messages:
   * `NEAREST_BY_JOIN.*` does not exist before 4.2, so they fail with
-  * `IllegalArgumentException` (design document architecture/dataframe-api.html
-  * section 6).
+  * `IllegalArgumentException`.
   */
 object NearestByArguments {
 

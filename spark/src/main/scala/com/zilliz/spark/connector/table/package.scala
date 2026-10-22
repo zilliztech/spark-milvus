@@ -9,7 +9,5 @@ package com.zilliz.spark.connector
   * Field identity, types, nullability and vector dimensions come from the
   * snapshot schema. `_segment_id` and `_row_offset` are synthesized metadata;
   * `_timestamp` is stored field 1. No online service or catalog is consulted.
-  *
-  * Capabilities: R1, R12, R16 (see design document capabilities.md).
   */
 package object table

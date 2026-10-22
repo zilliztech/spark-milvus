@@ -4,7 +4,7 @@ package com.zilliz.milvus.storage
   * take. One instance per handle owner, never shared, so plain fields suffice.
   *
   * The cost is one `System.nanoTime` pair per call, and calls happen per batch,
-  * not per row (design document architecture/storage-io.html section 5.3).
+  * not per row.
   */
 final class NativeCalls {
   private var _calls: Long = 0L

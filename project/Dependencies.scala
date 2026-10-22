@@ -106,8 +106,7 @@ object Dependencies {
     hadoopCommonAt(l.hadoop),
     // Shipped, not compiled against: these supply the credential provider
     // classes that fs.s3a.aws.credentials.provider names by string. Removing
-    // one fails when a FileSystem is built, not at compile time. See
-    // design document architecture/storage-auth.html.
+    // one fails when a FileSystem is built, not at compile time.
     awsSdkS3,
     awsSdkS3Transfer,
     awsSdkSts,

@@ -26,12 +26,10 @@ package com.zilliz.milvus.storage.read
   * `Partitioner` is not here. One segment per partition is the only strategy,
   * and a trait with a single implementation and no second caller would be
   * guesswork. The two shapes that would need one are reporting a Spark
-  * partition per Milvus partition, whose worth is decision 19 in section 4 of
-  * design document README.md and still open, and segment selection.
+  * partition per Milvus partition, whose worth is still open, and segment
+  * selection.
   *
   * Main types: SegmentReadTask, ReadLimits, SegmentLayout, DeleteSource,
-  * ReadPlan, DeleteFileListing. Capabilities: R3, R5, R8, R13 (see design
-  * document capabilities.md). Design: design document architecture/read.html
-  * section 5.1.
+  * ReadPlan, DeleteFileListing.
   */
 package object plan

@@ -19,8 +19,7 @@ object VectorElementType {
 
 /** How one dense vector column's values sit in memory: the element type, the
   * dimension, and the bytes one row occupies. Milvus types map onto it through
-  * `of`; other formats fill it from their own types (design document
-  * architecture/read.html section 6.4).
+  * `of`; other formats fill it from their own types.
   */
 final case class VectorLayout(
     elementType: VectorElementType,

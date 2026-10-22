@@ -1,5 +1,5 @@
 # The development container and its optional local services.
-# Design: design document engineering/devcontainer.html. Driven by
+# Driven by
 # scripts/devcontainer.sh on the command line or by devcontainer.json in an IDE.
 name: spark-milvus-dev
 

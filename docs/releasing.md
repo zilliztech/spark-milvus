@@ -3,7 +3,7 @@
 GitHub Actions builds the JVM and native artifacts independently, tests the exact
 Maven candidate that developers resolve, and publishes those files to Maven
 Central. The public workflows need the three public source submodules; they do
-not fetch the maintainers' design documents or depend on Jenkins.
+not depend on Jenkins.
 
 ## Supported release matrix
 
@@ -280,8 +280,7 @@ write integration charts belong to the private repository.
 A successful PR CI result covers the PR checks and JVM export; it does not mean
 the full native release matrix has passed. Reusable CI defaults to full
 validation. Release explicitly requests it and cannot publish an absent
-candidate. Public fork jobs receive no publication credentials and do not fetch
-private design documents.
+candidate. Public fork jobs receive no publication credentials.
 
 ## Native runner capacity and caches
 

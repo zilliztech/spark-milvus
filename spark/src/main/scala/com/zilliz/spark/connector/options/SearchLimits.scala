@@ -7,18 +7,18 @@ package com.zilliz.spark.connector.options
   * before it stops travelling in a broadcast variable and travels with the
   * shuffle instead, how much of it one task answers at a time, and how many
   * bytes of segment data -- vectors in exact mode, indexes in index mode -- one
-  * executor keeps off the heap while its tasks answer them (design document
-  * architecture/vector-search.html section 1.1). They are read options of the
-  * base a nearest-by join searches. The last two are None unless the base set
-  * them, and the planner derives them where the search is planned: a group from
-  * the cores and the heap a task holds (`SearchResources.groupBytes`), the
-  * segment data from the executor's memory (`SearchResources.segmentBudget`).
-  * The counts shape the first stage: `collectThreads` is how many threads a
-  * search task checks, collects and packs a group's candidates on between two
-  * Knowhere calls (0, the default, is every core the task holds), `queryRanges`
-  * cuts the first stage into that many query ranges per segment set (0, the
-  * default, leaves the cut to the planner), and `callsInFlight` is how many
-  * segments of a held set a task searches at once within a query group.
+  * executor keeps off the heap while its tasks answer them. They are read
+  * options of the base a nearest-by join searches. The last two are None unless
+  * the base set them, and the planner derives them where the search is planned:
+  * a group from the cores and the heap a task holds
+  * (`SearchResources.groupBytes`), the segment data from the executor's memory
+  * (`SearchResources.segmentBudget`). The counts shape the first stage:
+  * `collectThreads` is how many threads a search task checks, collects and
+  * packs a group's candidates on between two Knowhere calls (0, the default, is
+  * every core the task holds), `queryRanges` cuts the first stage into that
+  * many query ranges per segment set (0, the default, leaves the cut to the
+  * planner), and `callsInFlight` is how many segments of a held set a task
+  * searches at once within a query group.
   */
 final case class SearchLimits(
     queriesMaxBytes: Long,
@@ -58,9 +58,8 @@ object SearchLimits {
 
   /** Index segments one search task searches at once within a query group
     * (`milvus.search.calls.in.flight`): with 2, the collect of one segment's
-    * answer and the tail of its call overlap the next segment's search (design
-    * document enhance/2026-10-13-search-task-pipelining.html); 1 is the
-    * sequential search.
+    * answer and the tail of its call overlap the next segment's search; 1 is
+    * the sequential search.
     */
   val DefaultCallsInFlight: Int = 2
 

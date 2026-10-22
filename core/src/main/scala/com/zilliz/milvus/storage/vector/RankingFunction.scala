@@ -3,20 +3,19 @@ package com.zilliz.milvus.storage.vector
 import java.lang.{Float => JavaFloat}
 
 /** The function a search ranks a pair by when the engine does not score that
-  * pair the way the function computes it (design document
-  * architecture/dataframe-api.html section 2).
+  * pair the way the function computes it.
   *
   * A NEAREST BY that the connector executes is ranked by one of Spark's vector
   * functions. Knowhere scores the pairs inside [[EngineRange]], where its
   * float32 inner product and cosine and its L2 computed pair by pair agree with
   * the function up to rounding (its batched L2 does not, and [[ExactScan]]
-  * takes its candidates computed again pair by pair, decision 37); a base row
-  * outside that range is scored by this function against every query of the
-  * group, and the score joins Knowhere's in the same [[TopKMerger]]. The
-  * implementation uses the Spark line's own function and converts its result to
-  * the engine's score scale in Float before local top-k selection. L2 squares
-  * the function's distance in Double and rounds that square to Float; newly
-  * equal scores use the same physical-address tie-break as engine hits.
+  * takes its candidates computed again pair by pair); a base row outside that
+  * range is scored by this function against every query of the group, and the
+  * score joins Knowhere's in the same [[TopKMerger]]. The implementation uses
+  * the Spark line's own function and converts its result to the engine's score
+  * scale in Float before local top-k selection. L2 squares the function's
+  * distance in Double and rounds that square to Float; newly equal scores use
+  * the same physical-address tie-break as engine hits.
   */
 trait RankingFunction extends Serializable {
 

@@ -15,8 +15,7 @@ import com.zilliz.milvus.storage.snapshot.{
 import com.zilliz.milvus.storage.snapshot.json.ManifestItemJson
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
-/** `ReadPlan.of`: the shapes design document architecture/read.html 5.1 and
-  * work items 12 and 13 name.
+/** `ReadPlan.of`: the planned read shapes.
   */
 class ReadPlanTest extends AnyFunSuite with Matchers {
 

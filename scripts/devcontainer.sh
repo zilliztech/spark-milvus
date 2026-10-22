@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Drive the development container defined in .devcontainer/ from the command
-# line. Design: design document engineering/devcontainer.html.
+# line.
 #
 #   scripts/devcontainer.sh up [--services]   build the dev image if needed and start it;
 #                                              --services also starts Milvus, etcd and MinIO

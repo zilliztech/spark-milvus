@@ -10,6 +10,3 @@ verified `libmilvus-storage-jni` path from `native-runtime` and hands it to the
 upstream `NativeLibraryLoader`; the upstream loader still performs
 `System.load`. Without a unified bundle, the upstream `native/{os}-{arch}/`
 resource and system-library-path behavior remains available.
-
-See the maintainers' storage I/O design for ownership, Arrow transfer and
-validation requirements.

@@ -3,8 +3,7 @@ import java.util.Locale
 import sbt._
 import sbt.Keys._
 
-/** Shared settings and build constraints for the 2.0 modules. See section 4 of
-  * design document architecture/modules.md.
+/** Shared settings and build constraints for the 2.0 modules.
   */
 object Modules {
 
@@ -49,8 +48,7 @@ object Modules {
           )
         }
         sys.error(
-          s"${name.value} has ${offenders.size} Spark dependencies " +
-            "(constraint 1, section 4 of design document architecture/modules.md)"
+          s"${name.value} has ${offenders.size} Spark dependencies"
         )
       }
     },

@@ -20,18 +20,15 @@ import com.zilliz.milvus.storage.vector.{
   SearchPlan
 }
 
-/** The merge stage both inputs share, and the hits a search gives back.
-  *
-  * A first-stage task answers each query it found anything for with one packed
+/** The merge stage both inputs share, and the hits a search gives back. A
+  * first-stage task answers each query it found anything for with one packed
   * record of that query's best k; the merge combines a query's records, one per
-  * task, into its global top k by query id over an RDD shuffle (design document
-  * architecture/vector-search.html sections 2.1 and 2.6). A Milvus table input
-  * merges `CandidateBytes` into addresses of [[HitSchema]], which its take
-  * stage reads for the base columns; a DataFrame input's candidates carry their
-  * rows (`CarriedCandidates`), so its merge gives the hits whole. A query's
-  * answers are retained as a bounded batch of sorted runs and compacted into
-  * its top k by one k-way selection (`CandidateRuns`, design document
-  * architecture/candidate-merge.html).
+  * task, into its global top k by query id over an RDD shuffle. A Milvus table
+  * input merges `CandidateBytes` into addresses of [[HitSchema]], which its
+  * take stage reads for the base columns; a DataFrame input's candidates carry
+  * their rows (`CarriedCandidates`), so its merge gives the hits whole. A
+  * query's answers are retained as a bounded batch of sorted runs and compacted
+  * into its top k by one k-way selection.
   */
 private[search] object SearchMerge {
 

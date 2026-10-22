@@ -8,11 +8,9 @@ import org.apache.spark.sql.connector.metric.{
 
 import com.zilliz.milvus.storage.read.exec.ReadMetrics
 
-/** A metric Spark sums over tasks.
-  *
-  * Each declared metric is its own class with a no-argument constructor: the
-  * driver's SQL listener aggregates task values through an instance it makes
-  * from the class name the plan recorded.
+/** A metric Spark sums over tasks. Each declared metric is its own class with a
+  * no-argument constructor: the driver's SQL listener aggregates task values
+  * through an instance it makes from the class name the plan recorded.
   */
 abstract class SumMetric(metricName: String, metricDescription: String)
     extends CustomSumMetric {
@@ -75,9 +73,9 @@ final class TaskMetric(metricName: String, metricValue: Long)
   override def value(): Long = metricValue
 }
 
-/** The metrics a scan declares and the readers report (capability G5): what
-  * `core.read.exec` counted on the crossing plus the rows the read layer turned
-  * into `InternalRow`.
+/** The metrics a scan declares and the readers report: what `core.read.exec`
+  * counted on the crossing plus the rows the read layer turned into
+  * `InternalRow`.
   */
 object ScanMetrics {
   val JniCalls = "milvus.jni.calls"

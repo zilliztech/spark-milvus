@@ -31,15 +31,13 @@ import io.milvus.grpc.schema.DataType.{
   Int8Vector
 }
 
-/** Presents a Milvus vector column to Spark.
-  *
-  * Milvus stores a vector as one blob per row, in Arrow `FixedSizeBinary` when
-  * the field is not nullable and `VarBinary` when it is — a nullable field's
-  * null row then carries no payload, which is `SchemaMapper.physicalTypeOf`.
-  * Spark's `ArrowColumnVector` has an accessor for neither shape as a vector,
-  * so passing the Arrow vector through is not an option and never was; the
-  * column has to be presented as something Spark's type system has. Which one
-  * is decision 6:
+/** Presents a Milvus vector column to Spark. Milvus stores a vector as one blob
+  * per row, in Arrow `FixedSizeBinary` when the field is not nullable and
+  * `VarBinary` when it is — a nullable field's null row then carries no
+  * payload, which is `SchemaMapper.physicalTypeOf`. Spark's `ArrowColumnVector`
+  * has an accessor for neither shape as a vector, so passing the Arrow vector
+  * through is not an option and never was; the column has to be presented as
+  * something Spark's type system has. Which one is settled as follows:
   *
   *   - `FloatVector`, `Float16Vector`, `BFloat16Vector` become
   *     `ArrayType(FloatType)`
@@ -55,7 +53,6 @@ import io.milvus.grpc.schema.DataType.{
 object MilvusVectorColumn {
 
   /** The Spark type a Milvus vector column is presented as.
-    *
     * @param raw
     *   the `milvus.read.vector.raw` option: hand over the stored bytes instead
     *   of decoding them.
@@ -129,11 +126,10 @@ object MilvusVectorColumn {
     }
   }
 
-  /** The layout `vector` is in.
-    *
-    * `SchemaMapper` picks FixedSizeBinary for a dense vector and VarBinary for
-    * a nullable one; a sparse vector is always VarBinary. Anything else means
-    * the Arrow schema and the Milvus schema disagree about the column.
+  /** The layout `vector` is in. `SchemaMapper` picks FixedSizeBinary for a
+    * dense vector and VarBinary for a nullable one; a sparse vector is always
+    * VarBinary. Anything else means the Arrow schema and the Milvus schema
+    * disagree about the column.
     */
   private def blobsOf(
       vector: FieldVector,
@@ -149,11 +145,10 @@ object MilvusVectorColumn {
   }
 }
 
-/** One vector blob per row, whichever Arrow type holds it.
-  *
-  * Everything above reads a row by its byte offset and width, and both layouts
-  * answer that. It exists so the column classes below are written once instead
-  * of once per layout.
+/** One vector blob per row, whichever Arrow type holds it. Everything above
+  * reads a row by its byte offset and width, and both layouts answer that. It
+  * exists so the column classes below are written once instead of once per
+  * layout.
   */
 private trait VectorBlobs {
   def isNull(rowId: Int): Boolean
@@ -253,11 +248,10 @@ private final class MilvusVectorArrayColumn(
     )
 }
 
-/** The elements of every vector in the column, laid end to end.
-  *
-  * Index `i` is element `i % dimension` of row `i / dimension`, which is where
-  * it already sits in the Arrow buffer, so nothing is moved. Half precision is
-  * widened here, one element per call, rather than by materializing the column.
+/** The elements of every vector in the column, laid end to end. Index `i` is
+  * element `i % dimension` of row `i / dimension`, which is where it already
+  * sits in the Arrow buffer, so nothing is moved. Half precision is widened
+  * here, one element per call, rather than by materializing the column.
   */
 private final class MilvusVectorElementColumn(
     blobs: VectorBlobs,
@@ -270,11 +264,10 @@ private final class MilvusVectorElementColumn(
 
   private val buffer = blobs.buffer
 
-  /** Where element `index` sits in the buffer.
-    *
-    * Index `index` is element `index % dimension` of row `index / dimension`,
-    * and a row starts wherever its layout says — `rowId * width` when the width
-    * is fixed, the offset buffer's entry when it is not.
+  /** Where element `index` sits in the buffer. Index `index` is element `index
+    * % dimension` of row `index / dimension`, and a row starts wherever its
+    * layout says — `rowId * width` when the width is fixed, the offset buffer's
+    * entry when it is not.
     */
   private def byteOffsetOf(index: Int): Long =
     blobs.startOf(index / dimension) +
@@ -329,10 +322,9 @@ private final class MilvusVectorElementColumn(
     )
 }
 
-/** A vector column handed over as the bytes Milvus stored.
-  *
-  * What `milvus.read.vector.raw` asks for, and the only shape `BinaryVector`
-  * has ever had. Each row is copied out on read, the same as the row path does.
+/** A vector column handed over as the bytes Milvus stored. What
+  * `milvus.read.vector.raw` asks for, and the only shape `BinaryVector` has
+  * ever had. Each row is copied out on read, the same as the row path does.
   */
 private final class MilvusBinaryColumn(blobs: VectorBlobs)
     extends ColumnVector(BinaryType) {

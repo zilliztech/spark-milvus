@@ -3,8 +3,7 @@ package com.zilliz.spark.connector.implicits
 import org.apache.spark.sql.{Column, DataFrame, Dataset}
 
 /** On Spark 4.2 `nearestByJoin` is Spark's own: the connector's rule takes over
-  * what it executes (design document architecture/dataframe-api.html section
-  * 3).
+  * what it executes.
   */
 private[implicits] object NearestByEntry {
 

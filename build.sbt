@@ -26,7 +26,6 @@ lazy val root = project
   .aggregate(nativeRuntime, nativeStorage, nativeVector, core, spark)
   .settings(
     name := "spark-milvus",
-    CapabilityIndex.settings,
     ReadValidation.matrixSettings,
     publish / skip := true,
     publish / aggregate := false,
@@ -267,11 +266,10 @@ lazy val spark = Project("spark", file("spark"))
   )
   .settings(lineBundle(Versions.selected))
 
-// Spark Connect on the 4.x lines (design document architecture/dataframe-api.html
-// section 9). The suite runs the server in its own JVM, beside the classic
-// session, and starts the client as a JVM of its own: the client jar carries
-// the sql-api classes rebuilt against a relocated Arrow, which would replace
-// the classic ones. The client's classpath, the jar and this line's classes,
+// Spark Connect on the 4.x lines. The suite runs the server in its own JVM,
+// beside the classic session, and starts the client as a JVM of its own: the
+// client jar carries the sql-api classes rebuilt against a relocated Arrow,
+// which would replace the classic ones. The client's classpath, the jar and this line's classes,
 // reaches the suite as a system property.
 lazy val ConnectClient = config("connect-client").hide
 
@@ -377,8 +375,7 @@ def jvmReleaseSettings(l: Versions.SparkLine): Seq[Setting[_]] =
     )
   )
 
-// The selected Spark line's local bundle (design document architecture/modules.md section 4, constraints
-// 6 and 17).
+// The selected Spark line's local bundle.
 def lineBundle(l: Versions.SparkLine): Seq[Setting[_]] =
   fatJarRules ++ Seq(
     organization := "com.zilliz",
@@ -431,8 +428,7 @@ lazy val integration = project
     inConfig(Test)(Modules.nativeTest)
   )
 
-// Shared packing rules for the selected Spark bundle and JVM export
-// (design document architecture/modules.md section 4, constraint 6).
+// Shared packing rules for the selected Spark bundle and JVM export.
 lazy val fatJarRules: Seq[Setting[_]] = Seq(
   assembly / parallelExecution := true,
   assembly / assemblyPackageScala / assembleArtifact := false,

@@ -4,8 +4,7 @@ import java.nio.file.{Files, Path, Paths}
 import scala.util.Try
 
 /** The memory limit the process runs under, read from Linux cgroup and procfs.
-  * A value that cannot be read is None, so the caller decides the fallback
-  * (design document architecture/search-resources.html section 3.1).
+  * A value that cannot be read is None, so the caller decides the fallback.
   */
 object MachineResources {
 

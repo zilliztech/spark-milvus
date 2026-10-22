@@ -11,10 +11,9 @@ import org.apache.spark.SparkConf
 import com.zilliz.milvus.storage.schema.MetricType
 import com.zilliz.spark.connector.table.MilvusTable
 
-/** Whether the connector executes a nearest-by join, and the node that does
-  * (design document architecture/dataframe-api.html section 3). Spark 4.2's
-  * rule asks this of its `NearestByJoin`, the older lines' rule of a
-  * [[NearestByJoinRequest]]; each line says which of its expressions are the
+/** Whether the connector executes a nearest-by join, and the node that does.
+  * Spark 4.2's rule asks this of its `NearestByJoin`, the older lines' rule of
+  * a [[NearestByJoinRequest]]; each line says which of its expressions are the
   * three vector functions.
   *
   * A join is replaced when its ranking is one of them in the direction its

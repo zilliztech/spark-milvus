@@ -11,12 +11,10 @@ import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
 import com.zilliz.milvus.storage.Logging
 
 /** Runs query groups over one segment set and merges what the segments find.
-  *
   * The two strategies take the same input and give the same output: exact
   * scanning works on the vector batches a segment hands out, indexed search on
   * the index handle it opens. Whichever runs, the task keeps each query's best
-  * k and nothing else (design document architecture/vector-search.html sections
-  * 2.1, 2.3 and 2.4).
+  * k and nothing else.
   */
 object SegmentSearch extends Logging {
 
@@ -47,8 +45,7 @@ object SegmentSearch extends Logging {
     * This is how a task answers query groups it cannot keep: the groups arrive
     * one at a time, and what stays is the segment set, which the planner sized
     * against the task's segment budget. A task that can keep its queries uses
-    * [[runGroups]] instead and holds one segment at a time (design document
-    * architecture/vector-search.html sections 2.1 and 2.3).
+    * [[runGroups]] instead and holds one segment at a time.
     */
   final class Held private[vector] (
       private val sources: Seq[Source],
@@ -56,8 +53,7 @@ object SegmentSearch extends Logging {
       val read: VectorBatch.ReadCost = VectorBatch.ReadCost.Zero,
       private val ranked: Map[VectorBatch, EngineRange.Batch] = Map.empty,
       private val rankNonFinite: Boolean = false,
-      // How many segments' index searches a group keeps in flight at once
-      // (section 4 of design document enhance/2026-10-13-search-task-pipelining.html):
+      // How many segments' index searches a group keeps in flight at once:
       // 1 is the sequential search; 2 lets the next segment's call fill the
       // tail of the current one and the collect of the current one run behind.
       private val callsInFlight: Int = 1
@@ -278,8 +274,7 @@ object SegmentSearch extends Logging {
 
   /** A set that did not fit: the segment whose batch went over, the bytes
     * retained by then, and the budget. Everything read so far is closed; the
-    * caller streams the set instead, one batch at a time for every query group
-    * (design document architecture/search-resources.html section 3.3).
+    * caller streams the set instead, one batch at a time for every query group.
     */
   final case class Overflow(
       segmentId: Long,
@@ -378,10 +373,9 @@ object SegmentSearch extends Logging {
     }
   }
 
-  /** Counts what one task did, for the accumulators section 1.3 lists.
-    *
-    * `read` is what the exact scan pulled through the reader; an indexed search
-    * reads its files when the handle opens, which the handle itself reports.
+  /** Counts what one task did, for the accumulators section 1.3 lists. `read`
+    * is what the exact scan pulled through the reader; an indexed search reads
+    * its files when the handle opens, which the handle itself reports.
     */
   final case class Counters(
       segments: Int,
@@ -392,7 +386,6 @@ object SegmentSearch extends Logging {
   )
 
   /** One finished step of a search, handed to the caller as it happens.
-    *
     * `Counters` is the same quantities summed, and a caller that only wants the
     * total can ignore this. A caller that has somewhere to publish them needs
     * them before the task ends: a search of one query group against one segment
@@ -404,8 +397,8 @@ object SegmentSearch extends Logging {
     * every row and Knowhere does not say how many it did, so it reports zero
     * and counts its progress in `nativeCalls`. `rescans` is the queries an L2
     * exact scan searched a batch for again through the per-query entry, because
-    * the batched entry's error could hide a nearer row (decision 37); their
-    * pairs are not counted again in `compared`.
+    * the batched entry's error could hide a nearer row; their pairs are not
+    * counted again in `compared`.
     */
   final case class Progress(
       nativeCalls: Int,
@@ -443,19 +436,16 @@ object SegmentSearch extends Logging {
     (mergers.head, counters)
   }
 
-  /** Searches every segment of the set once for every query group.
-    *
-    * Sources are opened one at a time by `open`, and each is closed before the
-    * next one opens, so a task holds one segment's data at once while its query
-    * groups stay: an exact scan hands every batch to every group before it
-    * reads the next batch; indexed search uses the loaded index for every
-    * group. Each group has its own merger, returned in the order the groups
-    * were given (design document architecture/vector-search.html section 2.1).
+  /** Searches every segment of the set once for every query group. Sources are
+    * opened one at a time by `open`, and each is closed before the next one
+    * opens, so a task holds one segment's data at once while its query groups
+    * stay: an exact scan hands every batch to every group before it reads the
+    * next batch; indexed search uses the loaded index for every group. Each
+    * group has its own merger, returned in the order the groups were given.
     *
     * A search ranked by `function` classifies each exact-scan batch once, for
     * all its groups ([[EngineRange.Batch]]), and ranks an index's NaN or
-    * infinite scores rather than failing on them (design document
-    * architecture/dataframe-api.html section 2).
+    * infinite scores rather than failing on them.
     */
   def runGroups(
       segments: Seq[Long],
@@ -553,12 +543,11 @@ object SegmentSearch extends Logging {
     (mergers, Counters(segments.size, nativeCalls, nativeNanos, compared, read))
   }
 
-  /** The sources of a task's segments, opened one ahead when asked.
-    *
-    * With `prefetch`, the source after the one being searched is opened on a
-    * thread of its own while the search runs: for an index that is the read of
-    * its files and Knowhere's deserialization, 0.6 s a segment on P3 that used
-    * to sit between one segment's last group and the next segment's first. The
+  /** The sources of a task's segments, opened one ahead when asked. With
+    * `prefetch`, the source after the one being searched is opened on a thread
+    * of its own while the search runs: for an index that is the read of its
+    * files and Knowhere's deserialization, 0.6 s a segment on P3 that used to
+    * sit between one segment's last group and the next segment's first. The
     * task holds at most two sources at once, which is what the caller checks
     * against its budget before asking for it. A failure to open surfaces where
     * the source would have been used; a source opened ahead but never used is

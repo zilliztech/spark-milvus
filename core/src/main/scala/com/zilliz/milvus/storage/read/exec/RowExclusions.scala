@@ -21,8 +21,7 @@ import io.milvus.grpc.schema.{CollectionSchema, FieldSchema}
   * scan does not keep (SQL three-valued logic: only TRUE survives).
   *
   * Deciding this is what the Milvus format does with its delete files and its
-  * filter semantics; a computation only reads the bitmap that comes out (design
-  * document architecture/vector-search.html sections 2.3 and 2.6).
+  * filter semantics; a computation only reads the bitmap that comes out.
   */
 final class RowExclusions private (
     filter: Option[FilterExpr],
@@ -54,13 +53,11 @@ final class RowExclusions private (
       (if (deletePlan.isEmpty) Seq.empty
        else Seq(pkColumn.get, timestampColumn))).distinct
 
-  /** The rows of a whole segment a search must not see, one bit per row.
-    *
-    * An index holds every row of its segment, so searching it needs the whole
+  /** The rows of a whole segment a search must not see, one bit per row. An
+    * index holds every row of its segment, so searching it needs the whole
     * segment's bitmap before the first query runs. Building it reads the
     * primary key, the timestamp and the filter's columns and nothing else: the
-    * vector column is never opened on this path (design document
-    * architecture/vector-search.html section 2.4).
+    * vector column is never opened on this path.
     */
   def bitmap(
       task: SegmentReadTask,

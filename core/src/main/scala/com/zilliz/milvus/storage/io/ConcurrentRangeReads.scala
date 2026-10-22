@@ -19,10 +19,9 @@ import com.zilliz.milvus.storage.Logging
   *
   * A range request to object storage waits on a round trip and on what one
   * connection transfers: 8 MiB ranges of a 2.58 GB index object read one after
-  * another reach 47 MB/s, and 32 of them in flight reach 1.1 GB/s (design
-  * document architecture/vector-search.html section 2.5). The requests run on a
-  * pool shared by the JVM; the caller consumes the bytes in list order on its
-  * own thread, so whatever it copies them into has one writer.
+  * another reach 47 MB/s, and 32 of them in flight reach 1.1 GB/s. The requests
+  * run on a pool shared by the JVM; the caller consumes the bytes in list order
+  * on its own thread, so whatever it copies them into has one writer.
   *
   * The bytes every caller in the JVM has requested and not yet consumed stay
   * within one budget. The tasks of an executor share its heap and its network,

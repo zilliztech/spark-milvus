@@ -25,7 +25,6 @@ package com.zilliz.spark.connector
   * with the predicate Spark pushed into it; the search itself is the `search`
   * package. `SegmentSearchScan` allows another input format to supply those
   * fixed partitions and metadata without a public Snapshot facade;
-  * `PhysicalColumnBinding` consumes its resolved Arrow names. Capabilities: R4,
-  * R5, R7, R11, R12, R13, R16, R18, G3 (see design document capabilities.md).
+  * `PhysicalColumnBinding` consumes its resolved Arrow names.
   */
 package object read

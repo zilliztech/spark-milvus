@@ -360,11 +360,9 @@ private[connector] object SearchExecutionPlan {
     */
   private val MaxFrameBlockRows = 65536
 
-  /** How many first-stage tasks run at once, and what one of them may keep
-    * (design document architecture/vector-search.html section 2.1,
-    * search-resources.html section 3.3). An index search declares that its
-    * tasks take every core of their executor, so one runs per executor;
-    * otherwise a task takes `spark.task.cpus`.
+  /** How many first-stage tasks run at once, and what one of them may keep. An
+    * index search declares that its tasks take every core of their executor, so
+    * one runs per executor; otherwise a task takes `spark.task.cpus`.
     *
     * @param profile
     *   the task resources the first stage declares, when it declares them

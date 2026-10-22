@@ -1,7 +1,6 @@
 package com.zilliz.spark.connector
 
 /** The single Milvus-to-Spark type contract and its Arrow value conversion.
-  *
   * `SparkTypes.toStructField` owns type, nullability and Milvus field metadata.
   * Unsupported Milvus or Spark types fail instead of becoming binary or null.
   * ArrowConverter turns supported values into InternalRow for row readers.
@@ -14,7 +13,5 @@ package com.zilliz.spark.connector
   * every row, `RowOffsetColumn` supplies consecutive row positions, and
   * `SelectedRowsColumn` presents selected rows of another column without
   * copying its buffers.
-  *
-  * Capabilities: R15, G3 (see design document capabilities.md).
   */
 package object types

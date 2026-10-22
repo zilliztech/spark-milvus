@@ -10,7 +10,7 @@ import org.apache.spark.sql.execution.LogicalRDD
 /** A DataFrame from a logical plan, and a relation over rows, on this line:
   * Spark's own `Dataset.ofRows` is internal, so the plan is analyzed first and
   * the DataFrame made with the public constructor and a row encoder of its
-  * schema (design document architecture/dataframe-api.html section 6).
+  * schema.
   */
 private[connector] object Datasets {
 
