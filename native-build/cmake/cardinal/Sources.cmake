@@ -5,6 +5,10 @@
 # architecture (the rabitq AVX-512 and SVE files select themselves through
 # platform.h), the x86_64 and aarch64 lists are its per-architecture blocks.
 # Keep these lists explicit: an upstream source upgrade requires reviewing its build rules.
+# Files that only newer revisions contain (selected with build.py's
+# --cardinal-version) are appended below when present, so one list serves the
+# pinned tag and the override; upstream globs them unconditionally and guards
+# the CUDA ones with CARDINAL_WITH_GPU.
 
 set(MILVUS_CARDINALV1_SOURCES
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv1/know/cardinal.cc"
@@ -165,6 +169,23 @@ set(MILVUS_CARDINALV2_SOURCES
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/smalltopk/smalltopk/utils/norms.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/smalltopk/smalltopk/utils/transpose.cpp"
 )
+
+# Cardinal v2 sources added after v3.0.8 (search hints, centroid index and
+# compaction planner from #946, graph dedup and the searcher dispatcher from
+# #974). Reviewed against 4063f0f6f909edc0c9fea2e25c3f867cb08bc3de's
+# CMakeLists.txt, which globs cardinal/**/*.cpp; the CUDA files it also globs
+# compile to nothing without CARDINAL_WITH_GPU and are left out.
+foreach(cardinal_v2_optional
+    cardinal/algo/centroid_index.cpp
+    cardinal/algo/compaction_planner.cpp
+    cardinal/graph/dedup.cpp
+    cardinal/search_hint.cpp
+    cardinal/searcher/dispatcher.cpp)
+  if(EXISTS "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/${cardinal_v2_optional}")
+    list(APPEND MILVUS_CARDINALV2_SOURCES
+        "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/${cardinal_v2_optional}")
+  endif()
+endforeach()
 
 set(MILVUS_CARDINALV2_X86_64_SOURCES
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/kmeans_fast/blas_sq8_avx512.cpp"
