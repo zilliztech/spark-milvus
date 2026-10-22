@@ -503,9 +503,10 @@ class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
     val executionShare = SearchResources.executionBudget(24L * GiB, 0.6, 32)
     // Up to k=1,000,000 a default slot's two shares hold a query's eight
     // retained runs and its temporaries: 32 tasks, undeclared, full batches.
-    // A partition takes as many queries as the execution share holds runs
-    // for: 49 at k=100,000, 4 at k=1,000,000, the fixed cap below that.
-    for ((k, perPartition) <- Seq(1000 -> 4096, 100000 -> 49, 1000000 -> 4)) {
+    // A partition takes as many queries as three quarters of the execution
+    // share hold runs for: 3,728 at k=1,000, 37 at k=100,000, 3 at
+    // k=1,000,000.
+    for ((k, perPartition) <- Seq(1000 -> 3728, 100000 -> 37, 1000000 -> 3)) {
       val full = stage(k, 1000000L)
       full.running shouldBe 32
       full.cores shouldBe 1
@@ -520,8 +521,8 @@ class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
       )
       full.footprint shouldBe SearchMerge.footprint(16, k)
     }
-    stage(100000, 1000000L).partitions shouldBe 20409
-    stage(1000000, 10000L).partitions shouldBe 2500
+    stage(100000, 1000000L).partitions shouldBe 27028
+    stage(1000000, 10000L).partitions shouldBe 3334
     // k=10,000,000: a 120 MB answer. A slot's own share (318 MB) does not hold
     // the compaction output, the arriving answer and its block (360 MB), so
     // tasks take 2 cores and 16 run; their execution share (955 MB) holds
@@ -588,7 +589,7 @@ class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
     undeclared.running shouldBe 4
     undeclared.profile shouldBe None
     undeclared.maxRuns shouldBe SearchMerge.MaxRuns
-    undeclared.queriesPerPartition shouldBe 3
+    undeclared.queriesPerPartition shouldBe 2
     val localFailure =
       the[IllegalArgumentException] thrownBy stage(
         100000000,

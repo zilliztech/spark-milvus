@@ -469,9 +469,12 @@ private[connector] object SearchExecutionPlan {
     val heap = SearchResources.queryBudget(heapBytes, fraction, running)
     val execution =
       SearchResources.executionBudget(heapBytes, fraction, running)
-    // Queries a partition: as many as the map share holds runs for and the
-    // task's own share holds the block of, within the fixed few thousand.
-    val byState = execution.bytes / math.max(1L, footprint.stateBytes)
+    // Queries a partition: as many as three quarters of the map share hold
+    // runs for -- hash skew puts more than the expected queries in some
+    // partitions, and a full share spilled a few of them on the bench -- and
+    // the task's own share holds the block of, within the fixed few thousand.
+    val byState =
+      (execution.bytes / 4L * 3L) / math.max(1L, footprint.stateBytes)
     val ownRoom = math.max(0L, heap.bytes - footprint.temporaryBytes)
     val byBlock =
       if (ownRoom >= math.max(0L, fetchToMemoryBytes)) Long.MaxValue
