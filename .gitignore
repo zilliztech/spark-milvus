@@ -17,3 +17,6 @@ __pycache__/
 .sbt/
 
 examples/
+
+# Local checkout or symlink of zilliztech/vector-batch-knowledge; no longer a submodule.
+/docs/design/

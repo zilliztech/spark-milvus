@@ -8,7 +8,3 @@
 	path = knowhere
 	url = https://github.com/zilliztech/knowhere.git
 	branch = main
-[submodule "docs/design"]
-	path = docs/design
-	url = https://github.com/zilliztech/vector-batch-knowledge.git
-	branch = master

@@ -206,9 +206,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      # docs/design is a private submodule the build does not need and the
-      # default token cannot read, so the native source submodules are
-      # initialized by name instead of recursively.
+      # The build needs exactly the three native source submodules; initialize
+      # them by name rather than recursively.
       - uses: actions/checkout@v5
         with:
           submodules: false
@@ -228,8 +227,9 @@ jobs:
         run: sbt scalafmtCheckAll scalafmtSbtCheck
 
       # `sbt checkCapabilityIndex` is not run here: it reads
-      # docs/design/projects/spark-milvus/capabilities.md from the private design submodule. It runs
-      # before every commit instead (docs/contributing.md, Unit tests).
+      # projects/spark-milvus/capabilities.md from a local checkout of the
+      # private knowledge repository. It runs before every commit instead
+      # (docs/contributing.md, Unit tests).
 
       # The selected default line is 4.0; the exported matrix covers all other
       # combinations. Object-storage integration stays outside the aggregate.
@@ -360,9 +360,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      # docs/design is a private submodule the build does not need and the
-      # default token cannot read, so the native source submodules are
-      # initialized by name instead of recursively.
+      # The build needs exactly the three native source submodules; initialize
+      # them by name rather than recursively.
       - uses: actions/checkout@v5
         with:
           submodules: false

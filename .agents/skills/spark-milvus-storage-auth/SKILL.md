@@ -6,7 +6,7 @@ description: Use when touching object storage credentials, provider chains, per-
 # Object storage authentication
 
 Read [AGENTS.md](../../../AGENTS.md), then
-[the mechanism and design](../../../docs/design/projects/spark-milvus/architecture/storage-auth.html).
+[the mechanism and design](https://github.com/zilliztech/vector-batch-knowledge/blob/master/projects/spark-milvus/architecture/storage-auth.html).
 That document owns the conventions and records the measured facts behind them;
 this skill applies it.
 
@@ -52,7 +52,7 @@ configured and the other is not, so configure both consistently or leave both
 alone. The native side takes
 location and mode and, when IAM is in use, no secrets; the full key-name table
 is section 3.3 of
-[storage-access.html](../../../docs/design/projects/spark-milvus/architecture/storage-access.html).
+[storage-access.html](https://github.com/zilliztech/vector-batch-knowledge/blob/master/projects/spark-milvus/architecture/storage-access.html).
 
 ## Verifying a change
 

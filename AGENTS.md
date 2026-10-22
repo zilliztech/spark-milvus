@@ -6,10 +6,13 @@ a symlink to this file, so every tool reads the same page; edit this one.
 The full guide — where the work stands, which document governs which
 subsystem, the design principles and the index-maintenance rules — lives in
 `projects/spark-milvus` in the private knowledge repository
-`zilliztech/vector-batch-knowledge`, mounted here as the submodule `docs/design`.
-If that directory is checked out, read
-`docs/design/projects/spark-milvus/AGENTS.md` before anything else; it continues
-this page. If it is not, this page and
+`zilliztech/vector-batch-knowledge`. This repository no longer mounts it; the
+private `milvus-offline-compute` repository carries it as the submodule
+`docs/design`. Paths written as `docs/design/...` in source comments, package
+docs and skills name files inside that repository. Maintainers with access can
+clone or symlink it to `docs/design/` here, which git ignores, and should then
+read `docs/design/projects/spark-milvus/AGENTS.md` before anything else; it
+continues this page. Otherwise this page and
 [docs/contributing.md](docs/contributing.md) are what you have, and they are
 enough to build, test and change the code.
 
@@ -50,10 +53,10 @@ switching combinations. `spark/src/main/scala` is shared; explicit
 Formatting and source/package checks cover every root, while compilation and
 source JARs contain only the selected roots. See [README.md](README.md).
 
-Four git submodules: `milvus-proto`, `milvus-storage` and `knowhere` supply
+Three git submodules: `milvus-proto`, `milvus-storage` and `knowhere` supply
 the protobuf definitions and the two native engines and must be initialized to
-build; `docs/design` is the private knowledge repository and is not needed by the
-build or by CI.
+build. The private knowledge repository is not a submodule here and is not
+needed by the build or by CI.
 
 ## Rules any change has to satisfy
 
@@ -93,8 +96,8 @@ The [formatting](docs/contributing.md#formatting) and
 [unit tests](docs/contributing.md#unit-tests) sections of the contributing guide
 hold the required commands: the formatter and its check with Java 21, `git diff
 --check`, then the full root unit test suite. A change to a `package.scala` or
-to `docs/design/projects/spark-milvus/capabilities.md` also runs `sbt checkCapabilityIndex`, which
-needs the `docs/design` submodule checked out. A document change under
-`docs/design` is committed and pushed in that repository first; the gitlink
-here moves in the same commit as the code it describes
-([Documents](docs/contributing.md#documents)).
+to `projects/spark-milvus/capabilities.md` in the knowledge repository also runs
+`sbt checkCapabilityIndex`, which reads that repository from
+`VECTOR_BATCH_KNOWLEDGE_DIR` or from a local `docs/design/` checkout. A document
+change there is committed and pushed in that repository; this repository
+records no gitlink for it ([Documents](docs/contributing.md#documents)).

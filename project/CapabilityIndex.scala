@@ -4,8 +4,12 @@ import sbt._
 import sbt.Keys._
 
 /** Checks that the capability index in
-  * docs/design/projects/spark-milvus/capabilities.md and the capability ids
-  * declared in package docs still agree.
+  * projects/spark-milvus/capabilities.md of the private knowledge repository
+  * zilliztech/vector-batch-knowledge and the capability ids declared in
+  * package docs still agree. The knowledge repository is no longer a
+  * submodule here: it is read from the checkout named by
+  * VECTOR_BATCH_KNOWLEDGE_DIR, or from a local, git-ignored docs/design
+  * checkout or symlink.
   *
   * The index is the only thing tying a feature to the code that implements it,
   * and nothing else notices when it drifts: renaming a package, moving code or
@@ -17,8 +21,27 @@ object CapabilityIndex {
   val checkCapabilityIndex =
     taskKey[Unit]("Verify capabilities.md and the package docs still agree")
 
+  /** Path of the capability index inside the knowledge repository. */
   private val CapabilitiesDoc =
-    "docs/design/projects/spark-milvus/capabilities.md"
+    "projects/spark-milvus/capabilities.md"
+
+  /** Names a checkout of zilliztech/vector-batch-knowledge. */
+  private val KnowledgeDirVariable = "VECTOR_BATCH_KNOWLEDGE_DIR"
+
+  /** Where a local checkout or symlink of the knowledge repository may sit;
+    * `.gitignore` covers it.
+    */
+  private val LocalKnowledgeDir = "docs/design"
+
+  /** The knowledge repository checkout: the variable when set, otherwise the
+    * ignored local directory.
+    */
+  private def knowledgeDir(root: File): File =
+    sys.env
+      .get(KnowledgeDirVariable)
+      .filter(_.nonEmpty)
+      .map(file)
+      .getOrElse(root / LocalKnowledgeDir)
 
   /** A row in one of the capability tables: `| R1 | ... | ... | location | ...`
     */
@@ -133,10 +156,12 @@ object CapabilityIndex {
     checkCapabilityIndex := {
       val log = streams.value.log
       val root = (ThisBuild / baseDirectory).value
-      val doc = root / CapabilitiesDoc
+      val doc = knowledgeDir(root) / CapabilitiesDoc
       if (!doc.isFile)
         sys.error(
-          s"$CapabilitiesDoc not found: docs/design is the vector-batch-knowledge submodule; run `git submodule update --init docs/design`"
+          s"$doc not found: set $KnowledgeDirVariable to a checkout of " +
+            "zilliztech/vector-batch-knowledge (for example the docs/design " +
+            s"submodule of milvus-offline-compute), or clone it to $LocalKnowledgeDir"
         )
 
       val (body, section11) = sections(IO.read(doc))
