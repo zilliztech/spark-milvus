@@ -21,32 +21,54 @@ import com.zilliz.spark.connector.options.{MilvusOption, SearchLimits}
   *
   * A task keeps either its segment set or its queries (section 3.3). Segment
   * data -- vector batches in Arrow, persisted indexes in Knowhere -- is off the
-  * heap, in what the executor's limit leaves after the heap and the JVM's own
-  * share; queries, their ids and their top-k are on the heap, in the part of it
-  * Spark does not manage. The search tasks that run at once on one executor
-  * divide both.
+  * heap, in what the executor's limit leaves after the heap, Spark's own
+  * off-heap pool and the JVM's own share; queries, their ids and their top-k
+  * are on the heap, in the part of it Spark does not manage. The search tasks
+  * that run at once on one executor divide both.
   */
 private[search] object SearchResources {
 
   final case class Choice(bytes: Long, reason: String)
 
-  /** The executor's memory: its limit, when it can be known, and its heap. In
-    * local mode the executor is this JVM, so the limit is the cgroup's or the
-    * machine's and the heap is this runtime's. On a cluster the driver cannot
-    * read the executor's cgroup, but the container Spark asked for is its
-    * limit: `spark.executor.memory` plus the overhead and, when enabled, the
-    * off-heap size.
+  /** An executor's memory as the driver can know it.
+    *
+    * @param limit
+    *   what the executor may use in all, when it can be known
+    * @param heap
+    *   the executor JVM's maximum heap
+    * @param sparkOffHeap
+    *   the pool Spark manages outside the heap when `spark.memory.offHeap` is
+    *   enabled, where its shuffle sort pages live; it is inside the limit but
+    *   not available to the segments, so the native room excludes it
     */
-  def executorMemory(spark: SparkSession): (Option[Long], Long) = {
+  final case class ExecutorMemory(
+      limit: Option[Long],
+      heap: Long,
+      sparkOffHeap: Long
+  )
+
+  /** The executor's memory: its limit, when it can be known, its heap and
+    * Spark's off-heap pool. In local mode the executor is this JVM, so the
+    * limit is the cgroup's or the machine's and the heap is this runtime's. On
+    * a cluster the driver cannot read the executor's cgroup, but the container
+    * Spark asked for is its limit: `spark.executor.memory` plus the overhead
+    * and, when enabled, the off-heap size.
+    */
+  def executorMemory(spark: SparkSession): ExecutorMemory = {
     val master = spark.sparkContext.master
+    def bytes(key: String, default: String): Long =
+      JavaUtils.byteStringAsBytes(spark.conf.get(key, default))
+    val sparkOffHeap =
+      if (spark.conf.get("spark.memory.offHeap.enabled", "false") == "true")
+        bytes("spark.memory.offHeap.size", "0")
+      else 0L
     if (master.startsWith("local[") || master == "local") {
-      (
+      ExecutorMemory(
         MachineResources.memoryLimitBytes(),
-        Runtime.getRuntime.maxMemory()
+        Runtime.getRuntime.maxMemory(),
+        sparkOffHeap
       )
     } else {
-      def bytes(key: String, default: String): Long =
-        JavaUtils.byteStringAsBytes(spark.conf.get(key, default))
       val heap = memoryMiB(spark.conf.get("spark.executor.memory", "1g"))
       val overhead =
         spark.conf.getOption("spark.executor.memoryOverhead") match {
@@ -58,11 +80,7 @@ private[search] object SearchResources {
               .getOrElse(0.10)
             math.max(384L << 20, (heap * factor).toLong)
         }
-      val offHeap =
-        if (spark.conf.get("spark.memory.offHeap.enabled", "false") == "true")
-          bytes("spark.memory.offHeap.size", "0")
-        else 0L
-      (Some(heap + overhead + offHeap), heap)
+      ExecutorMemory(Some(heap + overhead + sparkOffHeap), heap, sparkOffHeap)
     }
   }
 
@@ -133,6 +151,10 @@ private[search] object SearchResources {
     *   total in local mode, the container Spark asked for otherwise
     * @param heapBytes
     *   the executor JVM's maximum heap
+    * @param sparkOffHeapBytes
+    *   Spark's own off-heap pool, inside the limit and not the segments' to
+    *   use: its shuffle sort pages fill it while the first stage writes its
+    *   candidates
     * @param tasks
     *   the search tasks that run at once on the executor
     * @param configured
@@ -146,6 +168,7 @@ private[search] object SearchResources {
   def segmentBudget(
       memoryLimitBytes: Option[Long],
       heapBytes: Long,
+      sparkOffHeapBytes: Long,
       tasks: Int,
       configured: Option[Long],
       index: Boolean
@@ -168,21 +191,26 @@ private[search] object SearchResources {
             )
           case Some(limit) =>
             val reserve = jvmReserveBytes(limit)
-            val offHeap = math.max(0L, limit - heapBytes - reserve)
+            val native = math.max(
+              0L,
+              limit - heapBytes - math.max(0L, sparkOffHeapBytes) - reserve
+            )
             val (room, how) =
               if (index)
                 (
-                  math.max(0L, offHeap - IndexWorkingBytes),
+                  math.max(0L, native - IndexWorkingBytes),
                   s"-${mib(IndexWorkingBytes)}"
                 )
-              else ((offHeap * OffHeapShare).toLong, s"x$OffHeapShare")
+              else ((native * OffHeapShare).toLong, s"x$OffHeapShare")
             val raw = room / running
             val perTask = math.max(MinSegmentBudgetBytes, raw)
             val floor = if (raw < MinSegmentBudgetBytes) "floor" else "auto"
             Choice(
               perTask,
-              s"limit=${mib(limit)} heap=${mib(heapBytes)} reserve=${mib(reserve)} " +
-                s"offheap=${mib(offHeap)} $how / $running tasks -> ${mib(perTask)} ($floor)"
+              s"limit=${mib(limit)} heap=${mib(heapBytes)} " +
+                s"sparkOffHeap=${mib(math.max(0L, sparkOffHeapBytes))} " +
+                s"reserve=${mib(reserve)} native=${mib(native)} $how / " +
+                s"$running tasks -> ${mib(perTask)} ($floor)"
             )
         }
     }

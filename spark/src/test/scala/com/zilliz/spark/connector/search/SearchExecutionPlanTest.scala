@@ -30,6 +30,7 @@ import com.zilliz.milvus.storage.vector.{
   CandidateBytes,
   CandidateBytesFixture,
   CandidateEncoding,
+  CandidateRuns,
   SearchPlan
 }
 import com.zilliz.spark.connector.options.{SearchLimits, TaskResources}
@@ -309,7 +310,7 @@ class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
       .config("spark.driver.bindAddress", "127.0.0.1")
       .getOrCreate()
     try {
-      val (_, heap) = SearchResources.executorMemory(spark)
+      val heap = SearchResources.executorMemory(spark).heap
       val resources = TaskResources.of(spark)
       val taskHeap = SearchResources
         .queryBudget(
@@ -471,6 +472,90 @@ class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
       cluster.copy(declarable = false),
       2400L
     ) shouldBe None
+  }
+
+  test(
+    "the merge stage runs fewer tasks at once when one query's state outgrows a slot"
+  ) {
+    val GiB = 1L << 30
+    // An L executor of the bench: 32 cores, a 24 GiB heap, one core a task.
+    val large = TaskResources(16, 32, 1, declarable = true)
+    def stage(
+        k: Int,
+        sources: Int = 16,
+        resources: TaskResources = large
+    ): SearchExecutionPlan.MergeStage =
+      SearchExecutionPlan.mergeStage(
+        resources,
+        24L * GiB,
+        0.6,
+        sources,
+        k,
+        CandidateRuns.Plain,
+        SearchPlan.PackedCandidateReserveBytes.toLong
+      )
+    // Up to k=100,000 one query's 18 x k x 24 B fits a default slot's share
+    // twice over, so the default 32 tasks and their share stand, undeclared.
+    for (k <- Seq(10, 100, 1000, 10000, 100000)) {
+      val unchanged = stage(k)
+      unchanged.running shouldBe 32
+      unchanged.cores shouldBe 1
+      unchanged.profile shouldBe None
+      unchanged.heap shouldBe SearchResources.queryBudget(24L * GiB, 0.6, 32)
+      unchanged.bytesPerQuery shouldBe SearchMerge
+        .queryBytes(16, k)
+        .bytesPerQuery
+    }
+    // k=1,000,000: 432 MB a query, twice that a task; 11 such shares fit the
+    // executor's 9.5 GiB, so a task declares ceil(32 / 11) = 3 cores and 10
+    // run at once, each with a tenth of the heap.
+    val million = stage(1000000)
+    million.running shouldBe 10
+    million.cores shouldBe 3
+    million.profile shouldBe defined
+    million.heap shouldBe SearchResources.queryBudget(24L * GiB, 0.6, 10)
+    // Four sources need 10 x k x 24 B: 21 shares fit, 2 cores a task, 16 run.
+    val fewerSources = stage(1000000, sources = 4)
+    fewerSources.running shouldBe 16
+    fewerSources.cores shouldBe 2
+    // k=10,000,000: 8.6 GB a task, so one task takes the whole executor.
+    val tenMillion = stage(10000000)
+    tenMillion.running shouldBe 1
+    tenMillion.cores shouldBe 32
+    tenMillion.heap shouldBe SearchResources.queryBudget(24L * GiB, 0.6, 1)
+    // Beyond about 11.8 million even that does not hold one query: planning
+    // fails and names the largest k that would.
+    val executorHeap = SearchResources.queryBudget(24L * GiB, 0.6, 1).bytes
+    val largest = SearchExecutionPlan.largestMergeableK(
+      executorHeap,
+      16,
+      CandidateRuns.Plain,
+      SearchPlan.PackedCandidateReserveBytes.toLong
+    )
+    largest should be > 11000000L
+    largest should be < 12000000L
+    stage(largest.toInt).running shouldBe 1
+    val failure =
+      the[IllegalArgumentException] thrownBy stage(largest.toInt + 1)
+    failure.getMessage should include(s"lower k to at most $largest")
+    failure.getMessage should include("even when one runs alone")
+    the[IllegalArgumentException] thrownBy stage(20000000)
+    // A master that takes no declaration keeps its default slots, and fails
+    // as soon as one of their shares does not hold a query.
+    val local = TaskResources(1, 4, 1, declarable = false)
+    val undeclared = stage(100000, resources = local)
+    undeclared.running shouldBe 4
+    undeclared.profile shouldBe None
+    val localFailure =
+      the[IllegalArgumentException] thrownBy stage(10000000, resources = local)
+    localFailure.getMessage should include("takes no task cores declaration")
+    // The smallest slot of all finds no k at all.
+    SearchExecutionPlan.largestMergeableK(
+      0L,
+      16,
+      CandidateRuns.Plain,
+      SearchPlan.PackedCandidateReserveBytes.toLong
+    ) shouldBe 0L
   }
 
   test("task policy is serializable without driver resources") {

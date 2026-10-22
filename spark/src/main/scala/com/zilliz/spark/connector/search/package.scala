@@ -44,7 +44,9 @@ package com.zilliz.spark.connector
   * same way; a DataFrame input's dimension is the commonest length among the
   * query vectors it could search. `SearchExecutionPlan` resolves budgets, task
   * resources, query delivery, retention, concurrency, prefetch and partition
-  * counts for both inputs. `SearchResources` holds the resource formulas and
+  * counts for both inputs; the merge stage's tasks per executor follow what one
+  * query's planned state needs, and a k no executor's heap can merge fails at
+  * planning. `SearchResources` holds the resource formulas and
   * `core.vector.SearchPlan` the format-independent grouping algorithm.
   * Executors consume the plan and check actual retained bytes as data loads.
   * `SearchGroupPipeline` overlaps one held-set group search with the current

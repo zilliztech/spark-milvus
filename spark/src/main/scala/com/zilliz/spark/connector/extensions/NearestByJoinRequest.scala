@@ -49,12 +49,13 @@ final case class NearestByJoinRequest(
 
 /** Spark 4.2's checks of a nearest-by join's arguments, with its messages:
   * `NEAREST_BY_JOIN.*` does not exist before 4.2, so they fail with
-  * `IllegalArgumentException`.
+  * `IllegalArgumentException`. The one check the connector does not copy is
+  * Spark 4.2's upper bound on k: whether a k fits is a question of the
+  * executors' memory, which the search planner answers for the actual executors
+  * and fails at planning when it does not. Spark's own NEAREST BY syntax on 4.2
+  * still applies its bound before the connector sees the join.
   */
 object NearestByArguments {
-
-  /** Spark 4.2's `NearestByJoin.MaxNumResults`. */
-  val MaxNumResults = 100000
 
   private def failure(subclass: String, message: String) =
     new IllegalArgumentException(
@@ -62,12 +63,11 @@ object NearestByArguments {
     )
 
   def numResults(k: Int): Int = {
-    if (k < 1 || k > MaxNumResults)
+    if (k < 1)
       throw failure(
         "NUM_RESULTS_OUT_OF_RANGE",
-        s"The number of results $k must be between 1 and $MaxNumResults. " +
-          s"Update the literal in `APPROX NEAREST $k BY ...` (or `EXACT NEAREST $k BY ...`) " +
-          "to fall within that range."
+        s"The number of results $k must be at least 1. " +
+          s"Update the literal in `APPROX NEAREST $k BY ...` (or `EXACT NEAREST $k BY ...`)."
       )
     k
   }

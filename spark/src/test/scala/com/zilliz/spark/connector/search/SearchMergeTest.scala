@@ -788,6 +788,9 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       plain.partitions shouldBe partitions
       plain.queriesPerPartition shouldBe (queries + partitions - 1) / partitions
       plain.bytesPerQuery should be > sources.toLong * k * 24L
+      plain.bytesPerQuery shouldBe SearchMerge
+        .queryBytes(sources, k)
+        .bytesPerQuery
       carried.bytesPerQuery should be > plain.bytesPerQuery
       plain.targetBytes should be > 0L
       plain.targetBytes should be <= math

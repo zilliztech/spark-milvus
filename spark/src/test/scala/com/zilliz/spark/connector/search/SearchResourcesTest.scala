@@ -85,23 +85,25 @@ class SearchResourcesTest extends AnyFunSuite with Matchers {
     val local = SearchResources.segmentBudget(
       Some(503L * GiB),
       32L * GiB,
+      0L,
       16,
       None,
       index = false
     )
     local.bytes shouldBe (463L * GiB / 2 / 16)
     local.reason shouldBe
-      "limit=503GiB heap=32GiB reserve=8GiB offheap=463GiB x0.5 / 16 tasks -> 14.5GiB (auto)"
+      "limit=503GiB heap=32GiB sparkOffHeap=0MiB reserve=8GiB native=463GiB x0.5 / 16 tasks -> 14.5GiB (auto)"
     // A pod of 8 GiB with a 4 GiB heap and 4 tasks, the reserve at its 2 GiB
     // minimum: (8 - 4 - 2) x 0.5 / 4.
     SearchResources
-      .segmentBudget(Some(8L * GiB), 4L * GiB, 4, None, index = false)
+      .segmentBudget(Some(8L * GiB), 4L * GiB, 0L, 4, None, index = false)
       .bytes shouldBe 256L * MiB
     // A container Spark sized with the default overhead: 4 GiB heap plus 410
     // MiB leaves nothing after the JVM's share, so the floor applies.
     val floored = SearchResources.segmentBudget(
       Some(4L * GiB + 410L * MiB),
       4L * GiB,
+      0L,
       2,
       None,
       index = false
@@ -117,6 +119,7 @@ class SearchResourcesTest extends AnyFunSuite with Matchers {
     val budget = SearchResources.segmentBudget(
       Some(32L * GiB),
       4L * GiB,
+      0L,
       1,
       None,
       index = true
@@ -125,7 +128,29 @@ class SearchResourcesTest extends AnyFunSuite with Matchers {
     reserve shouldBe SearchResources.jvmReserveBytes(32L * GiB)
     budget.bytes shouldBe (32L * GiB - 4L * GiB - reserve - 1L * GiB)
     budget.reason shouldBe
-      "limit=32GiB heap=4GiB reserve=2.6GiB offheap=25.4GiB -1GiB / 1 tasks -> 24.4GiB (auto)"
+      "limit=32GiB heap=4GiB sparkOffHeap=0MiB reserve=2.6GiB native=25.4GiB -1GiB / 1 tasks -> 24.4GiB (auto)"
+  }
+
+  test("Spark's own off-heap pool is inside the limit but not the segments'") {
+    // The bench executor: a 224 GiB pod of a 24 GiB heap, Spark's 64 GiB
+    // off-heap pool for its shuffle sort pages and 136 GiB of overhead. The
+    // reserve is capped at 8 GiB; the native room is 224 - 24 - 64 - 8 = 128
+    // GiB, less 1 GiB of working memory for the one index task.
+    val pooled = SearchResources.segmentBudget(
+      Some(224L * GiB),
+      24L * GiB,
+      64L * GiB,
+      1,
+      None,
+      index = true
+    )
+    pooled.bytes shouldBe 127L * GiB
+    pooled.reason shouldBe
+      "limit=224GiB heap=24GiB sparkOffHeap=64GiB reserve=8GiB native=128GiB -1GiB / 1 tasks -> 127GiB (auto)"
+    // The same pod without the pool: the 64 GiB belong to the segments.
+    SearchResources
+      .segmentBudget(Some(224L * GiB), 24L * GiB, 0L, 1, None, index = true)
+      .bytes shouldBe 191L * GiB
   }
 
   test("the JVM reserve is 8% of the limit between 2 and 8 GiB") {
@@ -199,6 +224,7 @@ class SearchResourcesTest extends AnyFunSuite with Matchers {
     SearchResources.segmentBudget(
       None,
       1L << 30,
+      0L,
       4,
       None,
       index = false
@@ -213,6 +239,7 @@ class SearchResourcesTest extends AnyFunSuite with Matchers {
     SearchResources.segmentBudget(
       Some(1L << 40),
       1L << 30,
+      0L,
       8,
       Some(1L << 31),
       index = true

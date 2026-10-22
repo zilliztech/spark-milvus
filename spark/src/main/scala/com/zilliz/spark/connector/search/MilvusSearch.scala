@@ -143,15 +143,21 @@ object MilvusSearch extends Logging {
       comparedPairsTotal
     )
 
-    // The merge and take stages run under Spark's own task slots, so a task's
-    // share of the unmanaged heap is the queries' budget at that concurrency.
+    // The take stage runs under Spark's own task slots, so a task's share of
+    // the unmanaged heap is the queries' budget at that concurrency; the merge
+    // stage declares fewer tasks at once when one query's state needs more.
     val stageHeap = execution.stageHeap
+    val mergeStage = execution.mergeStage
     val mergePlan = execution.merge
     val dictionary = spark.sparkContext.broadcast(execution.candidateDictionary)
     logInfo(
       s"Merge stage: $queryCount queries x ${plan.sets.size} answers of $k over ${mergePlan.partitions} partitions, " +
         s"about ${mergePlan.queriesPerPartition} queries a partition at ${mergePlan.bytesPerQuery} estimated bytes each " +
-        s"against ${stageHeap.bytes} bytes of heap a task; batches up to ${mergePlan.maxRuns} runs, " +
+        s"against ${mergeStage.heap.bytes} bytes of heap a task; " +
+        s"tasksPerExecutor=${mergeStage.running} coresPerTask=${mergeStage.cores}" +
+        (if (mergeStage.profile.isEmpty) " (default slots)"
+         else " (declared)") +
+        s"; batches up to ${mergePlan.maxRuns} runs, " +
         s"${mergePlan.targetBytes} retained bytes per query before compaction; " +
         s"candidateWidth=${CandidateBytes.Width}"
     )
@@ -180,7 +186,8 @@ object MilvusSearch extends Logging {
         searchMetric,
         mergePlan,
         dictionary,
-        required
+        required,
+        mergeStage.profile
       )
     if (outputSchema.isEmpty) {
       val schema = hits.schema

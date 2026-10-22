@@ -6,6 +6,7 @@ import scala.reflect.ClassTag
 
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
+import org.apache.spark.resource.ResourceProfile
 import org.apache.spark.sql.{DataFrame, Encoders, Row, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow
 import org.apache.spark.sql.catalyst.InternalRow
@@ -69,26 +70,26 @@ private[search] object SearchMerge {
     require(targetBytes > 0L, s"The byte target must be positive: $targetBytes")
   }
 
-  /** The batch limits of a merge whose partition count
-    * `SearchExecutionPlan.mergePartitions` fixed. Half of the task's unmanaged
-    * heap share is the data budget; what one query's share of it leaves after
-    * the scratch a compaction needs is split between retained runs and the
-    * output, and the retained part never plans above one full batch. Spark's
-    * spill streams and hash skew can retain more than two states; neither this
-    * estimate nor the per-state target is a task memory limit.
+  /** What one query's merge is planned to hold at its worst, and the parts of
+    * it: every source's answer at once, or two full batches absorbing each
+    * other, whichever is more, plus the temporaries of a compaction. Every
+    * answer is reserved at `candidateBytes` a candidate, which is above the
+    * fixed wire width on purpose.
     */
-  def plan(
-      partitions: Int,
-      queries: Long,
+  final case class QueryBytes(
+      answerBytes: Long,
+      batchBytes: Long,
+      temporaryBytes: Long,
+      bytesPerQuery: Long
+  )
+
+  def queryBytes(
       sources: Int,
       k: Int,
-      heapBytesPerTask: Long,
       layout: CandidateRuns.Layout = CandidateRuns.Plain,
       candidateBytes: Long = SearchPlan.PackedCandidateReserveBytes.toLong,
       maxRuns: Int = MaxRuns
-  ): Plan = {
-    require(partitions > 0, s"The merge needs a partition: $partitions")
-    require(queries > 0, s"A search needs at least one query: $queries")
+  ): QueryBytes = {
     require(sources > 0, "Every query needs at least one candidate source")
     require(k > 0, s"A search needs a positive k: $k")
     require(
@@ -116,12 +117,44 @@ private[search] object SearchMerge {
       math.max(multiply(sources.toLong, answerBytes), multiply(2L, batchBytes)),
       temporaryBytes
     )
+    QueryBytes(answerBytes, batchBytes, temporaryBytes, bytesPerQuery)
+  }
+
+  /** The batch limits of a merge whose partition count
+    * `SearchExecutionPlan.mergePartitions` fixed. Half of the task's unmanaged
+    * heap share is the data budget; what one query's share of it leaves after
+    * the scratch a compaction needs is split between retained runs and the
+    * output, and the retained part never plans above one full batch. Spark's
+    * spill streams and hash skew can retain more than two states; neither this
+    * estimate nor the per-state target is a task memory limit.
+    */
+  def plan(
+      partitions: Int,
+      queries: Long,
+      sources: Int,
+      k: Int,
+      heapBytesPerTask: Long,
+      layout: CandidateRuns.Layout = CandidateRuns.Plain,
+      candidateBytes: Long = SearchPlan.PackedCandidateReserveBytes.toLong,
+      maxRuns: Int = MaxRuns
+  ): Plan = {
+    require(partitions > 0, s"The merge needs a partition: $partitions")
+    require(queries > 0, s"A search needs at least one query: $queries")
+    val bytes = queryBytes(sources, k, layout, candidateBytes, maxRuns)
     val dataBudget = math.max(0L, heapBytesPerTask) / 2L
     val expected = divideUp(queries, partitions.toLong)
     val perQueryBudget = dataBudget / expected
-    val available = math.max(0L, perQueryBudget - temporaryBytes)
-    val target = math.min(batchBytes, math.max(1L, available / 2L))
-    Plan(partitions, k, layout, maxRuns, target, bytesPerQuery, expected)
+    val available = math.max(0L, perQueryBudget - bytes.temporaryBytes)
+    val target = math.min(bytes.batchBytes, math.max(1L, available / 2L))
+    Plan(
+      partitions,
+      k,
+      layout,
+      maxRuns,
+      target,
+      bytes.bytesPerQuery,
+      expected
+    )
   }
 
   private def add(left: Long, right: Long): Long =
@@ -136,7 +169,9 @@ private[search] object SearchMerge {
 
   /** A Milvus table input's merge: every query's candidates become its global
     * top-k addresses, best first, as rows of [[HitSchema]]; with `required`, an
-    * id that found nothing has a row whose hit columns are NULL.
+    * id that found nothing has a row whose hit columns are NULL. `profile` is
+    * the task resources the merge stage declares, when the plan lowered its
+    * concurrency below the default task slots.
     */
   def merged(
       spark: SparkSession,
@@ -144,7 +179,8 @@ private[search] object SearchMerge {
       metric: MetricType,
       plan: Plan,
       dictionary: Broadcast[CandidateDictionary],
-      required: Option[Array[Long]] = None
+      required: Option[Array[Long]] = None,
+      profile: Option[ResourceProfile] = None
   ): DataFrame = {
     require(
       plan.layout == CandidateRuns.Plain,
@@ -158,7 +194,8 @@ private[search] object SearchMerge {
         metric,
         (query, packed) => rows(query, packed, dictionary.value),
         required,
-        id => Row(id, null, null)
+        id => Row(id, null, null),
+        profile
       ),
       if (required.isEmpty) HitSchema else NullableHitSchema
     )
@@ -174,7 +211,9 @@ private[search] object SearchMerge {
     * aggregation over candidates. Map-side combining is off on purpose: a task
     * emits each of its queries once, so combining on the map side would hold
     * every query's answer until the task ends instead of writing each one as it
-    * is packed (section 2.1).
+    * is packed. With `profile` the reduce stage declares the cores each of its
+    * tasks takes, which is how the plan runs fewer of them at once on an
+    * executor when one query's state needs more heap than a default slot has.
     */
   def byQuery[A: ClassTag](
       spark: SparkSession,
@@ -183,10 +222,11 @@ private[search] object SearchMerge {
       metric: MetricType,
       rowsOf: (Long, Array[Byte]) => Iterator[A],
       required: Option[Array[Long]],
-      absent: Long => A
+      absent: Long => A,
+      profile: Option[ResourceProfile] = None
   ): RDD[A] = {
     val partitioner = new HashPartitioner(plan.partitions)
-    val combined = answers.combineByKeyWithClassTag[CandidateRuns](
+    val reduced = answers.combineByKeyWithClassTag[CandidateRuns](
       (packed: Array[Byte]) =>
         new CandidateRuns(
           plan.k,
@@ -201,6 +241,7 @@ private[search] object SearchMerge {
       partitioner,
       mapSideCombine = false
     )
+    val combined = profile.fold(reduced)(reduced.withResources)
     required match {
       case None =>
         combined.flatMap { case (query, state) =>

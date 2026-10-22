@@ -579,11 +579,15 @@ FROM nearest_by_join(
   `num_results`, `mode`, `direction`, `join_type`.
 - `mode` is `approx` or `exact` and `direction` is `distance` or `similarity`,
   in any case; the join type is `inner` (the default) or `left_outer`, in any
-  case and with or without the underscore; k is between 1 and 100,000. An
-  argument out of these, cross joins disabled, a streaming side and a ranking
-  that cannot be ordered fail with an `IllegalArgumentException` whose message
-  is Spark 4.2's, after the name of Spark 4.2's error condition, such as
-  `[NEAREST_BY_JOIN.NUM_RESULTS_OUT_OF_RANGE]`.
+  case and with or without the underscore; k is at least 1 and has no fixed
+  upper bound here: the planner decides whether merging a given k fits the
+  executors' memory and fails at planning, before any task runs, when it does
+  not, saying what heap it needs and the largest k that fits. Spark 4.2's own
+  `NEAREST k BY` syntax still caps k at 100,000 before the connector sees the
+  join. An argument out of these, cross joins disabled, a streaming side and a
+  ranking that cannot be ordered fail with an `IllegalArgumentException` whose
+  message is Spark 4.2's, after the name of Spark 4.2's error condition, such
+  as `[NEAREST_BY_JOIN.NUM_RESULTS_OUT_OF_RANGE]`.
 - `vector_l2_distance`, `vector_cosine_similarity` and `vector_inner_product`
   take two `ARRAY<FLOAT>` and return a `FLOAT`, with Spark 4.2's rules: a NULL
   argument or a NULL element gives NULL, arrays of different lengths fail with

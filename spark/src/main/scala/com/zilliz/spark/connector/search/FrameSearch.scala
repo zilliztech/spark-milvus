@@ -126,7 +126,12 @@ private[connector] object FrameSearch extends Logging {
         s"queries=$queryCount, queryBytes=$queryBytes delivered by " +
         s"${delivery.describe}, queryGroups=${groups.size}, " +
         s"basePartitions=${base.rows.getNumPartitions}, tasks=$tasks, " +
-        s"blockRows=$blockRows, rowBytes=$rowBytes"
+        s"blockRows=$blockRows, rowBytes=$rowBytes; merge over " +
+        s"${execution.merge.partitions} partitions at " +
+        s"${execution.merge.bytesPerQuery} estimated bytes a query against " +
+        s"${execution.mergeStage.heap.bytes} bytes of heap a task, " +
+        s"tasksPerExecutor=${execution.mergeStage.running} " +
+        s"coresPerTask=${execution.mergeStage.cores}"
     )
     val vector = base.vector
     val projection = base.projection
@@ -161,7 +166,8 @@ private[connector] object FrameSearch extends Logging {
       metric,
       carried(_, _, width),
       required,
-      absent
+      absent,
+      execution.mergeStage.profile
     )
   }
 
