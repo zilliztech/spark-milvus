@@ -391,7 +391,7 @@ jobs:
       - name: Packaging and Makefile tests
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 
-      - name: Fixed read samples and dependency boundaries
+      - name: Fixed read samples and source packages
         run: python3 scripts/ci/check_read_fixtures.py
 
       - name: Release and consumer orchestration tests

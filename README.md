@@ -11,10 +11,10 @@ APPROX uses compatible persisted indexes. Deletions and scalar predicates apply
 before ranking. Use the read-only session extension and `MilvusSparkPlugin`;
 see [the search reference](docs/reference-en.md#vector-search).
 
-The public distribution contains only V3 reads and search. Writing, backfill,
-index construction, snapshot output, old storage formats, backup and Cardinal
-belong to the private offline repository. Public APIs contain no Catalog,
-management CALL, service client or Milvus SDK dependency.
+The distribution contains only V3 reads and search. Writing, backfill, index
+construction, snapshot output, old storage formats, backup and Cardinal are
+outside its scope. Public APIs contain no Milvus service client or SDK
+dependency.
 
 The 1.x line stopped at `v1.6.0` and is no longer maintained. The 2.0 rewrite
 continues on `refactor/v2`. Candidate versions and artifact coordinates are
@@ -208,7 +208,7 @@ docker build -t spark-milvus .  # current architecture, Spark 4.0 local read bun
 
 Docker does not publish Maven artifacts; use the verified [release workflow](docs/releasing.md).
 The [integration chart](deploy/helm/spark-milvus-integration/README.md) only runs
-V3 reads with an existing Secret; service deployment/setup lives in the private repository.
+V3 reads with an existing Secret; it does not deploy or set up a Milvus service.
 
 The version is derived as `2.0.0-{branch}-{arch}-SNAPSHOT`, for example
 `2.0.0-refactor-v2-amd64-SNAPSHOT`.
@@ -304,8 +304,6 @@ indexes; inspect `explain` for indexed segments and exact-scan fallbacks. See
 the [search reference](docs/reference-en.md#vector-search) for these semantics
 and the [read examples](docs/reference-en.md#31-reading-data) for direct
 `spark.read.format("milvus")` options.
-
-Backfill and other write jobs run from the private offline repository.
 
 ## License
 

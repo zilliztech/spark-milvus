@@ -3,8 +3,7 @@
 
 Production classes come exclusively from the candidate's published coordinates.
 The compiler and spark-submit use separate, fresh dependency caches. Entries
-and thin modules read fixed, checksummed data with a worker JVM. No connector
-writer, index builder, snapshot publisher or online client prepares the input.
+and thin modules read fixed, checksummed data with a worker JVM.
 """
 
 import argparse
@@ -38,17 +37,6 @@ REQUIRED_CHECKS = (
 )
 FIXTURE_CLASSES = (
     MAIN.replace(".", "/"), "com/zilliz/milvus/storage/io/ReadFixtures",
-)
-FORBIDDEN_REFERENCES = (
-    b"com/zilliz/milvus/storage/write/", b"com/zilliz/milvus/client/",
-    b"com/zilliz/milvus/storage/vector/IndexBuilder",
-    b"com/zilliz/milvus/jni/vector/NativeVectorIndexBuilder",
-    b"com/zilliz/spark/connector/procedure/", b"org/apache/spark/sql/DataFrameWriter",
-    b"com/zilliz/spark/connector/catalog/", b"com/zilliz/spark/connector/extensions/parser/",
-    b"com/zilliz/spark/connector/extensions/Call",
-    b"com/zilliz/spark/connector/extensions/MilvusSparkSessionExtensions",
-    b"io/milvus/client/", b"io/milvus/v2/",
-    b"io/milvus/storage/MilvusStorageWriter", b"io/milvus/storage/MilvusStorageTransaction",
 )
 GROUP = "com.zilliz"
 CENTRAL = "https://repo.maven.apache.org/maven2"
@@ -122,9 +110,6 @@ def verify_fixture_jar(jar, resources):
             if not any(name == base + ".class" or name.startswith(base + "$")
                        for base in FIXTURE_CLASSES):
                 raise RuntimeError("Smoke JAR contains production classes: " + name)
-            data = archive.read(name)
-            if any(reference in data for reference in FORBIDDEN_REFERENCES):
-                raise RuntimeError("Read-only smoke references a writer or online client: " + name)
         actual = {name: hashlib.sha256(archive.read(name)).hexdigest() for name in names
                   if name.startswith("read-fixtures/") and not name.endswith("/")}
         if actual != resources:

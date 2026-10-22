@@ -138,7 +138,7 @@ class ReleaseTest(unittest.TestCase):
         release.write_json(directory / "thin-artifacts.json", dict(
             schemaVersion=1, kind="thin", groupId="com.zilliz", version=self.plan["version"],
             sourceSha=self.plan["sourceSha"], sparkLine="4.0", sparkVersion=spark_build_version,
-            scalaVersion=line["scala"], scalaBinaryVersion="2.13", migrationState="read-only", modules=modules))
+            scalaVersion=line["scala"], scalaBinaryVersion="2.13", modules=modules))
 
     def thin_only(self):
         self.plan.update(distribution="thin", native=[], jvm=[item for item in self.plan["jvm"] if item["line"] == "4.0"])
@@ -197,7 +197,6 @@ class ReleaseTest(unittest.TestCase):
         self.rewrite_thin_export(artifact, lambda path: self.modify_pom(path, exclude_arrow))
         manifest = self.stage()
         self.assertEqual(len(manifest["artifacts"]), 20)
-        self.assertEqual(manifest["thin"]["migrationState"], "read-only")
         self.assertEqual({item["kind"] for item in manifest["artifacts"]}, {"thin"})
         for record in manifest["artifacts"]:
             source = self.inputs / "thin-4.0" / record["artifactId"] / Path(record["path"]).name
@@ -224,14 +223,6 @@ class ReleaseTest(unittest.TestCase):
         data["modules"][-1] = data["modules"][0]
         release.write_json(path, data)
         with self.assertRaisesRegex(ValueError, "duplicate thin module GAV"):
-            self.stage()
-
-    def test_thin_export_cannot_claim_transitional_state(self):
-        path = self.inputs / "thin-4.0" / "thin-artifacts.json"
-        data = json.loads(path.read_text())
-        data["migrationState"] = "transition"
-        release.write_json(path, data)
-        with self.assertRaisesRegex(ValueError, "must be read-only"):
             self.stage()
 
     def test_thin_build_version_cannot_exceed_or_change_consumer_line(self):

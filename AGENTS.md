@@ -15,7 +15,7 @@ segment partitions and consume Arrow batches. NEAREST BY returns top-k matches
 using exact scans or compatible persisted indexes. Spark 4.2 supplies the join
 syntax; the connector supplies `nearestByJoin` and `nearest_by_join` on 3.5–4.1.
 Writing, backfill, index construction, snapshot output, service clients, backup
-and legacy storage compatibility belong to the private offline repository.
+and legacy storage compatibility are outside this repository's scope.
 
 The 1.x line stopped at tag `v1.6.0` and is no longer maintained: it takes no
 fixes. The 2.0 line is a rewrite on branch `refactor/v2`, versioned

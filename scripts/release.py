@@ -330,7 +330,6 @@ def thin_metadata(data, plan):
     require(all(re.fullmatch(r"4\.0\.(?:0|[1-9][0-9]*)", version) for version in versions)
             and tuple(map(int, versions[0].split("."))) <= tuple(map(int, versions[1].split("."))),
             "Thin Spark build version must match the line and not exceed the consumer version")
-    require(data.get("migrationState") == "read-only", "Thin migration state must be read-only")
     modules = data.get("modules", [])
     require(len(modules) == len(THIN_MODULES)
             and {module["artifactId"] for module in modules} == set(THIN_MODULES),

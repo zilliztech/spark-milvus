@@ -272,7 +272,6 @@ object ThinArtifacts {
       Map(
         "schemaVersion" -> 1,
         "kind" -> "thin",
-        "migrationState" -> "read-only",
         "groupId" -> "com.zilliz",
         "version" -> version,
         "sourceSha" -> sourceSha,

@@ -15,9 +15,7 @@ Every file is opened through milvus-storage's C filesystem, reached from the JVM
 by the upstream JNI that `native-storage` compiles; `core.io.ObjectStore` is the
 only JVM entry. There is no second path. Do not reintroduce a Hadoop
 `FileSystem.get`, a `java.io.FileInputStream`, or a parquet `InputFile` adapter
-to reach storage — the four such paths that existed in 1.x were removed during
-the 2.0 migration. The residue outside the connector is the backfill app's
-source reads and the search query-file reads, which still use Hadoop.
+to reach storage — the four such paths that existed in 1.x are gone.
 
 The route was chosen because the C layer already carries a complete filesystem
 API, manifest parsing, transactions, and credential providers for six clouds

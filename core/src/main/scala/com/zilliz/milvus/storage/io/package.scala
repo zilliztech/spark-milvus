@@ -18,9 +18,8 @@ package com.zilliz.milvus.storage
   * base class accepts a predicate, returns OK and ignores it for every format
   * except Vortex, which is out of scope. Predicates are evaluated in core.expr.
   *
-  * NativeObjectStore is the only implementation. The Hadoop-backed one that
-  * carried the migration is gone, and with it the last `org.apache.hadoop`
-  * reference in core's main sources. Tests use LocalObjectStore, in core's test
+  * NativeObjectStore is the only implementation; core's main sources have no
+  * `org.apache.hadoop` reference. Tests use LocalObjectStore, in core's test
   * sources, which reads the local disk and needs no native library. The
   * filesystem's exists operation distinguishes missing files from access or I/O
   * failures; those failures propagate to the caller.

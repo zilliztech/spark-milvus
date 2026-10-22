@@ -1,7 +1,7 @@
 # Existing public read samples
 
-T06 pins these pre-existing files as they appeared at connector baseline
-`5dd6f42dadc70ed20b7b719ed479ba83581eaaa8`; it does not regenerate them.
+These pre-existing files are pinned as they appeared at connector baseline
+`5dd6f42dadc70ed20b7b719ed479ba83581eaaa8`; nothing regenerates them.
 `SHA256SUMS` covers this directory, including the index-codec payloads.
 
 - `seg_manifest.avro` was captured from local MinIO and describes the V2

@@ -2,8 +2,6 @@
 
 This chart runs the public reader against immutable V3 files in an existing
 object store. It renders one Job and does not deploy Milvus or prepare data.
-Service setup, write integration and their earlier chart are maintained in the
-private offline repository.
 
 Prepare `collections/nearest` and two independently authorized identities as
 specified in [the contributor guide](../../../docs/contributing.md#tests-that-need-the-native-library).

@@ -2,8 +2,8 @@
 
 [README.md](../README.md) covers the V3 read/search entry and environment.
 This guide describes contributor builds, tests and native artifacts. Service
-preparation, writing, backfill, backup and legacy-format compatibility live in
-the private offline repository; public callers supply existing V3 inputs.
+preparation, writing, backfill, backup and legacy-format compatibility are out
+of scope; callers supply existing V3 inputs.
 
 ## Development container
 
@@ -109,15 +109,14 @@ Existing files in `core/src/test/data` also have a checksum manifest; their
 original locations stay stable.
 `ReadFixtures.copyTo` verifies and copies a named group; it never regenerates a
 missing or corrupt sample. Run `python3 scripts/ci/check_read_fixtures.py` to
-verify files, reader dependency boundaries and all source package paths,
-including every Spark shim directory.
+verify files and all source package paths, including every Spark shim
+directory.
 The same check runs in public CI, without the private knowledge submodule.
 
 Each sample group records its origin and expected results. Changes to binary
 samples require deliberate regeneration and review of expected results and
 hashes. V3 and Knowhere groups record their producer revisions and native
-bundle. Old V2/backup fixtures and their generator belong to the private
-repository. Ordinary tests and CI only verify and copy committed inputs.
+bundle. Ordinary tests and CI only verify and copy committed inputs.
 
 ## Tests that need the native library
 
@@ -177,7 +176,6 @@ read/search/Arrow/Connect suites and real object-storage reads on Linux x86_64.
 The eight independent release consumer jobs cover Spark 4.0/4.2 on the two Linux
 architectures and two supported OS versions.
 
-Public code has no client, Catalog, CALL parser, backup or writer surface.
 Candidate validation rejects the Milvus SDK and non-release dependencies.
 Native engine bindings retain upstream APIs needed by downstream libraries;
 the final boundary applies to connector capabilities. Source matrix coverage
@@ -594,8 +592,7 @@ same discovery over `scripts/tests`; run them when touching `native-build/`.
 
 Only `common.proto` and `schema.proto` are generated into `core`, with
 `grpc = false`, because snapshots embed the protobuf `CollectionSchema`.
-Public builds generate no Milvus service stubs. Service protocols and the
-custom client are owned by the private repository.
+Public builds generate no Milvus service stubs.
 
 ## Jackson
 

@@ -19,8 +19,8 @@ unfinished design target alone is not a new defect.
 
 ## Architecture and data correctness
 
-For the layered 2.0 design, dependencies point downward. core, compat and client
-must not depend on Spark. Computation and format interpretation belong in core;
+For the layered 2.0 design, dependencies point downward. core must not depend on
+Spark. Computation and format interpretation belong in core;
 Spark adapters belong in the Spark modules; native library loading belongs in
 the native modules. Verify new implementations against existing abstractions.
 An architecture finding must name the violated contract and the affected path.

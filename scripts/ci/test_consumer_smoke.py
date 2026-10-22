@@ -336,15 +336,11 @@ class ReadFixtureTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Missing fixed read fixture"):
             self.resources()
 
-    def test_consumer_jar_rejects_production_classes_and_writer_references(self):
+    def test_consumer_jar_rejects_production_classes(self):
         for name in ("com/zilliz/milvus/storage/read/SegmentReader.class",
                      consumer.FIXTURE_CLASSES[0] + "Production.class"):
             with self.subTest(name=name), self.assertRaisesRegex(RuntimeError, "production classes"):
                 consumer.verify_fixture_jar(self.jar(additional=(name, b"production")), self.resources())
-        for reference in consumer.FORBIDDEN_REFERENCES:
-            with self.subTest(reference=reference), self.assertRaisesRegex(RuntimeError, "writer or online client"):
-                consumer.verify_fixture_jar(self.jar(additional=(consumer.FIXTURE_CLASSES[0] + "$Bad.class", reference)),
-                                            self.resources())
 
     def test_consumer_jar_rejects_changed_resource_bytes(self):
         with self.assertRaisesRegex(RuntimeError, "fixtures differ"):

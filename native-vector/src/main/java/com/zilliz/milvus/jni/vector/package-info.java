@@ -12,8 +12,7 @@
  * its element types, exclusions, output and thread behavior.
  *
  * NativeVectorIndex delegates BinarySet loading and persisted index search.
- * Private offline jobs call the upstream index build and serialize API. File-format
- * interpretation and query planning belong to core and Spark.
+ * File-format interpretation and query planning belong to core and Spark.
  *
  * The pinned io.knowhere.Knowhere also exposes resizeSearchThreadPool and
  * resizeBuildThreadPool; the connector does not call them until the G4 session

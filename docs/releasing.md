@@ -105,8 +105,7 @@ loader checks its Storage and Knowhere source pins against `native-runtime`.
 Do not combine thin modules with the bundled `-jvm` or assembly JAR: their
 connector classes overlap.
 
-The candidate is read-only. Verification rejects the Milvus SDK and non-release
-dependencies. Thin metadata must declare `migrationState=read-only`.
+Verification rejects the Milvus SDK and non-release dependencies.
 
 Load the **running JRE's** `libjsig.so` before both the driver and every executor
 start. Paths may differ between driver and workers. For example, with an
@@ -157,7 +156,7 @@ The tasks neither select nor compile a native bundle.
 
 The 4.0 thin task writes five module exports and `thin-artifacts.json` to
 `target/release-thin/4.0`. It does not enable direct sbt publication. The verifier
-checks the final read-only surface, POM closure, duplicate coordinates/classes,
+checks the POM closure, duplicate coordinates/classes,
 upstream APIs, source pins and absence of embedded platform resources.
 
 Build on **each** Ubuntu 22.04 architecture; change `native_platform` to match
@@ -245,9 +244,8 @@ Expected rows and the L2 oracle are independent of the reader under test.
 the ten required check names with executed/passed/canceled counts. Missing or
 duplicate checks fail the consumer.
 The consumer compiles only `ReadOnlyConsumerSmoke` and the fixture integrity
-helper; its JAR is rejected if it contains production classes or references
-writers, procedures, Catalog, management parser or the online client. No normal consumer command generates
-segments, builds indexes, publishes snapshots or calls Milvus.
+helper; its JAR is rejected if it contains production classes. No consumer
+command writes data or calls Milvus.
 
 `local-cluster` starts an independent executor JVM, and the smoke checks its PID
 is different from the driver's. Both processes preload their JRE's `libjsig`.
@@ -265,8 +263,7 @@ service test. The separate `integration/test` suite reads fixed V3 inputs
 from live object storage. The public native CI runs the V3 DataSource suite using an isolated MinIO
 fixture with two identities. Registration and online service behavior remain
 outside the public gate. The public integration Helm chart renders only
-a fixed-input read Job with an existing two-identity Secret; service setup and
-write integration charts belong to the private repository.
+a fixed-input read Job with an existing two-identity Secret.
 
 | Event | Required work |
 |---|---|

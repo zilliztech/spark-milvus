@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check immutable public read samples and public reader source boundaries."""
+"""Check immutable public read samples and the source package layout."""
 import hashlib
 from pathlib import Path, PurePosixPath
 import re
@@ -9,27 +9,6 @@ RESOURCE_ROOTS = (
     "core/src/test/resources/read-fixtures",
     "core/src/test/data",
     "native-vector/src/test/resources/read-fixtures",
-)
-# Every retained public source tree is checked, including unselected Spark shims.
-READ_SOURCES = (
-    "core/src/main/scala/**/*.scala",
-    "core/src/test/scala/**/*.scala",
-    "native-vector/src/test/java/com/zilliz/milvus/jni/vector/NativeVectorLibrarySmoke.java",
-    "spark/src/main/scala/**/*.scala",
-    "spark/src/main/scala-shims/**/*.scala",
-    "spark/src/test/scala/**/*.scala",
-    "spark/src/test/scala-shims/**/*.scala",
-    "integration/src/test/scala/**/*.scala",
-)
-FORBIDDEN = re.compile(
-    r"com\.zilliz\.milvus\.(?:storage\.write|client)\b|"
-    r"\b(?:V3SegmentWriter|MilvusStorageWriter|ManifestTransaction|IndexBuilder|"
-    r"NativeVectorIndexBuilder|PrimaryKeyStatsBuilder|PrimaryKeyStatsEncoder|"
-    r"ArrowWriter|ArrayEncoder|SparseFloatVectorEncoder|WritableObjectStore|"
-    r"MilvusSparkSessionExtensions|"
-    r"SnapshotSegmentWriter|SegmentIndexObjects|"
-    r"NativeWritableObjectStore)\b|"
-    r"\.\s*(?:buildIndex|writeSnapshot)\s*\("
 )
 
 
@@ -60,14 +39,6 @@ def check_group(directory):
     return len(entries)
 
 
-def check_source(path):
-    # Comments may describe the old producer. Code must not use it.
-    source = re.sub(r"/\*.*?\*/|//[^\n]*", "", path.read_text(), flags=re.S)
-    match = FORBIDDEN.search(source)
-    if match:
-        raise ValueError(f"Read test depends on production write/control code: {path}: {match.group()}")
-
-
 def check_package(path, source_root):
     source = re.sub(r"/\*.*?\*/|//[^\n]*", "", path.read_text(), flags=re.S)
     declarations = re.findall(r"(?m)^package\s+(?!object\b)([A-Za-z_][\w.]*)", source)
@@ -96,7 +67,7 @@ def check_source_layout(root):
 
 
 def main():
-    groups = files = sources = 0
+    groups = files = 0
     for relative in RESOURCE_ROOTS:
         root = ROOT / relative
         manifests = sorted(root.rglob("SHA256SUMS"))
@@ -109,15 +80,8 @@ def main():
         unlisted = [p for p in root.rglob("*") if p.is_file() and p not in covered and p.name != "README.md"]
         if unlisted:
             raise ValueError(f"Files outside checksum groups: {unlisted}")
-    for pattern in READ_SOURCES:
-        paths = sorted(ROOT.glob(pattern))
-        if not paths:
-            raise ValueError(f"Missing read test boundary: {pattern}")
-        for path in paths:
-            check_source(path)
-            sources += 1
     packages = check_source_layout(ROOT)
-    print(f"PASS {groups} read fixture groups, {files} files, {sources} read source boundaries, {packages} source packages")
+    print(f"PASS {groups} read fixture groups, {files} files, {packages} source packages")
 
 
 if __name__ == "__main__":

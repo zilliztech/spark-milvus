@@ -22,8 +22,8 @@ import io.milvus.storage.{
 }
 
 /** Reads frozen parquet through JNI, including sliced Arrow batches and
-  * multiple-file column groups. Samples were generated once before the writer
-  * migration; these regressions must work without any production writer.
+  * multiple-file column groups. Samples are fixed files; these regressions need
+  * no writer.
   */
 class NativeSegmentReadTest extends AnyFunSuite with Matchers {
 

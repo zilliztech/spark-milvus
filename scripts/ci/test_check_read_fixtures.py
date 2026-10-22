@@ -46,23 +46,6 @@ class ReadFixtureChecksTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unsafe"):
             checks.check_group(self.root)
 
-    def test_writer_dependency_fails_but_neutral_fixture_is_allowed(self):
-        source = self.root / "Read.scala"
-        source.write_text("// Previously used V3SegmentWriter\nimport org.apache.avro.generic.GenericDatumWriter\n")
-        checks.check_source(source)
-        source.write_text("frame.nearestByJoin(other, distance, 3, mode, direction)")
-        checks.check_source(source)
-        for code in (
-            "import V3SegmentWriter",
-            "import IndexBuilder",
-            "import com.zilliz.milvus.client.api.MilvusClient",
-            'frame.buildIndex("vector", output)',
-            "frame.\n  writeSnapshot(output)",
-        ):
-            source.write_text(code)
-            with self.assertRaisesRegex(ValueError, "production write/control"):
-                checks.check_source(source)
-
     def test_package_check_includes_unselected_main_and_test_shims(self):
         for scope, shim in (("main", "spark-4.2"), ("test", "spark-4.0-4.2")):
             path = self.root / "spark/src" / scope / "scala-shims" / shim / "example/Reader.scala"

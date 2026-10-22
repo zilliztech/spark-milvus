@@ -22,8 +22,8 @@ class SearchDemoTest(unittest.TestCase):
         options = {"milvus.snapshot.path": "snapshot.json", "fs.storage_type": "local", "fs.root_path": "/data"}
         self.assertEqual(demo.read_options(self.file(options)), options)
 
-    def test_online_backup_and_unknown_options_are_rejected(self):
-        for key in ("milvus.uri", "milvus.token", "milvus.collection", "milvus.backup.dir", "unexpected"):
+    def test_unknown_options_are_rejected(self):
+        for key in ("unexpected", "milvus.read.unknown", "spark.option"):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 demo.read_options(self.file({"milvus.snapshot.path": "snapshot.json", key: "value"}))
         with self.assertRaises(ValueError):

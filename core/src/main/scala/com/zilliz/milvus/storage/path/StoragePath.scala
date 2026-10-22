@@ -16,8 +16,8 @@ final case class StoragePath(bucket: String, key: String) {
   /** Renders back to `scheme://bucket/key`, or to `key` when there is no
     * bucket.
     *
-    * Only the migration-period Hadoop callers need this. Code that talks to the
-    * C filesystem passes `key` and lets `fs.bucket_name` carry the bucket.
+    * Manifest readers render fragment locations this way. Code that talks to
+    * the C filesystem passes `key` and lets `fs.bucket_name` carry the bucket.
     */
   def uri(scheme: String): String =
     if (hasBucket) s"${StoragePath.normalizeScheme(scheme)}://$bucket/$key"

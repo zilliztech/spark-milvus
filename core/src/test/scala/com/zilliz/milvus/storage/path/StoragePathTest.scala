@@ -54,7 +54,7 @@ class StoragePathTest extends AnyFunSuite with Matchers {
     "no bucket means no object-storage location: the string stays verbatim"
   ) {
     // This is what lets a bare relative path and a local URI keep resolving
-    // against Hadoop's default filesystem during the migration.
+    // against the local filesystem.
     StoragePath.parse("file:///tmp/seg/x") shouldBe
       StoragePath("", "file:///tmp/seg/x")
     StoragePath.parse("files/seg/x") shouldBe StoragePath("", "files/seg/x")
