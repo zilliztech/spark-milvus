@@ -71,6 +71,13 @@ private[connector] object SearchExecutionPlan {
     * @param mergeStage
     *   the merge stage's concurrency and the heap its tasks plan against
     */
+  /** @param segmentK
+    *   the most hits one segment answers a query with: k, or its rows when
+    *   fewer, which sizes the search stage
+    * @param setK
+    *   the most hits one segment set answers a query with, which sizes the
+    *   merge
+    */
   final case class Milvus(
       budget: Budget,
       segments: SearchPlan.Plan,
@@ -82,7 +89,9 @@ private[connector] object SearchExecutionPlan {
       candidateDictionary: CandidateDictionary,
       mergeStage: MergeStage,
       merge: SearchMerge.Plan,
-      takePartitioning: Option[SearchTake.Partitioning]
+      takePartitioning: Option[SearchTake.Partitioning],
+      segmentK: Int,
+      setK: Int
   )
 
   final case class Frame(
@@ -111,7 +120,11 @@ private[connector] object SearchExecutionPlan {
       takeColumns: Boolean
   ): Milvus = {
     val index = mode == SearchMode.PreferIndex
-    val budget = Budget.of(spark, limits, index, layout, k, queries.count)
+    // A segment answers a query with at most its rows, so the search stage is
+    // sized for that many hits a query rather than a k far above it.
+    val segmentK = answerK(k, tasks.flatMap(_.knownRows).reduceOption(_ max _))
+    val budget =
+      Budget.of(spark, limits, index, layout, segmentK, queries.count)
     val delivery = queryDelivery(queries, layout, limits.queriesMaxBytes)
     val batch = SearchResources.exactScanBatch(configuredBatch)
     val descriptors =
@@ -127,11 +140,11 @@ private[connector] object SearchExecutionPlan {
       layout,
       budget.concurrency,
       queries.count.toInt,
-      k,
+      segmentK,
       SearchResources.groupPlanBytes(
         budget.group.bytes,
         layout,
-        k,
+        segmentK,
         budget.pipelineGroups
       ),
       SearchPlan.Budget(budget.segments.bytes, budget.queries.bytes),
@@ -148,7 +161,7 @@ private[connector] object SearchExecutionPlan {
       rangesWanted = limits.queryRanges,
       workingBytes = groupQueries =>
         if (index)
-          IndexSearch.resultBytes(groupQueries, k, limits.callsInFlight)
+          IndexSearch.resultBytes(groupQueries, segmentK, limits.callsInFlight)
         else 0L
     )
     val threads =
@@ -178,7 +191,7 @@ private[connector] object SearchExecutionPlan {
               .sum * layout.rowBytes.toLong,
             IndexSearch.resultBytes(
               range.map(i => plan.groups(i).queries).max,
-              k,
+              segmentK,
               1
             )
           ),
@@ -187,13 +200,28 @@ private[connector] object SearchExecutionPlan {
       }
     }.toVector
     val stageHeap = budget.heapFor(budget.resources.tasksPerExecutor)
+    // A set's answer to a query holds at most the rows of its segments, and
+    // the whole search at most every row.
+    val rowsOf = tasks.map(task => task.segmentId -> task.knownRows).toMap
+    val setRows = plan.sets.map(set =>
+      set.foldLeft(Option(0L)) { (sum, segment) =>
+        for (total <- sum; rows <- rowsOf(segment.segmentId)) yield total + rows
+      }
+    )
+    val setK = answerK(k, setRows.flatten.reduceOption(_ max _))
+    val totalK = answerK(
+      k,
+      tasks.foldLeft(Option(0L)) { (sum, task) =>
+        for (total <- sum; rows <- task.knownRows) yield total + rows
+      }
+    )
     val merge = mergeStage(
       spark.sparkContext.defaultParallelism,
       budget.resources,
       budget.heap,
       budget.fraction,
       plan.sets.size,
-      k,
+      setK,
       CandidateRuns.Plain,
       CandidateBytes.Width.toLong,
       queries.count,
@@ -225,20 +253,30 @@ private[connector] object SearchExecutionPlan {
         merge.executionHeap.bytes,
         CandidateRuns.Plain,
         CandidateBytes.Width.toLong,
-        merge.maxRuns
+        merge.maxRuns,
+        setK
       ),
       if (takeColumns)
         Some(
           takePartitioning(
-            queries.count * k,
+            queries.count * totalK,
             math.max(1, tasks.size),
             stageHeap.bytes,
             spark.sessionState.conf.numShufflePartitions
           )
         )
-      else None
+      else None,
+      segmentK,
+      setK
     )
   }
+
+  /** The hits a source can answer a query with: `k`, or every row it has when
+    * that is fewer. Unknown row counts leave k as it is. `IndexSearch` asks the
+    * index for the same bound at run time.
+    */
+  def answerK(k: Int, rows: Option[Long]): Int =
+    rows.filter(_ >= 0L).map(r => math.min(k.toLong, r).toInt).getOrElse(k)
 
   /** One global segment dictionary for every candidate source in this search.
     * Known physical extents fail early when UInt32 row addresses cannot cover

@@ -155,7 +155,9 @@ private[search] object SearchMerge {
     * hold divide it, and a query's retained runs are compacted once they reach
     * that share or one full batch, whichever is less. Hash skew can retain more
     * than the expected queries; neither the estimate nor the target is a task
-    * memory limit.
+    * memory limit. `answerK`, when given, is the most hits one source answers a
+    * query with (its rows, when fewer than k) and sizes the footprint; `k`
+    * remains what the merge selects.
     */
   def plan(
       partitions: Int,
@@ -165,11 +167,13 @@ private[search] object SearchMerge {
       stateBudgetBytes: Long,
       layout: CandidateRuns.Layout = CandidateRuns.Plain,
       candidateBytes: Long = CandidateBytes.Width.toLong,
-      maxRuns: Int = MaxRuns
+      maxRuns: Int = MaxRuns,
+      answerK: Int = -1
   ): Plan = {
     require(partitions > 0, s"The merge needs a partition: $partitions")
     require(queries > 0, s"A search needs at least one query: $queries")
-    val held = footprint(sources, k, layout, candidateBytes, maxRuns)
+    val sized = if (answerK > 0) math.min(answerK, k) else k
+    val held = footprint(sources, sized, layout, candidateBytes, maxRuns)
     val expected = divideUp(queries, partitions.toLong)
     val perQueryBudget = math.max(0L, stateBudgetBytes) / expected
     val target = math.min(held.stateBytes, math.max(1L, perQueryBudget))

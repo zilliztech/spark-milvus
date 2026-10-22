@@ -140,7 +140,9 @@ object MilvusSearch extends Logging {
       queries,
       delivery,
       tasks.size,
-      comparedPairsTotal
+      comparedPairsTotal,
+      execution.segmentK,
+      execution.setK
     )
 
     // The take stage runs under Spark's own task slots, so a task's share of
@@ -224,7 +226,9 @@ object MilvusSearch extends Logging {
       queries: SearchQueries.Input,
       delivery: SearchQueries.Delivery,
       segments: Int,
-      comparedPairsTotal: Long
+      comparedPairsTotal: Long,
+      segmentK: Int,
+      setK: Int
   ): Unit = {
     val needs = plan.needs
       .map(need =>
@@ -248,7 +252,8 @@ object MilvusSearch extends Logging {
         s", ${plan.estimated.size} segments estimated at half the budget"
     )
     logInfo(
-      s"Search plan: mode=${request.mode}, metric=${request.metric}, topK=${request.k}, " +
+      s"Search plan: mode=${request.mode}, metric=${request.metric}, topK=${request.k} " +
+        s"(hits a query: at most $segmentK from a segment, $setK from a set), " +
         s"queries=${queries.count}, queryBytes=${SearchQueries
             .bytes(queries.count, request.layout)} " +
         s"delivered by ${delivery.describe}, " +

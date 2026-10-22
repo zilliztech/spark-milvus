@@ -607,6 +607,22 @@ class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
     ) shouldBe 0L
   }
 
+  test("a source answers with at most its rows, which sizes the stages") {
+    SearchExecutionPlan.answerK(10000000, Some(1350000L)) shouldBe 1350000
+    SearchExecutionPlan.answerK(100, Some(1350000L)) shouldBe 100
+    SearchExecutionPlan.answerK(10000000, None) shouldBe 10000000
+    SearchExecutionPlan.answerK(10000000, Some(-1L)) shouldBe 10000000
+    // The merge footprint follows the answer bound while the selection keeps k.
+    val bounded =
+      SearchMerge.plan(1000, 1000L, 16, 10000000, 1L << 30, answerK = 6750000)
+    bounded.k shouldBe 10000000
+    bounded.bytesPerQuery shouldBe SearchMerge
+      .footprint(16, 6750000)
+      .bytesPerQuery
+    SearchMerge.plan(1000, 1000L, 16, 10000000, 1L << 30).bytesPerQuery shouldBe
+      SearchMerge.footprint(16, 10000000).bytesPerQuery
+  }
+
   test("task policy is serializable without driver resources") {
     val policy = SearchExecutionPlan.Task(
       SearchExecutionPlan.Retention.Stream(101L),
