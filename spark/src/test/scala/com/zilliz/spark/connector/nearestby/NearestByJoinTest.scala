@@ -1170,9 +1170,15 @@ class NearestByJoinTest
     )
     // The connector puts no upper bound on k: whether a k's merge fits is the
     // planner's question for the actual executors, and a small base returns
-    // its rows for any k above their count.
-    nearest(query, base, k = 100001).count() shouldBe
-      nearest(query, base, k = 1000).count()
+    // its rows for any k above their count. On 4.2 the join is Spark's own
+    // NEAREST BY, which keeps its bound of 100,000.
+    if (sparkHasNearestBy)
+      failure(nearest(query, base, k = 100001)) should include(
+        "must be between 1 and 100000"
+      )
+    else
+      nearest(query, base, k = 100001).count() shouldBe
+        nearest(query, base, k = 1000).count()
     failure(nearest(query, base, mode = "fast")) should include(
       "NEAREST_BY_JOIN.UNSUPPORTED_MODE"
     )

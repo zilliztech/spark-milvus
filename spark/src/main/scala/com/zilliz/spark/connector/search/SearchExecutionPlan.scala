@@ -421,7 +421,11 @@ private[connector] object SearchExecutionPlan {
         (resources.executorCores to resources.taskCpus by -1)
           .map(cores => (resources.executorCores / cores, cores))
           .filter { case (running, _) => running >= 1 && running <= slots }
-          .distinctBy(_._1)
+          // the first cores seen for a count of tasks is the most that fit
+          // (Scala 2.12 has no distinctBy)
+          .foldLeft(Vector.empty[(Int, Int)]) { (kept, choice) =>
+            if (kept.exists(_._1 == choice._1)) kept else kept :+ choice
+          }
           .sortBy(-_._1)
     val chosen = choices.iterator
       .map { case (running, cores) =>
