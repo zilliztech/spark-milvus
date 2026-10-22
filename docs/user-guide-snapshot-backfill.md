@@ -1,5 +1,13 @@
 # User Guide — Offline Snapshot Backfill
 
+> Transitional reference retained until T15. The maintained guide and runnable
+> demo now live at `docs/user-guide-snapshot-backfill.md` and
+> `scripts/run_backfill_demo.sh` in the private `zilliztech/milvus-offline-compute`
+> repository. New callers use `com.zilliz.milvus.offline.apps.backfill.BackfillApp`
+> and its verified private candidate; the public root assembly is not that job
+> delivery. The legacy commands below describe the retained implementation.
+
+
 This guide walks you through using the Spark-Milvus connector to **add a new
 field to an existing Milvus collection and populate it for every existing
 row**, entirely offline against object storage. Online reads and writes are

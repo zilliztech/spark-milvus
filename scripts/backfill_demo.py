@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Transitional public copy; maintained caller: zilliztech/milvus-offline-compute/
+# scripts/backfill_demo.py. Removal belongs to T15; new callers use the private candidate.
 """The Milvus side of scripts/run_backfill_demo.sh, which runs the steps of
 docs/user-guide-snapshot-backfill.md against a Milvus 3.0+.
 

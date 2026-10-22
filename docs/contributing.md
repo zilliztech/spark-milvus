@@ -1,5 +1,26 @@
 # Working in this repository
 
+## Caller migration boundary
+
+T14 changes maintained callers before T15 changes the source/build structure.
+Use [the fixed V3 example](../scripts/spark_submit_demo.sh) with an explicit
+public candidate. Service preparation, backfill, index construction, snapshot
+output and registration callers live in the private offline repository.
+
+| Existing build/path | Caller now | T15 structural change |
+| --- | --- | --- |
+| Root `assembly`, `spark-connector-assembly-*` | Read candidate JVM + OSS native; private apps candidate for jobs | Remove mixed root delivery and update Docker/Make together |
+| `spark35` / `spark40` / `spark41` / `spark42` | Existing build commands remain valid during T14 | Select one `spark` project through `-DsparkVersion` / `-DscalaVersion` |
+| `apps40`, `apps-4.0` | Private `apps` / `apps/exportJobArtifacts` | Remove migrated public apps project |
+| `integration40`, `integration-4.0` | Public fixed V3 read suite; private `integration` for service/write suites | Update public integration paths with the Spark directory change |
+| `spark-base` and line-specific source paths | Keep the existing read/search matrix | Merge common sources and selected `scala-shims` directories |
+
+Do not execute the T15 command names before that task lands. Candidate execution
+and Helm template checks do not publish artifacts or deploy workloads; T16
+performs final pairing, acceptance, publication and deployment. Keep the old
+released bytes and their recorded runtime pairing for rollback.
+
+
 [README.md](../README.md) covers installing the toolchain, building the
 jar and running the example. This file covers what a contributor needs beyond
 that.

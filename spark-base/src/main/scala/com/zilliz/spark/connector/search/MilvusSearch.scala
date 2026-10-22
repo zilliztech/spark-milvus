@@ -96,7 +96,7 @@ object MilvusSearch extends Logging {
     )
 
     val caseInsensitive = new CaseInsensitiveStringMap(options.asJava)
-    val read = MilvusOption(caseInsensitive).readLimits
+    val read = MilvusOption.readLimits(caseInsensitive)
     val namedBatch =
       if (caseInsensitive.containsKey(MilvusOption.ReadBatchMaxBytes))
         Some(read.batchMaxBytes)

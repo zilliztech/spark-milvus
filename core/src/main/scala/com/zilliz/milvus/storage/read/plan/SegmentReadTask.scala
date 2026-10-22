@@ -1,11 +1,13 @@
 package com.zilliz.milvus.storage.read.plan
 
 import com.zilliz.milvus.storage.delete.DeletePlan
+import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.snapshot.{
   DeltaLogFile,
   SegmentIndexes,
   SegmentLayout
 }
+import io.milvus.grpc.schema.FieldSchema
 
 /** Where the rows deleted from a segment come from.
   *
@@ -31,6 +33,25 @@ sealed trait DeleteSource extends Serializable {
 }
 
 object DeleteSource {
+
+  /** A format decoder supplied by the input, invoked only on the executor. The
+    * caller owns the borrowed store and closes it even after failure.
+    */
+  trait Reader extends Serializable {
+    def read(
+        primaryKey: FieldSchema,
+        bucket: String,
+        store: ObjectStore
+    ): DeletePlan
+  }
+
+  final case class Deferred(reader: Reader) extends DeleteSource {
+    require(reader != null, "a deferred delete source requires a reader")
+    override def materializedPlan: DeletePlan =
+      throw new UnsupportedOperationException(
+        "the deferred delete source has not been read"
+      )
+  }
 
   /** Deletes are off for this read (`milvus.read.apply.deletes=false`), or
     * nothing was deleted from this segment.
@@ -94,6 +115,7 @@ final case class SegmentReadTask(
     case DeleteSource.None               => false
     case DeleteSource.Materialized(plan) => !plan.isEmpty
     case DeleteSource.Files(files)       => files.nonEmpty
+    case DeleteSource.Deferred(_)        => true
   }
 
   /** The plan of a source that already holds one; see
@@ -106,8 +128,9 @@ final case class SegmentReadTask(
     * names none (a column-group layout has no manifest at all).
     */
   def readVersionOrLatest: Long = layout match {
-    case SegmentLayout.Manifest(_, version) => version
-    case SegmentLayout.ColumnGroups(_)      => -1L
+    case SegmentLayout.Manifest(_, version)    => version
+    case SegmentLayout.ColumnGroups(_)         => -1L
+    case _: SegmentLayout.PhysicalColumnGroups => -1L
   }
 
   /** Every data file this partition will open, for logging and for the plan's
@@ -117,6 +140,8 @@ final case class SegmentReadTask(
   def dataFiles: Seq[String] = layout match {
     case SegmentLayout.Manifest(_, _)   => Seq.empty
     case SegmentLayout.ColumnGroups(gs) => gs.flatMap(_.filePaths)
+    case physical: SegmentLayout.PhysicalColumnGroups =>
+      physical.groups.flatMap(_.filePaths)
   }
 
   /** Physical rows recorded by the snapshot, or by its column groups when the
@@ -130,6 +155,8 @@ final case class SegmentReadTask(
     case SegmentLayout.Manifest(_, _) => scala.None
     case SegmentLayout.ColumnGroups(gs) =>
       gs.headOption.map(_.fileRowCounts.sum)
+    case physical: SegmentLayout.PhysicalColumnGroups =>
+      physical.groups.headOption.map(_.fileRowCounts.sum)
   })
 
   /** A complete physical row count that can bound an encoded row address.
@@ -142,26 +169,33 @@ final case class SegmentReadTask(
   def provenPhysicalRows: Option[Long] = snapshotRows match {
     case Some(rows) => if (rows >= 0L) Some(rows) else None
     case None =>
-      layout match {
-        case SegmentLayout.ColumnGroups(groups) if groups.nonEmpty =>
-          var expected: Option[Long] = None
-          val remaining = groups.iterator
-          while (remaining.hasNext) {
-            val group = remaining.next()
-            if (group.filePaths.size != group.fileRowCounts.size) return None
-            var total = 0L
-            val counts = group.fileRowCounts.iterator
-            while (counts.hasNext) {
-              val count = counts.next()
-              if (count < 0L || count > Long.MaxValue - total) return None
-              total += count
-            }
-            if (expected.exists(_ != total)) return None
-            expected = Some(total)
-          }
-          expected
-        case _ => None
+      val counts = layout match {
+        case SegmentLayout.ColumnGroups(groups) =>
+          groups.map(group => group.filePaths.size -> group.fileRowCounts)
+        case physical: SegmentLayout.PhysicalColumnGroups =>
+          physical.groups.map(group =>
+            group.filePaths.size -> group.fileRowCounts
+          )
+        case _ => Seq.empty
       }
+      if (counts.nonEmpty) {
+        var expected: Option[Long] = None
+        val remaining = counts.iterator
+        while (remaining.hasNext) {
+          val (fileCount, rows) = remaining.next()
+          if (fileCount != rows.size) return None
+          var total = 0L
+          val counts = rows.iterator
+          while (counts.hasNext) {
+            val count = counts.next()
+            if (count < 0L || count > Long.MaxValue - total) return None
+            total += count
+          }
+          if (expected.exists(_ != total)) return None
+          expected = Some(total)
+        }
+        expected
+      } else None
   }
 
   /** Rows available for search sizing, including a persisted index's count when

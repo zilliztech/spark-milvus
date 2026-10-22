@@ -1,4 +1,6 @@
 #!/bin/bash
+# Transitional public copy; maintained caller: zilliztech/milvus-offline-compute/
+# scripts/run_backfill_demo.sh. Removal belongs to T15; new callers use the private candidate.
 #
 # Snapshot backfill end to end, in the steps of
 # docs/user-guide-snapshot-backfill.md: backfill_demo.py prepare adds two

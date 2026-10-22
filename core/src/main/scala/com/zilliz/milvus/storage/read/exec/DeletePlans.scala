@@ -62,7 +62,7 @@ object DeletePlans {
   /** Opens the task's storage, reads its delete files and closes it. */
   def of(task: SegmentReadTask, pkField: Option[FieldSchema]): DeletePlan =
     task.deletes match {
-      case DeleteSource.Files(_) =>
+      case DeleteSource.Files(_) | DeleteSource.Deferred(_) =>
         val store = NativeObjectStore.Factory(task.properties).open()
         useAndClose(store.close())(of(task, pkField, store))
       case _ => of(task, pkField, null)
@@ -94,6 +94,17 @@ object DeletePlans {
     task.deletes match {
       case DeleteSource.None               => DeletePlan.empty
       case DeleteSource.Materialized(plan) => plan
+      case DeleteSource.Deferred(reader) =>
+        val pk = pkField.getOrElse(
+          throw new IllegalArgumentException(
+            s"segment ${task.segmentId} has a deferred delete source but the schema has no primary key"
+          )
+        )
+        reader.read(
+          pk,
+          task.properties.getOrElse(StorageProperties.BucketName, ""),
+          store
+        )
       case DeleteSource.Files(files) =>
         val pk = pkField.getOrElse(
           throw new IllegalArgumentException(

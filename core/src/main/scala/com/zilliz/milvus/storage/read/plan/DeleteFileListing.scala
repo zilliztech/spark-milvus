@@ -70,7 +70,7 @@ object DeleteFileListing {
     snapshot.v3Segments.exists { segment =>
       val version = segment.layout match {
         case SegmentLayout.Manifest(_, readVersion) => readVersion
-        case SegmentLayout.ColumnGroups(_)          => -1L
+        case _                                      => -1L
       }
       version <= 0L || listsV3Deletes
     }
@@ -116,7 +116,7 @@ object DeleteFileListing {
     val v3 = snapshot.v3Segments.map { seg =>
       val (basePath, listedVersion) = seg.layout match {
         case SegmentLayout.Manifest(path, version) => (path, version)
-        case SegmentLayout.ColumnGroups(_) =>
+        case _ =>
           throw new IllegalStateException(
             s"segment ${seg.id} is storage_version 3 but carries a column-group layout"
           )

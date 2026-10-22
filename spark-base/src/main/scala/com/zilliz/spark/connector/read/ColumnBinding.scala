@@ -1,5 +1,7 @@
 package com.zilliz.spark.connector.read
 
+import scala.jdk.CollectionConverters._
+
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.{BigIntVector, VectorSchemaRoot}
 import org.apache.arrow.vector.types.pojo.Schema
@@ -140,6 +142,67 @@ object ColumnBinding {
     case SegmentLayout.ColumnGroups(_) =>
       V2ColumnBinding(partition.task, schema)
     case SegmentLayout.Manifest(_, _) => V3ColumnBinding(partition.task, schema)
+    case _: SegmentLayout.PhysicalColumnGroups =>
+      PhysicalColumnBinding(partition.task, schema)
+  }
+}
+
+/** Already resolved Arrow names and files supplied by an input adapter. No
+  * storage-version or legacy naming rule is inferred at this boundary.
+  */
+final case class PhysicalColumnBinding(
+    override val task: SegmentReadTask,
+    schema: StructType
+) extends ColumnBinding {
+  private val physical = task.layout match {
+    case value: SegmentLayout.PhysicalColumnGroups => value
+    case _ =>
+      throw new IllegalArgumentException(
+        "a physical binding needs resolved column groups"
+      )
+  }
+  protected val milvusSchema: CollectionSchema =
+    CollectionSchema.parseFrom(task.schemaBytes)
+  override val arrowSchema: Schema = Schema.fromJSON(physical.arrowSchemaJson)
+  private val names = arrowSchema.getFields.asScala.map(_.getName).toSet
+  require(
+    physical.fieldNames.values.forall(names),
+    "physical field names differ from the Arrow schema"
+  )
+  require(
+    physical.outputColumns.values.forall(names),
+    "physical output names differ from the Arrow schema"
+  )
+  require(
+    physical.groups.flatMap(_.columnNames).forall(names),
+    "physical groups name unknown Arrow columns"
+  )
+  override val columnNameFor: Long => Option[String] = physical.fieldNames.get
+  override val arrowColumnNames: Map[String, String] = physical.outputColumns
+  override val pkColumnName: String =
+    pkField.flatMap(field => columnNameFor(field.fieldID)).getOrElse("")
+  override val timestampColumnName: String = columnNameFor(1L).getOrElse("")
+  override lazy val neededColumns: Seq[String] = {
+    val requested =
+      if (task.neededFieldIds.nonEmpty) task.neededFieldIds.map { id =>
+        columnNameFor(id).getOrElse(
+          throw new IllegalArgumentException(s"Unknown physical field id $id")
+        )
+      }
+      else schema.fieldNames.toSeq.map(arrowColumnFor)
+    val required = if (appliesDeletes && !deletePlan.isEmpty) {
+      require(
+        pkColumnName.nonEmpty && timestampColumnName.nonEmpty,
+        "applying deletes requires primary key and timestamp physical columns"
+      )
+      (requested ++ Seq(pkColumnName, timestampColumnName)).distinct
+    } else requested.distinct
+    val available = physical.groups.flatMap(_.columnNames).toSet
+    require(
+      required.forall(available),
+      "physical column groups do not contain all requested columns"
+    )
+    required
   }
 }
 

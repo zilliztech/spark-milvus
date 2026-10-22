@@ -29,7 +29,7 @@ import org.apache.spark.sql.SparkSession
 
 import com.zilliz.milvus.storage.schema.MetricType
 import com.zilliz.spark.connector.metrics.NearestByMetrics
-import com.zilliz.spark.connector.read.MilvusScan
+import com.zilliz.spark.connector.read.SegmentSearchScan
 import com.zilliz.spark.connector.search.{
   FrameSearch,
   NearestByInput,
@@ -97,7 +97,7 @@ final case class MilvusNearestByJoin(
   * base column is a scan column under its own name or an alias of one.
   */
 private[extensions] final case class MilvusTableInput(
-    scan: MilvusScan,
+    scan: SegmentSearchScan,
     columns: Map[Long, String]
 ) {
 
@@ -131,9 +131,9 @@ private[extensions] object MilvusTableInput {
 
   private def milvusScan(
       relation: DataSourceV2ScanRelation
-  ): Either[String, MilvusScan] = relation.scan match {
-    case scan: MilvusScan => Right(scan)
-    case other            => Left(s"the scan is ${other.getClass.getName}")
+  ): Either[String, SegmentSearchScan] = relation.scan match {
+    case scan: SegmentSearchScan => Right(scan)
+    case other => Left(s"the scan is ${other.getClass.getName}")
   }
 
   private def projected(
@@ -233,7 +233,7 @@ object MilvusNearestByJoinStrategy extends SparkStrategy {
   */
 final case class MilvusNearestByJoinExec(
     left: SparkPlan,
-    @transient scan: MilvusScan,
+    @transient scan: SegmentSearchScan,
     baseOutput: Seq[Attribute],
     baseColumns: Seq[String],
     joinType: JoinType,

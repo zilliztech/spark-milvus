@@ -1,5 +1,26 @@
 # Milvus Spark Connector Parameter Reference
 
+New public callers use fixed Storage V3 files and the
+[read/search extension](#offline-read-and-search-extension). The Catalog, client,
+CALL, backup and write sections below document the transitional implementation
+that remains until T15; they are not the migration target. Do not build new
+callers against them. Their replacements are:
+
+| Transitional entry | Migrated caller |
+| --- | --- |
+| Catalog table / latest / named / as-of | User or private apps selects and retains a fixed snapshot; public `spark.read.format("milvus").option("milvus.snapshot.path", ...).load()` |
+| Scala/Java `buildIndex`, `writeSnapshot` | Private `apps.jobs.IndexBuildJob.run` / `SnapshotOutputJob.run`, returning their typed results |
+| `Register.run`, register/restore/cleanup CALL | Private `apps.control.Registration`, `SnapshotRestore` and `apps.jobs.CleanupStagingJob` |
+| Connect management CALL | Private job submission; no new Connect management protocol |
+| Storage V2 / backup | Private `milvus-offline` reader and private format APIs |
+| Public `BackfillApp` | `com.zilliz.milvus.offline.apps.backfill.BackfillApp` |
+
+The private repository maintains typed Scala/Java examples and service control
+contracts. Current public examples use only file reads and searches; see the
+[bounded example](../scripts/search_demo.py). A committed write is not online
+registration, and append still requires the unavailable `RegisterSegments` API.
+
+
 This document provides a comprehensive guide to all parameter configurations for the Milvus Spark Connector.
 
 ## Vector search
@@ -553,8 +574,9 @@ process credential chain on both the driver and executors. The native libraries
 must be available as described in
 [Native dependency bundle](#native-dependency-bundle).
 
-For a backup, use `milvus.backup.dir` and the selection rules under
-[Offline Backup Read Parameters](#25-offline-backup-read-parameters).
+Backup reads belong to the private offline repository. The
+[old backup reference](#25-offline-backup-read-parameters) remains only to
+describe the transitional public implementation until T15.
 Apply ordinary DataFrame `select` and `where`, or create a temporary view for
 SQL. Optional partition and segment selectors take numeric IDs; see
 [Data Operation Parameters](#23-data-operation-parameters).

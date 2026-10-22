@@ -257,6 +257,17 @@ object SegmentReader {
         task.segmentId,
         allocator
       )
+    case physical: SegmentLayout.PhysicalColumnGroups =>
+      openColumnGroups(
+        physical.groups,
+        arrowSchema,
+        neededColumns,
+        task.properties,
+        task.limits,
+        task.expectedRows,
+        task.segmentId,
+        allocator
+      )
   }
 
   /** Opens physical column groups resolved by an input format. The same native

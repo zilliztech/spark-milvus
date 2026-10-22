@@ -1,46 +1,26 @@
 # Milvus Spark Connector
 
-Read and write Milvus collections from Apache Spark by going straight at the
-Milvus storage format on object storage, rather than through the Milvus query
-path. A read lists a snapshot, plans one Spark partition per segment, and pulls
-Arrow column batches out of the segment files. A write stages segment files in
-the same format on object storage; ordinary DataFrame append does not register
-new segments with Milvus and does not make them queryable there. See the
-[write contract](docs/reference-en.md#24-write-parameters) before using it.
+Read and search fixed Storage V3 snapshots with Apache Spark, directly from
+object storage. The caller supplies the snapshot path and its storage identity
+and keeps the metadata, data, deletes and index files available for every action.
+The read/search path does not call Milvus or create snapshots.
 
-Storage V2 requires Milvus 2.6 or later. Service operations also require the
-corresponding Milvus APIs; the end-to-end demos below use Milvus 3.0+ for
-snapshot creation. For Milvus 2.5 and earlier use the `legacy` branch, which is
-no longer maintained.
+Vector search uses NEAREST BY: Spark 4.2's native syntax, and the connector's
+`nearestByJoin` / `nearest_by_join` on Spark 3.5 to 4.1. EXACT scans vectors;
+APPROX uses compatible persisted indexes. Deletions and scalar predicates apply
+before ranking. Use the read-only session extension and `MilvusSparkPlugin`;
+see [the search reference](docs/reference-en.md#vector-search).
 
-The 1.x line stopped at tag `v1.6.0` and is no longer maintained. The 2.0 line
-is a rewrite on branch `refactor/v2`, versioned
-`2.0.0-{branch}-{arch}-SNAPSHOT`.
+During the repository migration, the source tree and transitional artifacts
+still contain the old Catalog, client, management CALL, write and backup
+implementations. New callers use the V3 file entry below. Writing, backfill,
+index construction, snapshot output, old storage formats, backup and Cardinal
+belong to the private `milvus-offline-compute` repository. Existing APIs remain
+until the T15 source cleanup; their presence is not a public support commitment.
 
-Vector search is written as a NEAREST BY join: Spark 4.2's own, and the
-connector's `nearestByJoin` and `nearest_by_join` on 3.5 to 4.1. Over a Milvus
-table the connector runs it and returns each query's global TopK, Spark's
-result. APPROX searches the index files the snapshot pinned (the HNSW and IVF
-families and FLAT) and EXACT scans the vectors; deletions and scalar
-predicates apply before the search, and only the rows selected are read for
-their columns. See [NEAREST BY](docs/reference-en.md#nearest-by-on-spark-42).
-Cardinal index files require a Cardinal-enabled build of the pinned Knowhere
-revision; the plain upstream CI artifact does not contain that engine.
-
-Read a prepared snapshot with `milvus.snapshot.path`, or a backup with
-`milvus.backup.dir`, plus its storage access configuration. These paths do not
-contact Milvus and need no Milvus Java SDK. The caller prepares the input and
-keeps its metadata, data and indexes available for the entire job. See
-[Reading with DataFrames](docs/reference-en.md#1-reading-with-dataframes).
-
-The existing service-connected client, Catalog and CALL interfaces remain
-during migration; the final public reader will use offline inputs only.
-`MilvusCatalog` exposes databases and collections as Spark namespaces and
-tables, loads latest or time-travel snapshots, and implements collection
-`CREATE TABLE` / `DROP TABLE` with validated Milvus field and index properties.
-Creating a collection does not create a connector snapshot; it becomes readable
-after Milvus produces one. The options are in the
-[API reference](docs/reference-en.md).
+The 1.x line stopped at `v1.6.0` and is no longer maintained. The 2.0 rewrite
+continues on `refactor/v2`. Candidate versions and artifact coordinates are
+explicitly recorded by the [release workflow](docs/releasing.md).
 
 ## Project structure
 
@@ -101,7 +81,7 @@ git submodule update --init docs/design
 | Document | What it answers |
 |---|---|
 | [docs/reference-en.md](docs/reference-en.md) | Every option and entry point: vector search, the catalog, reads, writes, backup directories, SQL procedures, data types |
-| [docs/user-guide-snapshot-backfill.md](docs/user-guide-snapshot-backfill.md) | How to add a field to a collection and fill it offline with the backfill job |
+| [docs/user-guide-snapshot-backfill.md](docs/user-guide-snapshot-backfill.md) | Retained pre-migration guide; maintained backfill callers now live in the private offline repository |
 | [docs/contributing.md](docs/contributing.md) | Building, formatting, testing and the native bundle, beyond this README |
 | [docs/releasing.md](docs/releasing.md) | Maven coordinates, the supported release matrix, candidate validation and Central publication |
 | [native-build/README.md](native-build/README.md) | How the per-platform native bundle is built and published |
@@ -257,56 +237,54 @@ docker rm temp
 
 ## Using the connector
 
-Use an assembly built from this 2.0 checkout for your Spark line and native
-platform: root's assembly for Spark 4.0, or `spark42/assembly` for Spark 4.2.
-The historical 1.x examples and artifacts do not implement the APIs below.
-The root Maven coordinate remains `com.zilliz:spark-connector_2.13`; 2.0
-snapshots use the snapshot repository:
-
-```scala
-ThisBuild / resolvers +=
-  "Sonatype Snapshots" at "https://central.sonatype.com/repository/maven-snapshots/"
-```
+Use the public candidate's JVM implementation and matching OSS native JAR, or
+its universal/platform-specific Maven entry, for the selected Spark line. See
+[release coordinates](docs/releasing.md). The old root assembly remains a
+transitional build target; new callers do not discover it by glob or assume it
+contains the private jobs.
 
 ### Run the read and search demo
 
-[scripts/spark_submit_demo.sh](scripts/spark_submit_demo.sh) runs the maintained
-[search demo](scripts/search_demo.py). It creates a temporary collection,
-inserts 2,000 vectors through the Milvus SDK, flushes and snapshots it, then
-uses Spark to search that snapshot exactly. It checks that the connector
-executes the join and compares the results with NumPy. It does not exercise
-persisted-index APPROX search.
+[scripts/spark_submit_demo.sh](scripts/spark_submit_demo.sh) verifies a supplied
+public candidate and submits the [file-only example](scripts/search_demo.py).
+It uses Spark 4.0.1 / Scala 2.13, Java 21 and PySpark from that distribution.
+No Milvus endpoint, SDK, Catalog or fixture writer participates.
 
-Prerequisites: Milvus 3.0+ with its object storage reachable from Spark, Spark
-4.0 for Scala 2.13, Java 21, Python with `pymilvus` 3.0+ and `numpy`, and root's
-assembly containing the matching native bundle (see [Building](#building)).
-For a local Milvus and MinIO using the script's defaults:
+Create a private options JSON containing `milvus.snapshot.path` and the
+corresponding `fs.*` / `extfs.*` storage settings. For example, a local immutable
+fixture can use:
 
-```bash
-export SPARK_HOME=/path/to/spark-4.0-bin-hadoop3
-export JAVA_HOME=/path/to/jdk-21
-export JAR=/path/to/spark-connector-assembly-2.0.0-refactor-v2-amd64-SNAPSHOT.jar
-./scripts/spark_submit_demo.sh
+```json
+{"milvus.snapshot.path":"snapshot.json","fs.storage_type":"local","fs.root_path":"/data/nearest"}
 ```
 
-The script defaults to `http://localhost:19530`, MinIO at `localhost:9000`,
-bucket `a-bucket` and root `files`, with local-development credentials.
-Override `MILVUS_URI`, `MILVUS_TOKEN` and the `S3_*` variables documented in the
-script for your installation. The Milvus identity and object-storage identity
-are separate. Driver and executors both need access to the storage. The demo
-drops only its newly created collection and snapshot on exit; `KEEP=1` keeps
-them for inspection. A successful run prints `Search demo passed`.
+The separate queries JSON contains one or more `{ "qid": 1, "vector": [0.1, 0.2] }`
+objects in an array. Keep credential-bearing options files outside the checkout.
+For a small snapshot with `id` and `vector` columns:
 
-The script configures the session extension, `MilvusSparkPlugin`, catalog,
-credential redaction and `libjsig` preload before Spark starts. Use the same
-startup settings in your jobs; a cluster's executor preload path must point
-to the JDK installed on its workers. The plugin is required for connector
-search execution, not just faster library initialization.
+```bash
+export SPARK_HOME=/path/to/spark-4.0.1-bin-hadoop3
+export JAVA_HOME=/path/to/jdk-21
+export CANDIDATE=/verified/public-candidate
+./scripts/spark_submit_demo.sh --options /private/read-options.json \
+  --queries /data/queries.json --mode exact
+./scripts/spark_submit_demo.sh --options /private/read-options.json \
+  --queries /data/queries.json --mode approx
+```
+
+The example bounds its oracle input to 10,000 rows. EXACT must match an
+independent L2 calculation. APPROX must load and search a persisted index and
+reports recall against that oracle; an arbitrary approximate index is not
+required to return the exact ranking. Both modes require actual connector native
+search. `--id-column`, `--vector-column` and `--k` select the example fields and
+result size. Driver and workers need access to the same fixed input and the JDK's
+`libjsig` path. The script configures only the read extension and plugin and never
+creates or deletes the input. A successful run prints `Search demo passed`.
 
 ### Query with Scala DataFrames
 
 With a Spark session configured as above, this example reads an existing
-collection snapshot and finds three matches per query. Replace the collection,
+collection snapshot and finds three matches per query. Replace the snapshot, storage settings,
 field names and query vectors with your own; here `embedding` is a
 three-dimensional float vector and `id` and `title` are collection fields.
 
@@ -315,7 +293,11 @@ import com.zilliz.spark.connector.implicits._
 import org.apache.spark.sql.functions.call_function
 import spark.implicits._
 
-val docs = spark.table("milvus.default.docs")
+val docs = spark.read.format("milvus")
+  .option("milvus.snapshot.path", "files/snapshots/10/metadata/1.json")
+  .option("fs.storage_type", "local")
+  .option("fs.root_path", "/data/milvus")
+  .load()
 val queries = Seq(
   (1L, Seq(0.1f, 0.2f, 0.3f)),
   (2L, Seq(0.4f, 0.5f, 0.6f))
@@ -338,10 +320,9 @@ the [search reference](docs/reference-en.md#vector-search) for these semantics
 and the [read examples](docs/reference-en.md#31-reading-data) for direct
 `spark.read.format("milvus")` options.
 
-For the separate field-backfill workflow, start with the
-[backfill guide](docs/user-guide-snapshot-backfill.md) and its runnable
-[demo](scripts/run_backfill_demo.sh). Ordinary DataFrame append is staging
-only; it is not an online insert or a full-refresh workflow.
+Backfill and other write jobs run from the private offline repository. The
+[retained backfill guide](docs/user-guide-snapshot-backfill.md) identifies the
+migrated entry; its old public implementation is transitional until T15.
 
 ## License
 

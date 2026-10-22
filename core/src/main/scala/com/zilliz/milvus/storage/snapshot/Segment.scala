@@ -1,5 +1,7 @@
 package com.zilliz.milvus.storage.snapshot
 
+import com.zilliz.milvus.storage.read.exec.PhysicalColumnGroup
+
 /** One segment of a [[Snapshot]].
   *
   * V2 and V3 segments are the same type; the difference is confined to
@@ -22,14 +24,17 @@ final case class Segment(
   def hasData: Boolean = layout match {
     case SegmentLayout.Manifest(_, _)   => true
     case SegmentLayout.ColumnGroups(gs) => gs.nonEmpty
+    case physical: SegmentLayout.PhysicalColumnGroups =>
+      physical.groups.nonEmpty
   }
 
   /** The column groups of a V2 segment; empty for a V3 segment, whose groups
     * are inside its manifest.
     */
   def columnGroups: Seq[V2ColumnGroup] = layout match {
-    case SegmentLayout.ColumnGroups(gs) => gs
-    case SegmentLayout.Manifest(_, _)   => Seq.empty
+    case SegmentLayout.ColumnGroups(gs)        => gs
+    case SegmentLayout.Manifest(_, _)          => Seq.empty
+    case _: SegmentLayout.PhysicalColumnGroups => Seq.empty
   }
 
   /** The delete files a source listed; empty when there are none or when they
@@ -149,6 +154,37 @@ object SegmentLayout {
     */
   final case class ColumnGroups(groups: Seq[V2ColumnGroup])
       extends SegmentLayout
+
+  /** A format adapter has already resolved physical files and column names.
+    * This carries no snapshot-version, footer or field-slot interpretation.
+    * Arrow schema JSON and maps survive transport without open resources.
+    */
+  final case class PhysicalColumnGroups(
+      groups: Seq[PhysicalColumnGroup],
+      arrowSchemaJson: String,
+      fieldNames: Map[Long, String],
+      outputColumns: Map[String, String]
+  ) extends SegmentLayout {
+    require(
+      groups != null && groups.nonEmpty && groups.forall(_ != null),
+      "physical column groups must not be empty or contain null"
+    )
+    require(
+      arrowSchemaJson != null && arrowSchemaJson.nonEmpty,
+      "physical column groups require an Arrow schema"
+    )
+    require(
+      fieldNames != null && fieldNames.nonEmpty &&
+        fieldNames.values.forall(name => name != null && name.nonEmpty),
+      "physical column groups require field names"
+    )
+    require(
+      outputColumns != null && outputColumns.forall { case (name, column) =>
+        name != null && name.nonEmpty && column != null && column.nonEmpty
+      },
+      "physical output column names must not be blank"
+    )
+  }
 }
 
 /** Where a segment's delete files are. Three of the four states carry

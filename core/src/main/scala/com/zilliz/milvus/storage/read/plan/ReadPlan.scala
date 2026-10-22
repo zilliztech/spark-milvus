@@ -70,7 +70,7 @@ object ReadPlan extends Logging {
     val v3Tasks = snapshot.v3Segments.map { seg =>
       val (basePath, listedVersion) = seg.layout match {
         case SegmentLayout.Manifest(path, version) => (path, version)
-        case SegmentLayout.ColumnGroups(_) =>
+        case _ =>
           throw new IllegalStateException(
             s"segment ${seg.id} is storage_version 3 but carries a column-group layout"
           )
@@ -104,7 +104,7 @@ object ReadPlan extends Logging {
     val v2Tasks = snapshot.v2Segments.filter(_.hasData).map { seg =>
       val groups = seg.layout match {
         case SegmentLayout.ColumnGroups(gs) => gs
-        case SegmentLayout.Manifest(_, _) =>
+        case _ =>
           throw new IllegalStateException(
             s"segment ${seg.id} is storage_version 2 but carries a manifest layout"
           )

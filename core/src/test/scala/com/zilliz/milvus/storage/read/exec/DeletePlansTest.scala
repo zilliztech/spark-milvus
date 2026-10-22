@@ -4,7 +4,11 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.delete.DeletePlan
-import com.zilliz.milvus.storage.io.{FailingObjectStore, LocalObjectStore}
+import com.zilliz.milvus.storage.io.{
+  FailingObjectStore,
+  LocalObjectStore,
+  ObjectStore
+}
 import com.zilliz.milvus.storage.read.plan.{DeleteSource, SegmentReadTask}
 import com.zilliz.milvus.storage.snapshot.{DeltaLogFile, SegmentLayout}
 import io.milvus.grpc.schema.{DataType, FieldSchema}
@@ -92,6 +96,33 @@ class DeletePlansTest extends AnyFunSuite with Matchers {
     }
     thrown shouldBe readFailure
     thrown.getSuppressed.toSeq shouldBe Seq(closeFailure)
+  }
+
+  test("an input decoder receives the borrowed store and preserves failures") {
+    val store = new LocalObjectStore("core/src/test/data")
+    val failure = new IllegalStateException("private format decode failed")
+    var calls = 0
+    val source = DeleteSource.Deferred(new DeleteSource.Reader {
+      override def read(
+          field: FieldSchema,
+          bucket: String,
+          borrowed: ObjectStore
+      ): DeletePlan = {
+        calls += 1
+        field shouldBe pk
+        bucket shouldBe ""
+        borrowed should be theSameInstanceAs store
+        throw failure
+      }
+    })
+    task(source).appliesDeletes shouldBe true
+    intercept[IllegalStateException] {
+      DeletePlans.of(task(source), Some(pk), store)
+    } should be theSameInstanceAs failure
+    intercept[IllegalArgumentException] {
+      DeletePlans.of(task(source), None, store)
+    }
+    calls shouldBe 1
   }
 
   test("a delete store close failure is reported after a successful read") {

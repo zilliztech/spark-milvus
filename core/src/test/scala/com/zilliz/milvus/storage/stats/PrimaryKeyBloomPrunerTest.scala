@@ -112,10 +112,12 @@ class PrimaryKeyBloomPrunerTest extends AnyFunSuite with Matchers {
       DataType.Int64,
       Set(LongValue(candidate))
     )
-    val pruned = pruner.prune(filter)
+    val pruned = fixed.retainDataSegments(pruner.retainedSegmentIds(filter))
     pruned.segments shouldBe Seq(data21, l021, global)
     pruned.partitionIds shouldBe Seq(21L)
-    pruner.prune(filter).segments shouldBe pruned.segments
+    fixed
+      .retainDataSegments(pruner.retainedSegmentIds(filter))
+      .segments shouldBe pruned.segments
     counting.reads shouldBe 2
   }
 
@@ -174,7 +176,7 @@ class PrimaryKeyBloomPrunerTest extends AnyFunSuite with Matchers {
 
     val pruned = PrimaryKeyBloomPruner
       .load(fixed, primaryKey, Map.empty, "expected", "", counting)
-      .prune(
+      .retainedSegmentIds(
         PrimaryKeyFilter(
           100L,
           DataType.Int64,
@@ -182,7 +184,7 @@ class PrimaryKeyBloomPrunerTest extends AnyFunSuite with Matchers {
         )
       )
 
-    pruned.dataSegments.map(_.id) shouldBe Seq(30L, 31L, 32L, 35L, 36L)
+    pruned shouldBe Set(30L, 31L, 32L, 35L, 36L)
     // The stale non-compound file is ignored when basename `1` is present.
     counting.keys should not contain "stats/compound/9"
   }
@@ -191,6 +193,33 @@ class PrimaryKeyBloomPrunerTest extends AnyFunSuite with Matchers {
     val target = root.resolve(destination)
     Files.createDirectories(target.getParent)
     Files.copy(root.resolve("fixture").resolve(source), target)
+  }
+
+  test("listed statistics share cached pruning without a snapshot model") {
+    val root = Files.createTempDirectory("milvus-listed-bloom")
+    ReadFixtures.copyTo("stats/primary-key", root)
+    val store = new CountingObjectStore(new LocalObjectStore(root.toString))
+    val pruner = PrimaryKeyBloomPruner.loadListed(
+      Map(
+        30L -> Seq("long-1-2.json"),
+        31L -> Seq("long-1000.json"),
+        32L -> Seq.empty,
+        33L -> Seq("missing.json")
+      ),
+      primaryKey,
+      "",
+      "",
+      store
+    )
+    val filter = PrimaryKeyFilter(100L, DataType.Int64, Set(LongValue(1000L)))
+    pruner.retainedSegmentIds(filter) shouldBe Set(31L, 32L, 33L)
+    val reads = store.reads
+    pruner.retainedSegmentIds(filter) shouldBe Set(31L, 32L, 33L)
+    store.reads shouldBe reads
+    pruner.retainedSegmentIds(filter.copy(values = Set.empty)) shouldBe empty
+    PrimaryKeyBloomPruner
+      .unavailable(Set(30L, 31L), primaryKey)
+      .retainedSegmentIds(filter) shouldBe Set(30L, 31L)
   }
 
   private def segment(

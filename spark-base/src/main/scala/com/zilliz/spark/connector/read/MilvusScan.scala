@@ -45,12 +45,18 @@ class MilvusScan(
     private[connector] val pushedExpression: Option[PredicateExpr] = None,
     private[read] val pushedLimit: Option[Int] = None,
     private[read] val planningSchema: StructType = null
-) extends Scan
-    with Batch
+) extends SegmentSearchScan
     with SupportsReportStatistics
     with SupportsRuntimeV2Filtering
     with Logging {
   private val milvusOption = MilvusOption(options)
+  override def searchSchema = snapshot.schema
+  override def searchOptions: Map[String, String] = milvusOption.options.toMap
+  override def searchPredicate: Option[PredicateExpr] = pushedExpression
+  override def searchSegments =
+    snapshot.dataSegments.map(segment => segment.id -> segment.indexes)
+  override def searchPartitions(): Seq[MilvusInputPartition] =
+    planInputPartitions().toSeq.map(_.asInstanceOf[MilvusInputPartition])
   private val predicateSchema = Option(planningSchema).getOrElse(schema)
   private val runtimePrimaryKey =
     snapshot.primaryKeyField.filter(field =>
@@ -250,7 +256,7 @@ class MilvusScan(
               s"Bloom statistics cannot be loaded: ${e.getMessage}"
           )
           cachedBloomPruner = PrimaryKeyBloomPruner.unavailable(
-            snapshot,
+            snapshot.dataSegments.map(_.id).toSet,
             runtimePrimaryKey.get
           )
       }
@@ -259,8 +265,11 @@ class MilvusScan(
     val plannedSnapshot = primaryKeyFilter match {
       case Some(filter) if filter.values.isEmpty =>
         snapshot.retainDataSegments(Set.empty)
-      case Some(filter) => cachedBloomPruner.prune(filter)
-      case None         => snapshot
+      case Some(filter) =>
+        snapshot.retainDataSegments(
+          cachedBloomPruner.retainedSegmentIds(filter)
+        )
+      case None => snapshot
     }
     inputPartitions(plannedSnapshot, cachedDeleteListing)
   }

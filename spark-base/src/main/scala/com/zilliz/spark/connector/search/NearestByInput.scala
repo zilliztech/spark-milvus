@@ -6,6 +6,7 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.types.{DataType, StructType}
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.sql.SparkSession
 
 import com.zilliz.milvus.storage.read.exec.SegmentIndexHandle
@@ -17,7 +18,7 @@ import com.zilliz.milvus.storage.schema.{
 import com.zilliz.milvus.storage.vector.RankingFunction
 import com.zilliz.spark.connector.metrics.{NearestByMetrics, SearchMetrics}
 import com.zilliz.spark.connector.options.{MilvusOption, SearchLimits}
-import com.zilliz.spark.connector.read.{MilvusInputPartition, MilvusScan}
+import com.zilliz.spark.connector.read.SegmentSearchScan
 import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
 
 /** The base a nearest-by join searches. Its adapter supplies the vector rules,
@@ -35,7 +36,7 @@ private[connector] object NearestByInput {
     * and type in output order, and the vector field.
     */
   final case class MilvusTable(
-      scan: MilvusScan,
+      scan: SegmentSearchScan,
       columns: Seq[(String, DataType)],
       vectorColumn: String
   ) extends NearestByInput
@@ -119,12 +120,10 @@ private[connector] object NearestByInput {
       VectorLayout.of(field.dataType, dimensionOf(field))
     checkSearchable(metric, layout)
     private val options =
-      Map(scan.options.asCaseSensitiveMap().asScala.toSeq: _*)
+      scan.searchOptions
     override val limits: SearchLimits = SearchLimits.from(options)
     private val partitions = scan
-      .planInputPartitions()
-      .toSeq
-      .map(_.asInstanceOf[MilvusInputPartition])
+      .searchPartitions()
     private val read = scan.readSchema()
     private val taken = StructType(
       input.columns
@@ -165,8 +164,10 @@ private[connector] object NearestByInput {
         metric,
         if (approx) SearchMode.PreferIndex else SearchMode.Exact,
         MilvusOption.searchParameters(options),
-        MilvusOption(scan.options).milvusFilter,
-        scan.pushedExpression,
+        MilvusOption.parseMilvusFilter(
+          new CaseInsensitiveStringMap(options.asJava)
+        ),
+        scan.searchPredicate,
         taken,
         positions,
         SearchMetrics.of(metrics),
@@ -291,10 +292,10 @@ private[connector] object NearestByInput {
     * which is not a column.
     */
   def vectorField(
-      scan: MilvusScan,
+      scan: SegmentSearchScan,
       column: String
   ): Either[String, FieldSchema] =
-    scan.snapshot.schema.fields.find(_.name == column) match {
+    scan.searchSchema.fields.find(_.name == column) match {
       case Some(field) if SearchedTypes(field.dataType) => Right(field)
       case Some(field) =>
         Left(
@@ -309,25 +310,25 @@ private[connector] object NearestByInput {
     * the snapshot does not state is checked when the search plans.
     */
   def describeSegments(
-      scan: MilvusScan,
+      scan: SegmentSearchScan,
       vectorColumn: String,
       metric: MetricType,
       approx: Boolean
   ): String = {
-    val segments = scan.snapshot.dataSegments
+    val segments = scan.searchSegments
     if (!approx) s"${segments.size} segments scanned exactly"
     else {
-      val fieldId = scan.snapshot.schema.fields
+      val fieldId = scan.searchSchema.fields
         .find(_.name == vectorColumn)
         .map(_.fieldID)
         .getOrElse(-1L)
-      val reasons = segments.flatMap(segment =>
+      val reasons = segments.flatMap { case (segmentId, indexes) =>
         SegmentIndexHandle
-          .usable(segment.id, segment.indexes, fieldId, metric)
+          .usable(segmentId, indexes, fieldId, metric)
           .left
           .toOption
           .map(_.label)
-      )
+      }
       val exact =
         if (reasons.isEmpty) ""
         else

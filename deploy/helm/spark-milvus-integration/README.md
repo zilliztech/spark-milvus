@@ -1,5 +1,13 @@
 # Spark-Milvus integration test chart
 
+T14 callers use the fixed V3 mode below for public reads. Service-connected and
+managed modes are retained transitional infrastructure until T15 and require a
+private test image. The private production apps candidate has its own verified
+`deploy/submit.py` entrypoint; it does not implement this chart's test runner.
+T16 deploys a final accepted pair. Lint/template/lifecycle checks do not prove a
+live cluster run, and no deployment is performed by caller migration.
+
+
 ## Fixed V3 reader job
 
 Use `ci-values.read.example.yaml` for public object-storage read validation.

@@ -22,7 +22,10 @@ package com.zilliz.spark.connector
   *
   * A NEAREST BY over a Milvus table searches the partitions this scan plans,
   * with the predicate Spark pushed into it; the search itself is the `search`
-  * package. Capabilities: R4, R5, R7, R11, R12, R13, R16, R18, G3 (see
+  * package. `SegmentSearchScan` allows another input format to supply those
+  * fixed partitions and metadata without a public Snapshot facade;
+  * `PhysicalColumnBinding` consumes its resolved Arrow names. Capabilities: R4,
+  * R5, R7, R11, R12, R13, R16, R18, G3 (see
   * docs/design/projects/spark-milvus/capabilities.md).
   */
 package object read

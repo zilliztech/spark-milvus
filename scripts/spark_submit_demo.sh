@@ -1,69 +1,47 @@
 #!/bin/bash
-#
-# Submits scripts/search_demo.py with spark-submit, with the settings an
-# application that reads and searches Milvus needs: the connector's jar, its
-# session extension and plugin, MilvusCatalog and the signal-chaining preload
-# the native libraries ask for. The program creates a small collection, reads it
-# through the catalog and searches it with NEAREST BY.
-#
-# Needs a Milvus 3.0+ and the object storage it writes to (the defaults are a
-# local Milvus standalone with MinIO), SPARK_HOME pointing at Spark 4.0 for
-# Scala 2.13, JAVA_HOME at Java 21, a Python with pymilvus 3.0+ and numpy for
-# spark-submit to run (python3, or PYSPARK_PYTHON), and root's fat jar built
-# with the native bundle (make package). Override any default below through the
-# environment.
-#
-# Usage: ./scripts/spark_submit_demo.sh
-
+# Read and search a fixed V3 snapshot with exact candidate JVM/native bytes.
+# Usage: CANDIDATE=/verified/public-candidate ./scripts/spark_submit_demo.sh \
+#          --options /private/read-options.json --queries /data/queries.json
+# No Milvus service, SDK, Catalog, root assembly lookup or package download.
 set -euo pipefail
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-
-: "${SPARK_HOME:?Set SPARK_HOME to a Spark 4.0 distribution}"
+: "${SPARK_HOME:?Set SPARK_HOME to Spark 4.0.1 for Scala 2.13}"
 : "${JAVA_HOME:?Set JAVA_HOME to a Java 21 JDK}"
-JAR="${JAR:-$(ls -t "$PROJECT_DIR"/target/scala-2.13/spark-connector-assembly-*.jar 2>/dev/null | head -1)}"
-if [ ! -f "$JAR" ]; then
-  echo "No connector jar: build it with 'make package', or set JAR" >&2
-  exit 1
-fi
-
-export MILVUS_URI="${MILVUS_URI:-http://localhost:19530}"
-export MILVUS_TOKEN="${MILVUS_TOKEN:-root:Milvus}"
-S3_ENDPOINT="${S3_ENDPOINT:-localhost:9000}"
-S3_BUCKET="${S3_BUCKET:-a-bucket}"
-S3_ROOT_PATH="${S3_ROOT_PATH:-files}"
-S3_ACCESS_KEY="${S3_ACCESS_KEY:-minioadmin}"
-S3_SECRET_KEY="${S3_SECRET_KEY:-minioadmin}"
-S3_REGION="${S3_REGION:-us-east-1}"
-S3_USE_SSL="${S3_USE_SSL:-false}"
-
-# The JVM's signal-chaining library is preloaded into the driver here and into
-# the executors through spark.executorEnv.
-if [ "$(uname)" = Darwin ]; then
-  PRELOAD=DYLD_INSERT_LIBRARIES JSIG="$JAVA_HOME/lib/libjsig.dylib"
-else
-  PRELOAD=LD_PRELOAD JSIG="$JAVA_HOME/lib/libjsig.so"
-fi
-export "$PRELOAD=$JSIG"
-
-CATALOG=spark.sql.catalog.milvus
-"$SPARK_HOME/bin/spark-submit" \
-  --master "${MASTER:-local[*]}" \
-  --jars "$JAR" \
-  --conf spark.sql.extensions=com.zilliz.spark.connector.extensions.MilvusSparkSessionExtensions \
+: "${CANDIDATE:?Set CANDIDATE to a verified public release candidate directory}"
+PYTHON="${PYTHON:-python3}"
+JARS="$($PYTHON - "$SCRIPT_DIR" "$CANDIDATE" <<'PY'
+import platform, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import release
+root = Path(sys.argv[2]).resolve(strict=True)
+manifest = release.verify(root)
+machine = {'x86_64': 'x86_64', 'aarch64': 'aarch64', 'arm64': 'aarch64'}.get(platform.machine())
+if platform.system() != 'Linux' or machine is None:
+    raise ValueError('The candidate example requires a supported Linux platform')
+selected = []
+for kind in ('jvm', 'native'):
+    matches = [entry for entry in manifest['artifacts'] if entry['kind'] == kind
+               and not entry['classifier'] and entry['extension'] == 'jar'
+               and (entry['line'] == '4.0' if kind == 'jvm' else entry['platform'] == 'linux-' + machine)]
+    if len(matches) != 1:
+        raise ValueError('Candidate must supply exactly one Spark 4.0 JVM and matching OSS native JAR')
+    path = str(root / 'repository' / matches[0]['path'])
+    if any(char in path for char in (',', '\n', '\r')):
+        raise ValueError('Candidate path cannot contain commas or newlines')
+    selected.append(path)
+print(','.join(selected))
+PY
+)"
+JSIG="$JAVA_HOME/lib/libjsig.so"
+test -f "$JSIG" || { echo "Missing Java signal-chaining library" >&2; exit 1; }
+export LD_PRELOAD="$JSIG${LD_PRELOAD:+ $LD_PRELOAD}"
+export LD_BIND_NOW=1
+exec "$SPARK_HOME/bin/spark-submit" \
+  --master "${MASTER:-local[2]}" --jars "$JARS" \
+  --conf spark.sql.extensions=com.zilliz.spark.connector.extensions.MilvusReadSparkSessionExtensions \
   --conf spark.plugins=com.zilliz.spark.connector.extensions.MilvusSparkPlugin \
   --conf 'spark.redaction.regex=(?i)secret|password|token|access[._]?key' \
-  --conf "spark.executorEnv.$PRELOAD=$JSIG" \
-  --conf "$CATALOG=com.zilliz.spark.connector.catalog.MilvusCatalog" \
-  --conf "$CATALOG.milvus.uri=$MILVUS_URI" \
-  --conf "$CATALOG.milvus.token=$MILVUS_TOKEN" \
-  --conf "$CATALOG.fs.address=$S3_ENDPOINT" \
-  --conf "$CATALOG.fs.bucket_name=$S3_BUCKET" \
-  --conf "$CATALOG.fs.root_path=$S3_ROOT_PATH" \
-  --conf "$CATALOG.fs.access_key_id=$S3_ACCESS_KEY" \
-  --conf "$CATALOG.fs.access_key_value=$S3_SECRET_KEY" \
-  --conf "$CATALOG.fs.region=$S3_REGION" \
-  --conf "$CATALOG.fs.use_ssl=$S3_USE_SSL" \
-  --conf "$CATALOG.fs.use_virtual_host=false" \
-  "$SCRIPT_DIR/search_demo.py"
+  --conf "spark.executorEnv.LD_PRELOAD=$JSIG" \
+  --conf spark.executorEnv.LD_BIND_NOW=1 \
+  "$SCRIPT_DIR/search_demo.py" "$@"

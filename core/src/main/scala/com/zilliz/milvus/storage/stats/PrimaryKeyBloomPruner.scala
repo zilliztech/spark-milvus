@@ -122,12 +122,12 @@ object PrimaryKeyFilter {
 
 /** Cached segment-level primary-key Bloom inputs for one fixed snapshot.
   *
-  * Construction reads every relevant statistics file once. Calls to [[prune]]
-  * only evaluate the cached filters, so repeated Spark runtime filtering never
-  * reopens object storage.
+  * Construction reads every relevant statistics file once. Calls to
+  * [[retainedSegmentIds]] only evaluate the cached filters, so repeated Spark
+  * runtime filtering never reopens object storage.
   */
 final class PrimaryKeyBloomPruner private (
-    snapshot: Snapshot,
+    segmentIds: Set[Long],
     fieldId: Long,
     dataType: DataType,
     inputs: Map[Long, PrimaryKeyBloomPruner.SegmentInput]
@@ -135,27 +135,23 @@ final class PrimaryKeyBloomPruner private (
   import PrimaryKeyBloomPruner._
   import PrimaryKeyValue._
 
-  def prune(filter: PrimaryKeyFilter): Snapshot = {
+  def retainedSegmentIds(filter: PrimaryKeyFilter): Set[Long] = {
     require(
       filter.fieldId == fieldId && filter.dataType == dataType,
       s"the cached statistics are for ($fieldId, $dataType), not " +
         s"(${filter.fieldId}, ${filter.dataType})"
     )
-    if (filter.values.isEmpty) return snapshot.retainDataSegments(Set.empty)
+    if (filter.values.isEmpty) return Set.empty
 
-    val retained = snapshot.dataSegments.iterator
-      .filter { segment =>
-        inputs.get(segment.id) match {
-          case Some(Usable(stats)) =>
-            filter.values.exists(value =>
-              stats.exists(stat => mightContain(stat, value))
-            )
-          case _ => true
-        }
+    segmentIds.filter { id =>
+      inputs.get(id) match {
+        case Some(Usable(stats)) =>
+          filter.values.exists(value =>
+            stats.exists(stat => mightContain(stat, value))
+          )
+        case _ => true
       }
-      .map(_.id)
-      .toSet
-    snapshot.retainDataSegments(retained)
+    }
   }
 
   private def mightContain(
@@ -177,14 +173,14 @@ object PrimaryKeyBloomPruner extends com.zilliz.milvus.storage.Logging {
     * opened. Every segment is retained for every non-empty candidate set.
     */
   def unavailable(
-      snapshot: Snapshot,
+      segmentIds: Set[Long],
       primaryKey: FieldSchema
   ): PrimaryKeyBloomPruner =
     new PrimaryKeyBloomPruner(
-      snapshot,
+      segmentIds,
       primaryKey.fieldID,
       primaryKey.dataType,
-      snapshot.dataSegments.iterator.map(_.id -> Unavailable).toMap
+      segmentIds.iterator.map(_ -> Unavailable).toMap
     )
 
   def load(
@@ -227,7 +223,59 @@ object PrimaryKeyBloomPruner extends com.zilliz.milvus.storage.Logging {
         }
       segment.id -> input
     }.toMap
-    new PrimaryKeyBloomPruner(snapshot, fieldId, dataType, loaded)
+    new PrimaryKeyBloomPruner(
+      snapshot.dataSegments.map(_.id).toSet,
+      fieldId,
+      dataType,
+      loaded
+    )
+  }
+
+  /** Loads statistics already listed by an input format. Missing, malformed or
+    * unreadable statistics retain that segment; an empty finite key set drops
+    * every segment. The same cache and file-selection rules serve all inputs.
+    */
+  def loadListed(
+      paths: Map[Long, Seq[String]],
+      primaryKey: FieldSchema,
+      bucket: String,
+      endpoint: String,
+      store: ObjectStore
+  ): PrimaryKeyBloomPruner = {
+    require(
+      store != null,
+      "an ObjectStore is required to load Bloom statistics"
+    )
+    require(
+      primaryKey.dataType == DataType.Int64 || primaryKey.dataType == DataType.VarChar,
+      s"primary-key Bloom pruning does not support ${primaryKey.dataType}"
+    )
+    val loaded = paths.map { case (id, files) =>
+      val input =
+        try
+          loadPaths(
+            files,
+            primaryKey.fieldID,
+            primaryKey.dataType,
+            bucket,
+            endpoint,
+            store
+          )
+        catch {
+          case NonFatal(error) =>
+            logWarning(
+              s"Retaining segment $id: its primary-key Bloom statistics cannot be used: ${error.getMessage}"
+            )
+            Unavailable
+        }
+      id -> input
+    }
+    new PrimaryKeyBloomPruner(
+      paths.keySet,
+      primaryKey.fieldID,
+      primaryKey.dataType,
+      loaded
+    )
   }
 
   private def loadSegment(
@@ -265,6 +313,17 @@ object PrimaryKeyBloomPruner extends com.zilliz.milvus.storage.Logging {
       case SegmentStatistics.Unknown => Seq.empty
     }
 
+    loadPaths(paths, fieldId, dataType, bucket, endpoint, store)
+  }
+
+  private def loadPaths(
+      paths: Seq[String],
+      fieldId: Long,
+      dataType: DataType,
+      bucket: String,
+      endpoint: String,
+      store: ObjectStore
+  ): SegmentInput = {
     val selected = relevantPaths(paths)
     if (selected.isEmpty) return Unavailable
     val stats = selected.iterator.flatMap { path =>

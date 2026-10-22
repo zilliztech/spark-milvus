@@ -11,10 +11,26 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.delete.DeletePlan
+import com.zilliz.milvus.storage.io.{FailingObjectStore, ObjectStore}
+import com.zilliz.milvus.storage.read.exec.{DeletePlans, PhysicalColumnGroup}
 import com.zilliz.milvus.storage.snapshot.{SegmentIndex, SegmentIndexes}
 import com.zilliz.milvus.storage.snapshot.DeltaLogFile
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
+import io.milvus.grpc.schema.{DataType, FieldSchema}
+
+object SegmentReadTaskTest {
+  final case class TestDeleteReader(key: Long) extends DeleteSource.Reader {
+    override def read(
+        primaryKey: FieldSchema,
+        bucket: String,
+        store: ObjectStore
+    ): DeletePlan = {
+      require(primaryKey.fieldID == 100L && bucket == "b" && store != null)
+      DeletePlan.fromLongPks(Map(key -> 9L))
+    }
+  }
+}
 
 class SegmentReadTaskTest extends AnyFunSuite with Matchers {
 
@@ -65,6 +81,56 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
     )
     val copy = roundTrip(task)
     copy.layout shouldBe SegmentLayout.Manifest("files/insert_log/1/2/3", 11L)
+  }
+
+  test(
+    "a deferred format decoder survives task serialization without an open store"
+  ) {
+    val copy = roundTrip(
+      v2Task.copy(deletes =
+        DeleteSource.Deferred(
+          SegmentReadTaskTest.TestDeleteReader(42L)
+        )
+      )
+    )
+    copy.appliesDeletes shouldBe true
+    val primaryKey = FieldSchema(
+      fieldID = 100L,
+      dataType = DataType.Int64,
+      isPrimaryKey = true
+    )
+    val store = new FailingObjectStore(new java.io.IOException("unused"))
+    val plan = DeletePlans.of(copy, Some(primaryKey), store)
+    plan.containsLongPk(42L, 8L) shouldBe true
+    plan.containsLongPk(43L, 8L) shouldBe false
+    an[UnsupportedOperationException] should be thrownBy copy.deletePlan
+  }
+
+  test(
+    "resolved physical groups retain row bounds and names after serialization"
+  ) {
+    val physical = SegmentLayout.PhysicalColumnGroups(
+      Seq(
+        PhysicalColumnGroup(Seq("key"), Seq("data/a", "data/b"), Seq(3L, 2L))
+      ),
+      "{\"fields\":[]}",
+      Map(100L -> "key"),
+      Map("id" -> "key")
+    )
+    val task = roundTrip(v2Task.copy(layout = physical))
+    task.layout shouldBe physical
+    task.dataFiles shouldBe Seq("data/a", "data/b")
+    task.expectedRows shouldBe Some(5L)
+    task.provenPhysicalRows shouldBe Some(5L)
+    task.readVersionOrLatest shouldBe -1L
+    task
+      .copy(layout =
+        physical.copy(groups =
+          physical.groups :+
+            PhysicalColumnGroup(Seq("value"), Seq("data/value"), Seq(4L))
+        )
+      )
+      .provenPhysicalRows shouldBe None
   }
 
   test(
