@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check immutable public read samples and the read tests migrated in T06."""
+"""Check immutable public read samples and public reader source boundaries."""
 import hashlib
 from pathlib import Path, PurePosixPath
 import re
@@ -10,40 +10,16 @@ RESOURCE_ROOTS = (
     "core/src/test/data",
     "native-vector/src/test/resources/read-fixtures",
 )
-# Mixed writer/control suites remain until their capability migrates. These are
-# the pure-reader boundaries, not a claim that all current tests are read-only.
+# Every retained public source tree is checked, including unselected Spark shims.
 READ_SOURCES = (
-    "core/src/test/scala/com/zilliz/milvus/storage/read/**/*.scala",
-    "compat/src/test/scala/**/*.scala",
-    "core/src/test/scala/com/zilliz/milvus/storage/delete/*.scala",
-    "core/src/test/scala/com/zilliz/milvus/storage/manifest/V3ManifestReaderTest.scala",
-    "core/src/test/scala/com/zilliz/milvus/storage/snapshot/SnapshotCatalogTest.scala",
-    "core/src/test/scala/com/zilliz/milvus/storage/codec/IndexFileCodecTest.scala",
-    "core/src/test/scala/com/zilliz/milvus/storage/codec/MilvusIndexFileDecoderTest.scala",
-    "core/src/test/scala/com/zilliz/milvus/storage/codec/BinlogCodecTest.scala",
-    "core/src/test/scala/com/zilliz/milvus/storage/io/ReadFixtures.scala",
-    "core/src/test/scala/com/zilliz/milvus/storage/io/LocalObjectStore.scala",
-    "core/src/test/scala/com/zilliz/milvus/storage/io/NativeSegmentReadTest.scala",
-    "core/src/test/scala/com/zilliz/milvus/storage/io/StorageNativeTest.scala",
-    "core/src/test/scala/com/zilliz/milvus/storage/codec/ArrayCodecTest.scala",
-    "core/src/test/scala/com/zilliz/milvus/storage/stats/BlockedBloomFilterTest.scala",
-    "core/src/test/scala/com/zilliz/milvus/storage/stats/PrimaryKeyStatsTest.scala",
-    "core/src/test/scala/consumer/manifest/SnapshotSegmentSchemaTest.scala",
+    "core/src/main/scala/**/*.scala",
+    "core/src/test/scala/**/*.scala",
     "native-vector/src/test/java/com/zilliz/milvus/jni/vector/NativeVectorLibrarySmoke.java",
-    "core/src/test/scala/com/zilliz/milvus/storage/stats/PrimaryKeyBloomPrunerTest.scala",
-    "spark-4.0/src/test/scala/com/zilliz/spark/connector/testkit/LocalMilvusCollection.scala",
-    "spark-4.0/src/test/scala/com/zilliz/spark/connector/nearestby/*.scala",
-    "spark-4.0/src/test/scala/com/zilliz/spark/connector/read/ReadOnlyConsumerSmoke.scala",
-    "spark-4.0/src/test/scala/com/zilliz/spark/connector/read/V3ReadContractTest.scala",
-    "spark-4.0/src/test/scala/com/zilliz/spark/connector/read/ColumnBindingTest.scala",
-    "spark-4.0/src/test/scala/com/zilliz/spark/connector/connect/ConnectReadClientProgram.scala",
-    "spark-4.0/src/test/scala/com/zilliz/spark/connector/connect/ConnectReadSessionTest.scala",
-    "spark-4.0/src/test/scala/com/zilliz/spark/connector/connect/ConnectSessionTestBase.scala",
-    "spark-4.0/src/test/scala/com/zilliz/spark/connector/read/ArrowReadOwnershipTest.scala",
-    "spark-base/src/main/scala/com/zilliz/spark/connector/extensions/MilvusReadSparkSessionExtensions.scala",
-    "spark-4.0/src/test/scala/com/zilliz/spark/connector/types/ArrowConverterTest.scala",
-    "spark-4.0/src/test/scala/com/zilliz/spark/connector/types/MilvusSparseVectorColumnTest.scala",
-    "integration-4.0/src/test/scala/com/zilliz/spark/connector/sources/MilvusDataSourceTest.scala",
+    "spark/src/main/scala/**/*.scala",
+    "spark/src/main/scala-shims/**/*.scala",
+    "spark/src/test/scala/**/*.scala",
+    "spark/src/test/scala-shims/**/*.scala",
+    "integration/src/test/scala/**/*.scala",
 )
 FORBIDDEN = re.compile(
     r"com\.zilliz\.milvus\.(?:storage\.write|client)\b|"
@@ -92,6 +68,33 @@ def check_source(path):
         raise ValueError(f"Read test depends on production write/control code: {path}: {match.group()}")
 
 
+def check_package(path, source_root):
+    source = re.sub(r"/\*.*?\*/|//[^\n]*", "", path.read_text(), flags=re.S)
+    declarations = re.findall(r"(?m)^package\s+(?!object\b)([A-Za-z_][\w.]*)", source)
+    package_object = re.search(r"(?m)^package\s+object\s+([A-Za-z_][\w]*)", source)
+    actual = ".".join(declarations + ([package_object.group(1)] if package_object else []))
+    expected = ".".join(path.relative_to(source_root).parent.parts)
+    if actual != expected:
+        raise ValueError(f"Source package does not match its directory: {path}: {actual} != {expected}")
+
+
+def check_source_layout(root):
+    count = 0
+    for module in ("native-runtime", "native-storage", "native-vector", "core", "spark", "integration"):
+        for scope in ("main", "test"):
+            base = root / module / "src" / scope
+            source_roots = [base / "scala", base / "java"]
+            # Inspect every shim directory even when the current sbt selection
+            # does not compile it. Package paths start beneath the shim name.
+            source_roots.extend(sorted((base / "scala-shims").glob("*")))
+            for source_root in source_roots:
+                for path in sorted(source_root.rglob("*")):
+                    if path.is_file() and path.suffix in {".scala", ".java"}:
+                        check_package(path, source_root)
+                        count += 1
+    return count
+
+
 def main():
     groups = files = sources = 0
     for relative in RESOURCE_ROOTS:
@@ -113,7 +116,8 @@ def main():
         for path in paths:
             check_source(path)
             sources += 1
-    print(f"PASS {groups} read fixture groups, {files} files, {sources} read source boundaries")
+    packages = check_source_layout(ROOT)
+    print(f"PASS {groups} read fixture groups, {files} files, {sources} read source boundaries, {packages} source packages")
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import shutil
+import struct
 import tempfile
 import unittest
 from unittest import mock
@@ -17,8 +18,8 @@ release = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(release)
 
 RELEASE_ROWS = [
-    {"line": "4.0", "project": "spark40", "spark": "4.0.1", "scala": "2.13.16", "java": "21"},
-    {"line": "4.2", "project": "spark42", "spark": "4.2.0", "scala": "2.13.16", "java": "21"},
+    {"line": "4.0", "project": "spark", "spark": "4.0.1", "scala": "2.13.16", "java": "21"},
+    {"line": "4.2", "project": "spark", "spark": "4.2.0", "scala": "2.13.16", "java": "21"},
 ]
 
 
@@ -112,7 +113,7 @@ class ReleaseTest(unittest.TestCase):
             runtime = [dict(groupId="com.zilliz", artifactId=name, version=self.plan["version"])
                        for name in internal]
             provided = [dict(groupId="org.apache.spark", artifactId="spark-" + name + "_2.13", version=spark_build_version)
-                        for name in ("core", "sql", "catalyst")] if project == "spark40" else []
+                        for name in ("core", "sql", "catalyst")] if project == "spark" else []
             files = []
             for classifier, extension in sorted(release.MAVEN_FILES):
                 suffix = "-" + classifier if classifier else ""
@@ -138,7 +139,7 @@ class ReleaseTest(unittest.TestCase):
         release.write_json(directory / "thin-artifacts.json", dict(
             schemaVersion=1, kind="thin", groupId="com.zilliz", version=self.plan["version"],
             sourceSha=self.plan["sourceSha"], sparkLine="4.0", sparkVersion=spark_build_version,
-            scalaVersion=line["scala"], scalaBinaryVersion="2.13", migrationState="transition", modules=modules))
+            scalaVersion=line["scala"], scalaBinaryVersion="2.13", migrationState="read-only", modules=modules))
 
     def thin_only(self):
         self.plan.update(distribution="thin", native=[], jvm=[item for item in self.plan["jvm"] if item["line"] == "4.0"])
@@ -174,7 +175,7 @@ class ReleaseTest(unittest.TestCase):
 
     def test_both_entries_share_exact_bottom_level_artifacts(self):
         manifest = self.stage()
-        self.assertEqual(len(manifest["artifacts"]), 68)
+        self.assertEqual(len(manifest["artifacts"]), 60)
         entries = [item for item in manifest["artifacts"] if item["kind"] == "entry" and item["extension"] == "pom"]
         self.assertEqual(len(entries), 6)
         self.assertEqual(len(release.entry_dependencies(self.plan, "4.0", None)), 3)
@@ -196,8 +197,8 @@ class ReleaseTest(unittest.TestCase):
 
         self.rewrite_thin_export(artifact, lambda path: self.modify_pom(path, exclude_arrow))
         manifest = self.stage()
-        self.assertEqual(len(manifest["artifacts"]), 28)
-        self.assertEqual(manifest["thin"]["migrationState"], "transition")
+        self.assertEqual(len(manifest["artifacts"]), 20)
+        self.assertEqual(manifest["thin"]["migrationState"], "read-only")
         self.assertEqual({item["kind"] for item in manifest["artifacts"]}, {"thin"})
         for record in manifest["artifacts"]:
             source = self.inputs / "thin-4.0" / record["artifactId"] / Path(record["path"]).name
@@ -206,7 +207,7 @@ class ReleaseTest(unittest.TestCase):
                    if record["artifactId"] == artifact and record["extension"] == "pom")
         _, dependencies = release.pom_dependencies(self.output / "repository" / pom["path"])
         self.assertEqual({dep["artifactId"] for dep in dependencies if dep["groupId"] == "com.zilliz"},
-                         {"spark-milvus-core_2.13", "spark-milvus-compat_2.13", "spark-milvus-client_2.13"})
+                         {"spark-milvus-core_2.13"})
 
     def test_full_candidate_requires_thin_modules(self):
         shutil.rmtree(self.inputs / "thin-4.0")
@@ -226,12 +227,12 @@ class ReleaseTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate thin module GAV"):
             self.stage()
 
-    def test_thin_export_cannot_claim_final_readonly_state(self):
+    def test_thin_export_cannot_claim_transitional_state(self):
         path = self.inputs / "thin-4.0" / "thin-artifacts.json"
         data = json.loads(path.read_text())
-        data["migrationState"] = "readonly"
+        data["migrationState"] = "transition"
         release.write_json(path, data)
-        with self.assertRaisesRegex(ValueError, "must be transition"):
+        with self.assertRaisesRegex(ValueError, "must be read-only"):
             self.stage()
 
     def test_thin_build_version_cannot_exceed_or_change_consumer_line(self):
@@ -267,7 +268,7 @@ class ReleaseTest(unittest.TestCase):
             self.stage()
 
     def test_thin_pom_cannot_hide_internal_dependency_as_provided(self):
-        artifact = "spark-milvus-compat_2.13"
+        artifact = "spark-milvus-4.0-thin_2.13"
         dependencies = [dict(groupId="com.zilliz", artifactId="spark-milvus-core_2.13",
                              version=self.plan["version"], scope="provided")]
         self.rewrite_thin_export(artifact, lambda path: path.write_bytes(release.pom_bytes(artifact, self.plan, dependencies)))
@@ -301,7 +302,7 @@ class ReleaseTest(unittest.TestCase):
                     self.stage()
 
     def test_thin_modules_cannot_duplicate_shared_proto_classes(self):
-        self.rewrite_thin_export("spark-milvus-client_2.13", lambda path: self.jar(path, {
+        self.rewrite_thin_export("spark-milvus-native-storage_2.13", lambda path: self.jar(path, {
             "fixture/core/Api.class": "duplicate generated schema"}), extension="jar")
         with self.assertRaisesRegex(ValueError, "Duplicate thin class"):
             self.stage()
@@ -315,7 +316,7 @@ class ReleaseTest(unittest.TestCase):
     def test_candidate_rechecks_thin_pom_graph_after_rehash(self):
         manifest = self.stage()
         record = next(item for item in manifest["artifacts"]
-                      if item["artifactId"] == "spark-milvus-compat_2.13" and item["extension"] == "pom")
+                      if item["artifactId"] == "spark-milvus-core_2.13" and item["extension"] == "pom")
         self.rewrite_file(manifest, record, release.pom_bytes(record["artifactId"], self.plan, []))
         with self.assertRaisesRegex(ValueError, "Wrong thin internal dependency graph"):
             release.verify(self.output)
@@ -387,11 +388,78 @@ class ReleaseTest(unittest.TestCase):
                 self.rewrite_file(manifest, record, path.read_bytes())
                 with self.assertRaisesRegex(ValueError, "JVM JAR embeds the official Milvus SDK"):
                     release.verify(self.output)
-        self.jar(path, {**original,
-                        "io/milvus/grpc/milvus/MilvusServiceGrpc.class": b"generated protocol",
-                        "com/zilliz/milvus/client/api/MilvusClient.class": b"transitional client"})
-        self.rewrite_file(manifest, record, path.read_bytes())
-        release.verify(self.output)
+        for name in ("io/milvus/grpc/milvus/MilvusServiceGrpc.class",
+                     "milvus/proto/feder/feder/FederProto.scala",
+                     "milvus/proto/msg/msg/MsgProto.class",
+                     "milvus/proto/tokenizer/tokenizer/TokenizerGrpc.class",
+                     "com/zilliz/milvus/client/api/MilvusClient.class",
+                     "com/zilliz/milvus/storage/compat/backup/BackupReader.class",
+                     "com/zilliz/spark/connector/procedure/CallProcedure.class"):
+            with self.subTest(name=name):
+                self.jar(path, {**original, name: b"retired capability"})
+                self.rewrite_file(manifest, record, path.read_bytes())
+                with self.assertRaisesRegex(ValueError, "retired write/control/compatibility"):
+                    release.verify(self.output)
+
+    def test_public_surface_rejects_write_methods_and_backup_options(self):
+        for name, value in (
+                ("com/zilliz/spark/connector/implicits/MilvusDataFrame.class", b"writeSnapshot"),
+                ("com/zilliz/spark/connector/implicits/MilvusDataFrame.scala", b"def buildIndex()"),
+                ("com/zilliz/spark/connector/options/MilvusOption.scala", b'val BackupDir = "milvus.backup.dir"')):
+            with self.subTest(name=name):
+                path = self.root / "surface.jar"
+                self.jar(path, {name: value})
+                with zipfile.ZipFile(path) as archive, self.assertRaisesRegex(ValueError, "retired"):
+                    release.verify_read_only(archive, archive.namelist())
+
+    def test_migrated_classes_fail_in_binary_and_source_archives(self):
+        for base in ("com/zilliz/milvus/jni/vector/NativeVectorIndexBuilder",
+                     "com/zilliz/milvus/storage/manifest/SnapshotSegmentWriter",
+                     "com/zilliz/milvus/storage/codec/SegmentIndexObjects",
+                     "com/zilliz/milvus/storage/codec/IndexObjectTarget",
+                     "com/zilliz/milvus/storage/codec/WrittenIndexObject",
+                     "com/zilliz/milvus/storage/snapshot/V2ColumnGroup",
+                     "com/zilliz/milvus/storage/snapshot/V2SegmentResolver",
+                     "com/zilliz/milvus/storage/snapshot/SnapshotOrigin$Backup",
+                     "com/zilliz/milvus/storage/snapshot/SegmentLayout$ColumnGroups",
+                     "com/zilliz/spark/connector/read/V2ColumnBinding",
+                     "com/zilliz/spark/connector/metrics/WriteMetricsReport"):
+            for suffix in (".java", ".scala", ".class", "$.class"):
+                name = base + suffix
+                with self.subTest(name=name):
+                    path = self.root / "migrated.jar"
+                    self.jar(path, {name: b"retired capability"})
+                    with zipfile.ZipFile(path) as archive, self.assertRaisesRegex(
+                            ValueError, "retired write/control/compatibility"):
+                        release.verify_read_only(archive, archive.namelist())
+
+    def test_retired_options_rejection_literals_are_allowed_but_accessors_fail(self):
+        def constants(*values):
+            header = b"\xca\xfe\xba\xbe" + struct.pack(">HHH", 0, 55, len(values) + 1)
+            return header + b"".join(b"\x01" + struct.pack(">H", len(value)) + value.encode()
+                                     for value in values)
+
+        for suffix, contents, failure in (
+                (".scala", b'private val RetiredOptions = Set("milvus.uri", "milvus.backup.dir")', False),
+                ("$.class", constants("RetiredOptions", "milvus.uri", "milvus.backup.dir"), False),
+                ("$.class", constants("MilvusUri", "milvus.uri"), True),
+                (".class", constants("uri", "()Ljava/lang/String;"), True),
+                (".scala", b'case class MilvusOption(uri: String)', True)):
+            path = self.root / "options.jar"
+            self.jar(path, {"com/zilliz/spark/connector/options/MilvusOption" + suffix: contents})
+            with self.subTest(suffix=suffix, contents=contents), zipfile.ZipFile(path) as archive:
+                if failure:
+                    with self.assertRaisesRegex(ValueError, "retired backup/service members"):
+                        release.verify_read_only(archive, archive.namelist())
+                else:
+                    release.verify_read_only(archive, archive.namelist())
+
+    def test_low_level_upstream_native_apis_remain_allowed(self):
+        path = self.root / "upstream.jar"
+        self.jar(path, {"io/knowhere/Knowhere.class": b"buildIndex",
+                        "io/milvus/storage/MilvusStorageWriter.class": b"write"})
+        with zipfile.ZipFile(path) as archive:
+            release.verify_read_only(archive, archive.namelist())
 
     def test_platform_entry_cannot_transitively_pull_universal_entry(self):
         manifest = self.stage()
@@ -472,7 +540,7 @@ class ReleaseTest(unittest.TestCase):
             manifest = release.download_deployment(
                 self.output, downloaded, self.DEPLOYMENT, "token")
 
-        self.assertEqual(len(paths), 340)
+        self.assertEqual(len(paths), 300)
         self.assertEqual(manifest, release.verify(downloaded))
 
     def test_upload_is_user_managed_and_keeps_the_token_off_argv(self):
@@ -647,7 +715,7 @@ class ReleaseTest(unittest.TestCase):
     def test_source_jar_requires_nonempty_api_sources_and_no_binary(self):
         path = self.root / "sources.jar"
         artifact = "spark-milvus-4.0-thin_2.13"
-        sources = {name: "source" for name in release.THIN_SOURCES["spark40"]}
+        sources = {name: "source" for name in release.THIN_SOURCES["spark"]}
         for contents, message in (({"README.md": "placeholder"}, "missing API sources"),
                                   (dict.fromkeys(sources, ""), "empty API sources"),
                                   (sources | {"Bad.class": "binary"}, "binary implementation")):

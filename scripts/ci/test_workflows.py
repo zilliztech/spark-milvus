@@ -44,10 +44,10 @@ class WorkflowGateTest(unittest.TestCase):
                                      "github.event_name != 'pull_request' || inputs.full_validation == true")
                 else:
                     self.assertNotIn("if", job)
-        legacy = jobs["build-and-test"]
-        self.assertTrue(any(step.get("run") == "sbt test" for step in legacy["steps"]))
+        aggregate = jobs["build-and-test"]
+        self.assertTrue(any(step.get("run") == "sbt test" for step in aggregate["steps"]))
         self.assertTrue(any("read_validation.py clean" in step.get("run", "")
-                            for step in legacy["steps"]))
+                            for step in aggregate["steps"]))
 
     def test_real_storage_reads_run_with_two_identities_and_always_clean_up(self):
         steps = workflow("ci.yml")["jobs"]["spark-native"]["steps"]
@@ -65,9 +65,10 @@ class WorkflowGateTest(unittest.TestCase):
     def test_helm_lints_the_service_free_read_mode(self):
         steps = workflow("ci.yml")["jobs"]["integration-helm"]["steps"]
         lint = next(step for step in steps if "helm lint" in step.get("run", ""))
-        for values in ("ci-values.example.yaml", "ci-values.managed.example.yaml",
-                       "ci-values.read.example.yaml"):
+        for values in ("ci-values.read.example.yaml",):
             self.assertIn("-f deploy/helm/spark-milvus-integration/" + values, lint["run"])
+        self.assertNotIn("ci-values.managed", lint["run"])
+        self.assertNotIn("/ci-values.example", lint["run"])
 
     def test_release_plan_uses_versions_export_without_an_independent_jvm_matrix(self):
         steps = workflow("build-artifacts.yml")["jobs"]["plan"]["steps"]
@@ -327,7 +328,7 @@ class WorkflowGateTest(unittest.TestCase):
         export = next(step for step in steps if "releaseThinArtifacts" in step.get("run", ""))
         self.assertEqual(export["if"], "matrix.line == '4.0'")
         self.assertEqual(export["env"]["RELEASE_VERSION"], "${{ inputs.version }}")
-        self.assertIn('"-Drelease.version=$RELEASE_VERSION" "spark40/releaseThinArtifacts"', export["run"])
+        self.assertIn('"-Drelease.version=$RELEASE_VERSION" "spark/releaseThinArtifacts"', export["run"])
         upload = next(step for step in steps if step.get("with", {}).get("name") == "thin-${{ matrix.line }}")
         self.assertEqual(upload["if"], export["if"])
         self.assertEqual(upload["with"]["path"], "target/release-thin/${{ matrix.line }}/")

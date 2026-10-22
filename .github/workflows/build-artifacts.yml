@@ -272,13 +272,14 @@ jobs:
       - name: Build the JVM artifact without a native bundle
         env:
           RELEASE_VERSION: ${{ inputs.version }}
-          SBT_PROJECT: ${{ matrix.project }}
-        run: sbt "-Drelease.version=$RELEASE_VERSION" "$SBT_PROJECT/releaseJvmArtifacts"
+          SPARK_LINE: ${{ matrix.line }}
+          SCALA_VERSION: ${{ matrix.scala }}
+        run: sbt "-DsparkVersion=$SPARK_LINE" "-DscalaVersion=$SCALA_VERSION" "-Drelease.version=$RELEASE_VERSION" "spark/releaseJvmArtifacts"
       - name: Export transitive thin modules for Spark 4.0
         if: matrix.line == '4.0'
         env:
           RELEASE_VERSION: ${{ inputs.version }}
-        run: sbt "-Drelease.version=$RELEASE_VERSION" "spark40/releaseThinArtifacts"
+        run: sbt -DsparkVersion=4.0 -DscalaVersion=2.13.16 "-Drelease.version=$RELEASE_VERSION" "spark/releaseThinArtifacts"
       - uses: actions/upload-artifact@v4
         with:
           name: jvm-${{ matrix.line }}

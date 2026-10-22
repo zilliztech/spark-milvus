@@ -3,7 +3,10 @@
 # Description: Build both upstream JNI libraries with one dynamic dependency set
 
 # Configuration
-SCALA_VERSION := 2.13
+SCALA_VERSION ?= 2.13.16
+SCALA_BINARY_VERSION := $(shell printf '%s' "$(SCALA_VERSION)" | cut -d. -f1-2)
+SPARK_VERSION ?= 4.0
+DEMO_ARGS ?=
 SBT := sbt
 # On macOS `which java` is often the /usr/bin stub, so prefer a JDK 21 that
 # java_home or Homebrew knows about before deriving it from the java binary.
@@ -44,7 +47,8 @@ NATIVE_BUNDLE_OUTPUT ?= $(NATIVE_WORK_DIR)/milvus-native-$(NATIVE_PLATFORM).jar
 # GNU Make's abspath treats spaces as separate paths. Keep each input intact.
 absolute_path = $(if $(filter /%,$(firstword $(1))),$(1),$(CURDIR)/$(1))
 NATIVE_BUNDLE_JAR := $(call absolute_path,$(if $(strip $(NATIVE_BUNDLE)),$(NATIVE_BUNDLE),$(NATIVE_BUNDLE_OUTPUT)))
-NATIVE_SBT = $(SBT) "-Dmilvus.native.bundle=$(NATIVE_BUNDLE_JAR)"
+SELECTED_SBT = $(SBT) "-DsparkVersion=$(SPARK_VERSION)" "-DscalaVersion=$(SCALA_VERSION)"
+NATIVE_SBT = $(SELECTED_SBT) "-Dmilvus.native.bundle=$(NATIVE_BUNDLE_JAR)"
 # The JVM's signal-chaining library, by the platform's preload mechanism.
 ifeq ($(UNAME_S),Darwin)
   NATIVE_TEST_ENV = DYLD_INSERT_LIBRARIES="$(JAVA_HOME)/lib/libjsig.dylib"
@@ -78,7 +82,7 @@ help:
 	@echo "  $(GREEN)package$(NC)                - Package JAR with the selected platform resources"
 	@echo "  $(GREEN)test$(NC)                   - Type-check tests (incl. integration) and run unit tests"
 	@echo "  $(GREEN)compile-it$(NC)             - Type-check integration tests (no external services)"
-	@echo "  $(GREEN)run-demo$(NC)               - Run the read/search demo (needs Milvus 3.0+, MinIO and SPARK_HOME)"
+	@echo "  $(GREEN)run-demo$(NC)               - Read/search CANDIDATE with DEMO_ARGS (requires SPARK_HOME)"
 	@echo "  $(GREEN)init-submodules$(NC)        - Initialize Git submodules"
 	@echo "  $(GREEN)status$(NC)                 - Show build status"
 	@echo ""
@@ -87,7 +91,7 @@ help:
 	@echo "  SCALA_VERSION=$(SCALA_VERSION)"
 	@echo "  NATIVE_WORK_DIR=$(NATIVE_WORK_DIR)"
 	@echo "  NATIVE_JOBS=$(NATIVE_JOBS) (1..50)"
-	@echo "  NATIVE_BUILD_OPTIONS=$(NATIVE_BUILD_OPTIONS) (for example --with-cardinal)"
+	@echo "  NATIVE_BUILD_OPTIONS=$(NATIVE_BUILD_OPTIONS) (optional native driver arguments; public builds use OSS)"
 	@echo "  NATIVE_BUNDLE=$(NATIVE_BUNDLE) (prebuilt platform JAR plus .properties)"
 	@echo "  NATIVE_BUNDLE_OUTPUT=$(NATIVE_BUNDLE_OUTPUT)"
 	@echo "  Without NATIVE_BUNDLE, the platform's profile under native-build/profiles/ builds both engines."
@@ -97,7 +101,7 @@ help:
 # Initialize Git submodules
 init-submodules:
 	@echo "$(BLUE)Initializing Git submodules...$(NC)"
-	@git submodule update --init --recursive
+	@git submodule update --init --recursive milvus-proto milvus-storage knowhere
 	@echo "$(GREEN)Submodules initialized$(NC)"
 
 # Preserve initialized worktrees so the builder records their actual revisions and changes.
@@ -136,19 +140,19 @@ clean:
 	@rm -rf $(TARGET_DIR)
 	@rm -rf project/target
 	@rm -rf project/project
-	@$(SBT) clean
+	@$(SELECTED_SBT) "clean; integration/clean"
 	@echo "$(GREEN)Clean complete$(NC)"
 
 # Package JAR with the platform's unified native bundle.
 package: native-bundle
 	@echo "$(BLUE)Packaging JAR with $(NATIVE_BUNDLE_JAR)...$(NC)"
-	@$(NATIVE_SBT) package
+	@$(NATIVE_SBT) spark/assembly
 	@echo "$(GREEN)Packaging complete$(NC)"
 
 # Run tests
 test: package
 	@echo "$(BLUE)Type-checking integration tests...$(NC)"
-	@$(NATIVE_SBT) "integration40/Test/compile"
+	@$(NATIVE_SBT) "integration/Test/compile"
 	@echo "$(BLUE)Running unit tests...$(NC)"
 	@$(NATIVE_TEST_ENV) $(NATIVE_SBT) test
 	@echo "$(GREEN)Tests complete$(NC)"
@@ -156,13 +160,14 @@ test: package
 # Type-check integration tests only (no Milvus/MinIO required at compile time)
 compile-it: package
 	@echo "$(BLUE)Type-checking integration tests...$(NC)"
-	@$(NATIVE_SBT) "integration40/Test/compile"
+	@$(NATIVE_SBT) "integration/Test/compile"
 	@echo "$(GREEN)Integration tests compile complete$(NC)"
 
-# Run the maintained read/search example after packaging the connector.
-run-demo: package
+# Consume an independently verified candidate and caller-owned fixed inputs.
+# Example: CANDIDATE=/candidate make run-demo DEMO_ARGS='--options /read.json --queries /queries.json'
+run-demo:
 	@echo "$(BLUE)Running demo...$(NC)"
-	@bash scripts/spark_submit_demo.sh
+	@bash scripts/spark_submit_demo.sh $(DEMO_ARGS)
 
 # Development targets
 rebuild:
@@ -178,4 +183,4 @@ status:
 	@printf "Unified native bundle: "
 	@if [ -s "$(NATIVE_BUNDLE_JAR)" ] && [ -s "$(NATIVE_BUNDLE_JAR).properties" ]; then echo "$(GREEN)$(NATIVE_BUNDLE_JAR)$(NC)"; else echo "$(YELLOW)not built$(NC)"; fi
 	@printf "JAR package: "
-	@if ls $(TARGET_DIR)/scala-$(SCALA_VERSION)/*.jar 1> /dev/null 2>&1; then echo "$(GREEN)✓$(NC)"; else echo "$(RED)✗$(NC)"; fi
+	@if ls spark/$(TARGET_DIR)/scala-$(SCALA_BINARY_VERSION)/*.jar 1> /dev/null 2>&1; then echo "$(GREEN)✓$(NC)"; else echo "$(RED)✗$(NC)"; fi

@@ -13,53 +13,30 @@ import ReleaseArtifacts.{
 import ThinArtifacts.{releaseThinArtifacts, thinModule}
 
 // Shared defaults. Per-line Scala and Java settings live in Modules.
-ThisBuild / scalaVersion := Versions.scala213
+ThisBuild / scalaVersion := Versions.selectedScala
 ThisBuild / versionScheme := Some("early-semver")
 
 // Runtime resources must follow every production dependency edge without
 // making Compile resolve or validate the host's native bundle.
 lazy val compileAndRuntime = "compile->compile;runtime->runtime"
 
-// Root keeps the existing cloud artifact while sources live in the modules.
+// The root is an aggregate only. Select one Spark line per sbt invocation.
 lazy val root = project
   .in(file("."))
-  // Live-service suites run explicitly through integration40/test.
-  .aggregate(
-    nativeRuntime,
-    nativeStorage,
-    nativeVector,
-    core,
-    compat,
-    client,
-    spark35,
-    spark40,
-    spark41,
-    spark42,
-    apps40
-  )
-  .dependsOn(spark40 % compileAndRuntime, apps40 % compileAndRuntime)
+  .aggregate(nativeRuntime, nativeStorage, nativeVector, core, spark)
   .settings(
     name := "spark-milvus",
-    moduleName := "spark-connector",
     CapabilityIndex.settings,
     ReadValidation.matrixSettings,
-    Compile / compile / parallelExecution := true,
-    libraryDependencies ++= Dependencies.legacyRootDeps,
-    // One Jackson version set in the fat jar (see Modules.jacksonPin).
-    Modules.jacksonPin,
-    publish / skip := false,
+    publish / skip := true,
     publish / aggregate := false,
     publishLocal / aggregate := false,
     assembly / aggregate := false,
-    Compile / packageBin := assembly.value,
+    assembly := sys.error("Use spark/assembly for the selected Spark line"),
     releaseJvmArtifacts / aggregate := false,
-    releaseJvmArtifacts :=
-      (spark40 / releaseJvmArtifacts).value ++ (spark42 / releaseJvmArtifacts).value,
+    releaseJvmArtifacts := (spark / releaseJvmArtifacts).value,
     releaseThinArtifacts / aggregate := false,
-    releaseThinArtifacts := (spark40 / releaseThinArtifacts).value,
-    rootRunSettings,
-    rootAssemblySettings,
-    rootPublishingSettings
+    releaseThinArtifacts := (spark / releaseThinArtifacts).value
   )
 
 // Layer 1: upstream native bindings. Storage's Scala API is cross-built;
@@ -200,8 +177,8 @@ lazy val core = project
       // builds its codec factory on a Hadoop Configuration, so the class has
       // to be on the classpath even for the in-memory reads core does.
       hadoopCommon,
-      // Three formats the storage layer itself needs: snapshots and backup
-      // metadata are JSON, segment manifests are Avro, delete files and column
+      // Three formats the storage layer itself needs: snapshots
+      // are JSON, segment manifests are Avro, delete files and column
       // groups are Parquet.
       jacksonDatabind,
       jacksonScala,
@@ -217,7 +194,7 @@ lazy val core = project
     // structs across, which needs the library path and the java.nio add-opens
     // the Spark lines already get.
     inConfig(Test)(Modules.nativeTest),
-    // Storage schemas belong to core; service stubs in client reuse them.
+    // Only storage schema messages are generated; no service stubs belong here.
     Compile / PB.protoSources := Seq(milvusProtoDir.value),
     Compile / PB.generate / includeFilter := "common.proto" | "schema.proto",
     Compile / PB.targets := Seq(
@@ -225,192 +202,70 @@ lazy val core = project
     )
   )
 
-// Adapters for the three non-standard entry points. Each one produces a core
-// Snapshot or SegmentReader.
-lazy val compat = project
-  .in(file("compat"))
-  // test->test as well: the format suites here share core's LocalObjectStore
-  // fixture, which stands in for the native store so parser tests need no .so.
+// Layer 3: one module with shared sources and explicitly selected shims.
+lazy val spark = Project("spark", file("spark"))
   .dependsOn(core % s"$compileAndRuntime;test->test")
+  .configs(ReleaseJvm)
   .settings(
-    name := "compat",
-    moduleName := "spark-milvus-compat",
-    Modules.sparkFreeModuleSettings,
-    ThinArtifacts.settings("compat", Versions.sharedJavaRelease),
+    name := "spark",
+    moduleName := s"spark-milvus-${Versions.selected.id}",
+    Modules.perLine(Versions.selected),
+    Modules.sparkSources(Versions.selected),
     ReadValidation.artifactSettings,
-    Modules.jacksonPin,
     publish / skip := true,
-    libraryDependencies ++= Seq(
-      hadoopCommon,
-      jacksonDatabind,
-      jacksonScala,
-      avro,
-      parquetHadoop,
-      // The tests write real parquet with parquet-mr's ExampleParquetWriter,
-      // which needs FileOutputFormat. The production path does not, so this
-      // stays in Test scope.
-      hadoopMapreduceClientCore % Test,
-      scalaTest % Test
-    )
-  )
-
-// The client for the online Milvus service: the calls behind DDL, delete and
-// the procedures.
-lazy val client = project
-  .in(file("client"))
-  .dependsOn(core % compileAndRuntime)
-  .settings(
-    name := "client",
-    moduleName := "spark-milvus-client",
-    Modules.sparkFreeModuleSettings,
-    ThinArtifacts.settings("client", Versions.sharedJavaRelease),
-    ReadValidation.artifactSettings,
-    Modules.jacksonPin,
-    publish / skip := true,
-    libraryDependencies ++= Seq(
-      grpcNetty,
-      scalapbRuntime % "protobuf",
-      scalapbRuntimeGrpc,
-      jacksonDatabind,
-      jacksonScala,
-      scalaTest % Test
-    ),
-    // Generate only service protos; import the message classes from core.
-    Compile / PB.protoSources := Seq(milvusProtoDir.value),
-    Compile / PB.generate / excludeFilter := "common.proto" | "schema.proto",
-    Compile / PB.targets := Seq(
-      scalapb.gen(grpc = true) -> (Compile / sourceManaged).value / "scalapb"
-    )
-  )
-
-// Layer 3: each Spark line compiles spark-base against its own dependencies.
-def sparkProject(l: Versions.SparkLine): Project =
-  Project(l.projectId, file(s"spark-${l.id}"))
-    .dependsOn(
-      core % compileAndRuntime,
-      compat % compileAndRuntime,
-      client % compileAndRuntime
-    )
-    .enablePlugins(Antlr4Plugin)
-    .settings(
-      name := s"spark-${l.id}",
-      moduleName := s"spark-milvus-${l.id}",
-      Modules.perLine(l),
-      ReadValidation.artifactSettings,
-      publish / skip := true,
-      Compile / unmanagedSourceDirectories +=
-        (ThisBuild / baseDirectory).value / "spark-base" / "src" / "main" / "scala",
-      Compile / unmanagedResourceDirectories +=
-        (ThisBuild / baseDirectory).value / "spark-base" / "src" / "main" / "resources",
-      libraryDependencies ++=
-        Dependencies.sparkDeps(l) ++ Dependencies.arrowDeps(l) ++ Dependencies
-          .legacyDeps(l),
-      // The line's classpath is the distribution's: see Dependencies.lineOverrides.
-      dependencyOverrides ++= Dependencies.lineOverrides(l),
-      // The CALL grammar is shared; its parser is generated here at this line's
-      // antlr version and runs on the antlr Spark ships, hence provided.
-      Antlr4 / sourceDirectory :=
-        (ThisBuild / baseDirectory).value / "spark-base" / "src" / "main" / "antlr4",
-      Antlr4 / antlr4Version := l.antlr,
-      Antlr4 / antlr4PackageName :=
-        Some("com.zilliz.spark.connector.extensions.parser"),
-      Antlr4 / antlr4GenListener := false,
-      Antlr4 / antlr4GenVisitor := true,
-      libraryDependencies := libraryDependencies.value.map { m =>
-        if (m.organization == "org.antlr" && m.name == "antlr4-runtime")
-          m % "provided"
-        else m
-      },
-      libraryDependencies += scalaTest % Test,
-      inConfig(Test)(Modules.nativeTest),
-      Test / envVars += {
-        val jdk =
-          (Test / javaHome).value.getOrElse(file(sys.props("java.home")))
-        val (variable, library) = Modules.signalChaining(jdk)
-        variable -> library.getAbsolutePath
-      },
-      // Spill changes process-wide thresholds; retry requires its own master.
-      // Give each suite a separate JVM with this line's Java and environment.
-      Test / testGrouping := {
-        val groups = (Test / testGrouping).value
-        val options = (Test / forkOptions).value
-        groups.flatMap { group =>
-          val isolatedNames = Set(
-            "com.zilliz.spark.connector.search.SearchMergeTest",
-            "com.zilliz.spark.connector.read.V3ReadContractTest"
+    libraryDependencies ++= Dependencies.sparkDeps(Versions.selected) ++
+      Dependencies.arrowDeps(Versions.selected) ++ Dependencies.readerDeps(
+        Versions.selected
+      ),
+    dependencyOverrides ++= Dependencies.lineOverrides(Versions.selected),
+    libraryDependencies += scalaTest % Test,
+    inConfig(Test)(Modules.nativeTest),
+    Test / javaHome := (if (Versions.selected.id == "3.5")
+                          sys.env.get("SPARK35_TEST_JAVA_HOME").map(file)
+                        else None),
+    Test / envVars += {
+      val jdk =
+        (Test / javaHome).value.getOrElse(file(sys.props("java.home")))
+      val (variable, library) = Modules.signalChaining(jdk)
+      variable -> library.getAbsolutePath
+    },
+    // Spill changes process-wide thresholds; retry requires its own master.
+    // Give each suite a separate JVM with this line's Java and environment.
+    Test / testGrouping := {
+      val groups = (Test / testGrouping).value
+      val options = (Test / forkOptions).value
+      groups.flatMap { group =>
+        val isolatedNames = Set(
+          "com.zilliz.spark.connector.search.SearchMergeTest",
+          "com.zilliz.spark.connector.read.V3ReadContractTest"
+        )
+        val (isolated, remaining) =
+          group.tests.partition(test => isolatedNames(test.name))
+        if (isolated.isEmpty) Seq(group)
+        else {
+          val original =
+            if (remaining.isEmpty) Seq.empty
+            else Seq(group.withTests(remaining))
+          original ++ isolated.map(test =>
+            group
+              .withName(s"${group.name}-${test.name}")
+              .withTests(Seq(test))
+              .withRunPolicy(Tests.SubProcess(options))
           )
-          val (isolated, remaining) =
-            group.tests.partition(test => isolatedNames(test.name))
-          if (isolated.isEmpty) Seq(group)
-          else {
-            val original =
-              if (remaining.isEmpty) Seq.empty
-              else Seq(group.withTests(remaining))
-            original ++ isolated.map(test =>
-              group
-                .withName(s"${group.name}-${test.name}")
-                .withTests(Seq(test))
-                .withRunPolicy(Tests.SubProcess(options))
-            )
-          }
         }
-      },
-      // A line's assembly is its bundle, the fat jar spark-submit takes on that
-      // line. Only a line with lineBundle packs one that runs (4.2 so far), and
-      // none is published yet.
-      assembly / assemblyJarName := s"spark-milvus-${l.id}-bundle.jar",
-      assembly / artifact := (assembly / artifact).value
-        .withClassifier(Some("bundle"))
+      }
+    },
+    assembly / artifact := (assembly / artifact).value.withClassifier(
+      Some("bundle")
     )
-
-lazy val spark35 = sparkProject(Versions.line("3.5"))
-  .settings(
-    uatScenarios,
-    localCollectionSuites,
-    searchMergeSuite,
-    v3ReadContractSuite
   )
-  // The local collection suites consume core's checked read fixtures and resources.
-  .dependsOn(core % "test->test")
-  // Arrow 12, which Spark 3.5 ships, cannot allocate on JDK 21 (its MemoryUtil
-  // looks up DirectByteBuffer(long, int), gone in 21), so the line's test JVM
-  // forks from a JDK 17 when one is named, for a UAT run and for the local
-  // collection suites, which cancel on JDK 21. The other unit tests do not
-  // allocate through the C Data Interface and also pass on the build's JDK.
-  .settings(
-    Test / javaHome := sys.env.get("SPARK35_TEST_JAVA_HOME").map(file)
-  )
-lazy val spark40 = sparkProject(Versions.line("4.0"))
-  .configs(ReleaseJvm)
-  .settings(jvmReleaseSettings(Versions.line("4.0")))
+  .settings(jvmReleaseSettings(Versions.selected))
   .settings(thinReleaseSettings)
-  .settings(connectClient(Versions.line("4.0")))
-  // Reuse core's ObjectStore fixtures for source tests without loading JNI.
-  .dependsOn(core % "test->test")
-lazy val spark41 = sparkProject(Versions.line("4.1"))
   .settings(
-    uatScenarios,
-    localCollectionSuites,
-    connectSuite,
-    searchMergeSuite,
-    v3ReadContractSuite
+    if (Versions.selected.id == "3.5") Seq.empty
+    else connectClient(Versions.selected)
   )
-  .settings(connectClient(Versions.line("4.1")))
-  .dependsOn(core % "test->test")
-lazy val spark42 = sparkProject(Versions.line("4.2"))
-  .configs(ReleaseJvm)
-  .settings(jvmReleaseSettings(Versions.line("4.2")))
-  .settings(
-    uatScenarios,
-    localCollectionSuites,
-    connectSuite,
-    searchMergeSuite,
-    v3ReadContractSuite
-  )
-  .settings(connectClient(Versions.line("4.2")))
-  // The fat jar for Spark 4.2; on 4.0 it is root's.
-  .settings(lineBundle(Versions.line("4.2")))
-  .dependsOn(core % "test->test")
+  .settings(lineBundle(Versions.selected))
 
 // Spark Connect on the 4.x lines (docs/design/projects/spark-milvus/architecture/dataframe-api.html
 // section 9). The suite runs the server in its own JVM, beside the classic
@@ -439,58 +294,14 @@ def connectClient(l: Versions.SparkLine): Seq[Setting[_]] = Seq(
   }
 )
 
-// The Connect suite lives in the 4.0 line's tests and is compiled into 4.1
-// and 4.2; 3.5's Scala client has its own Dataset class and cannot take the
-// connector's.
-lazy val connectSuite: Seq[Setting[_]] = Seq(
-  Test / unmanagedSourceDirectories +=
-    (ThisBuild / baseDirectory).value / "spark-4.0" / "src" / "test" / "scala" / "com" / "zilliz" / "spark" / "connector" / "connect"
-)
-
-// The UAT scenario suite (work item #18) lives in the 4.0 line's tests and is
-// compiled into every other line as a second consumer, so one suite runs on
-// all four.
-lazy val uatScenarios: Seq[Setting[_]] = Seq(
-  Test / unmanagedSourceDirectories +=
-    (ThisBuild / baseDirectory).value / "spark-4.0" / "src" / "test" / "scala" / "com" / "zilliz" / "spark" / "connector" / "uat"
-)
-
-// The suites over a local Milvus collection, and the fixtures that write one
-// through the native libraries, live in the 4.0 line's tests and are compiled
-// into every other line, so each runs on all four: NEAREST BY (Spark's own on
-// 4.2, the connector's nearestByJoin before it) and the DataFrame methods.
-lazy val localCollectionSuites: Seq[Setting[_]] = Seq(
-  Test / unmanagedSourceDirectories ++= Seq("testkit", "nearestby", "implicits")
-    .map(dir =>
-      (ThisBuild / baseDirectory).value / "spark-4.0" / "src" / "test" / "scala" / "com" / "zilliz" / "spark" / "connector" / dir
-    )
-)
-
-// The native-free candidate merge suite exercises each line's serializers and
-// reduce-side spill. Share only this file, preserving its search package.
-lazy val searchMergeSuite: Seq[Setting[_]] = Seq(
-  Test / unmanagedSources +=
-    (ThisBuild / baseDirectory).value / "spark-4.0" / "src" / "test" / "scala" / "com" / "zilliz" / "spark" / "connector" / "search" / "SearchMergeTest.scala"
-)
-
-lazy val v3ReadContractSuite: Seq[Setting[_]] = Seq(
-  Test / unmanagedSources ++= {
-    val directory =
-      (ThisBuild / baseDirectory).value / "spark-4.0" / "src" / "test" / "scala" / "com" / "zilliz" / "spark" / "connector" / "read"
-    Seq("V3ReadContractTest.scala", "ArrowReadOwnershipTest.scala").map(
-      directory / _
-    )
-  }
-)
-
 // Thin candidates preserve module boundaries for downstream compilation. Their
 // POMs and manifests receive release coordinates without changing local modules.
 lazy val thinReleaseSettings: Seq[Setting[_]] =
-  ThinArtifacts.settings("spark40", Versions.line("4.0").javaRelease) ++ Seq(
+  ThinArtifacts.settings("spark", Versions.selected.javaRelease) ++ Seq(
     releaseThinArtifacts / aggregate := false,
     releaseThinArtifacts := ThinArtifacts.export(
       (ThisBuild / baseDirectory).value,
-      Versions.line("4.0"),
+      Versions.selected,
       scalaVersion.value,
       scalaBinaryVersion.value,
       Seq(
@@ -498,8 +309,6 @@ lazy val thinReleaseSettings: Seq[Setting[_]] =
         (nativeStorage / thinModule).value,
         (nativeVector / thinModule).value,
         (core / thinModule).value,
-        (compat / thinModule).value,
-        (client / thinModule).value,
         thinModule.value
       ),
       (Compile / fullClasspath).value ++ (Runtime / managedClasspath).value,
@@ -544,8 +353,6 @@ def jvmReleaseSettings(l: Versions.SparkLine): Seq[Setting[_]] =
         (nativeStorage / Compile / packageSrc / mappings).value ++
         (nativeVector / Compile / packageSrc / mappings).value ++
         (core / Compile / packageSrc / mappings).value ++
-        (compat / Compile / packageSrc / mappings).value ++
-        (client / Compile / packageSrc / mappings).value ++
         (Compile / packageSrc / mappings).value ++
         ReleaseArtifacts.upstreamSources((ThisBuild / baseDirectory).value),
     releaseJvmDocumentation := Seq(
@@ -553,8 +360,6 @@ def jvmReleaseSettings(l: Versions.SparkLine): Seq[Setting[_]] =
       "native-storage" -> (nativeStorage / Compile / doc).value,
       "native-vector" -> (nativeVector / Compile / doc).value,
       "core" -> (core / Compile / doc).value,
-      "compat" -> (compat / Compile / doc).value,
-      "client" -> (client / Compile / doc).value,
       s"spark-${l.id}" -> (Compile / doc).value
     ),
     releaseJvmArtifacts := ReleaseArtifacts.export(
@@ -572,8 +377,7 @@ def jvmReleaseSettings(l: Versions.SparkLine): Seq[Setting[_]] =
     )
   )
 
-// A Spark line's bundle that runs: packed by root's rules and versioned as
-// root's artifact (docs/design/projects/spark-milvus/architecture/modules.md section 4, constraints
+// The selected Spark line's local bundle (docs/design/projects/spark-milvus/architecture/modules.md section 4, constraints
 // 6 and 17).
 def lineBundle(l: Versions.SparkLine): Seq[Setting[_]] =
   fatJarRules ++ Seq(
@@ -610,95 +414,24 @@ def lineBundle(l: Versions.SparkLine): Seq[Setting[_]] =
       s"spark-milvus-${l.id}-bundle-${version.value}.jar"
   )
 
-// Layer 4: apps currently run on 4.0, so their sources need no shared directory.
-lazy val apps40 = project
-  .in(file("apps-4.0"))
-  // Reuse core's ObjectStore fixtures, as spark40 does.
-  .dependsOn(spark40 % compileAndRuntime, core % "test->test")
+// Service-free object-storage tests are explicit and outside root's aggregate.
+lazy val integration = project
+  .in(file("integration"))
+  .dependsOn(spark % compileAndRuntime)
   .settings(
-    name := "apps-4.0",
-    moduleName := "spark-milvus-apps-4.0",
-    Modules.perLine(Versions.line("4.0")),
+    name := "integration",
+    moduleName := "spark-milvus-integration",
+    Modules.perLine(Versions.selected),
     publish / skip := true,
-    libraryDependencies ++=
-      Dependencies.sparkDeps(Versions.line("4.0")) ++
-        Dependencies.arrowDeps(Versions.line("4.0")) ++
-        Dependencies.legacyDeps(Versions.line("4.0")),
-    dependencyOverrides ++= Dependencies.lineOverrides(Versions.line("4.0")),
-    // Only apps reaches for OSS types, and only in a test that asserts the
-    // Aliyun credential provider name. The four Spark lines never touch them.
-    libraryDependencies += hadoopAliyun,
-    libraryDependencies += icebergSparkRuntime,
-    libraryDependencies += scalaTest % Test,
-    inConfig(Test)(Modules.nativeTest)
-  )
-
-// Integration tests use a separate project because they need live services.
-lazy val integration40 = project
-  .in(file("integration-4.0"))
-  .dependsOn(spark40 % compileAndRuntime, apps40 % compileAndRuntime)
-  .settings(
-    name := "integration-4.0",
-    moduleName := "spark-milvus-integration-4.0",
-    Modules.perLine(Versions.line("4.0")),
-    publish / skip := true,
-    libraryDependencies += icebergSparkRuntime.withConfigurations(Some("test")),
     libraryDependencies += hadoopAws.withConfigurations(Some("test")),
-    libraryDependencies ++=
-      Dependencies
-        .sparkDeps(Versions.line("4.0"))
-        .map(_.withConfigurations(Some("test"))),
+    libraryDependencies ++= Dependencies
+      .sparkDeps(Versions.selected)
+      .map(_.withConfigurations(Some("test"))),
     libraryDependencies += scalaTest % Test,
     inConfig(Test)(Modules.nativeTest)
   )
 
-// Root implementation details. Publication and aggregation policy stay above.
-lazy val rootRunSettings: Seq[Setting[_]] = Seq(
-  // Example applications need a forked JVM and the test classpath.
-  run / fork := true,
-  run / javaOptions ++= Seq(
-    "-Xss2m",
-    "-Djava.library.path=.",
-    "--add-opens=java.base/java.nio=ALL-UNNAMED"
-  ),
-  // The JVM's signal-chaining library, by the platform's preload mechanism.
-  run / envVars := {
-    val (variable, library) = Modules.signalChaining(
-      javaHome.value.getOrElse(file(sys.props("java.home")))
-    )
-    Map(variable -> library.getAbsolutePath)
-  },
-  Compile / run / fullClasspath :=
-    (Compile / run / fullClasspath).value ++ (Test / fullClasspath).value
-)
-
-lazy val rootAssemblySettings: Seq[Setting[_]] = fatJarRules ++ Seq(
-  // Keep the filename and primary Maven artifact expected by Docker and cloud jobs.
-  assembly / assemblyJarName := s"spark-connector-assembly-${version.value}.jar",
-
-  // Preserve the generated-source mappings used by the existing root package task.
-  Compile / packageBin / mappings ++= {
-    val bases = Seq(
-      (core / Compile / PB.targets).value.head.outputPath,
-      (client / Compile / PB.targets).value.head.outputPath
-    )
-    bases.flatMap { base =>
-      (base ** "*.scala").get.map { file =>
-        file -> s"generated_protobuf/${file.relativeTo(base).getOrElse(file)}"
-      }
-    }
-  },
-
-  // Spark supplies the log binding; bundled copies conflict with it.
-  excludeDependencies ++= Seq(
-    ExclusionRule("org.slf4j", "slf4j-log4j12"),
-    ExclusionRule("org.slf4j", "slf4j-reload4j"),
-    ExclusionRule("log4j", "log4j"),
-    ExclusionRule("ch.qos.reload4j", "reload4j")
-  )
-)
-
-// How a fat jar is packed: root's, and a Spark line's bundle
+// Shared packing rules for the selected Spark bundle and JVM export
 // (docs/design/projects/spark-milvus/architecture/modules.md section 4, constraint 6).
 lazy val fatJarRules: Seq[Setting[_]] = Seq(
   assembly / parallelExecution := true,
@@ -749,7 +482,7 @@ lazy val fatJarRules: Seq[Setting[_]] = Seq(
 ThisBuild / organizationName := "zilliz"
 ThisBuild / organizationHomepage := Some(url("https://zilliz.com/"))
 ThisBuild / description :=
-  "Milvus Spark Connector to use in Spark ETLs to populate a Milvus vector database."
+  "Read and search Milvus V3 snapshots directly from Apache Spark."
 
 ThisBuild / licenses := List(
   "Server Side Public License v1" -> URI
@@ -798,7 +531,7 @@ ThisBuild / publishTo := {
   else localStaging.value
 }
 
-// Root publication inputs. Only the root artifact is released during migration.
+// Build version for the selected Spark bundle.
 lazy val arch = System.getProperty("os.arch") match {
   case "amd64" | "x86_64"  => "amd64"
   case "aarch64" | "arm64" => "arm64"
@@ -823,52 +556,7 @@ lazy val gitBranch = {
   branch.replaceAll("[^a-zA-Z0-9._-]", "-")
 }
 
-// The 2.0 version, which root's artifact and a Spark line's bundle carry.
+// The 2.0 version carried by the selected Spark bundle.
 lazy val connectorVersion = ReleaseArtifacts.requestedVersion.getOrElse(
   s"2.0.0-$gitBranch-$arch-SNAPSHOT"
-)
-
-lazy val mavenCredentialsFile = file(
-  sys.env.getOrElse(
-    "MAVEN_CREDENTIALS_FILE",
-    (Path.userHome / ".sbt" / "sonatype_central_credentials").getAbsolutePath
-  )
-)
-
-lazy val rootPublishingSettings: Seq[Setting[_]] = Seq(
-  organization := "com.zilliz",
-  version := connectorVersion,
-  Compile / packageDoc / publishArtifact := false,
-  Compile / packageSrc / publishArtifact := false,
-
-  // Embedded modules remain on the build classpath but have no published artifacts.
-  pomPostProcess := {
-    val bundledModules = Set(
-      (spark40 / organization).value ->
-        s"${(spark40 / moduleName).value}_${(spark40 / scalaBinaryVersion).value}",
-      (apps40 / organization).value ->
-        s"${(apps40 / moduleName).value}_${(apps40 / scalaBinaryVersion).value}"
-    )
-    val removeBundledModules = new scala.xml.transform.RewriteRule {
-      override def transform(node: scala.xml.Node): Seq[scala.xml.Node] =
-        node match {
-          case dependency: scala.xml.Elem
-              if dependency.label == "dependency" && bundledModules.contains(
-                (dependency \ "groupId").text -> (dependency \ "artifactId").text
-              ) =>
-            scala.xml.NodeSeq.Empty
-          case other => other
-        }
-    }
-    val transformer =
-      new scala.xml.transform.RuleTransformer(removeBundledModules)
-    (pom: scala.xml.Node) => transformer.transform(pom).head
-  },
-
-  // Keep the legacy Sonatype path as a local fallback while CI supplies an
-  // explicit credentials file for the selected Maven repository.
-  credentials += {
-    if (mavenCredentialsFile.exists) Credentials(mavenCredentialsFile)
-    else Credentials(Path.userHome / ".sbt" / "sonatype.credentials")
-  }
 )

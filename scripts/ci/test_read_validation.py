@@ -187,7 +187,7 @@ class MatrixTest(unittest.TestCase):
             "schemaVersion": 1,
             "shared": [{"scala": "2.13.16"}],
             "spark": [{"line": "4.0", "scala": "2.13.16", "scalaBinary": "2.13",
-                       "spark": "4.0.0", "project": "spark40"}],
+                       "spark": "4.0.0", "project": "spark"}],
             "release": [{"line": "4.0", "scala": "2.13.16", "compileSpark": "4.0.0"}],
         }
 
@@ -198,7 +198,7 @@ class MatrixTest(unittest.TestCase):
     def test_source_and_release_relationship_is_retained(self):
         self.assertEqual(self.read(self.matrix), self.matrix)
         self.assertEqual(validation.selected(self.matrix, "spark", "2.13.16", "4.0")["project"],
-                         "spark40")
+                         "spark")
         with self.assertRaises(ValueError):
             validation.selected(self.matrix, "spark", "2.12.20", "4.0")
 
@@ -219,33 +219,28 @@ class MatrixTest(unittest.TestCase):
                 self.read(matrix)
 
     def test_report_locations_match_project_directories(self):
-        for project, directory in (("spark35", "spark-3.5"), ("spark40", "spark-4.0"),
-                                   ("spark41", "spark-4.1"), ("spark42", "spark-4.2"),
-                                   ("integration40", "integration-4.0"), ("core", "core")):
+        for project in ("spark", "integration", "core"):
             self.assertEqual(validation.report_directory(project),
-                             validation.ROOT / directory / "target/test-reports")
+                             validation.ROOT / project / "target/test-reports")
 
-    def test_clean_build_switches_versions_in_one_process_then_removes_all_products(self):
+    def test_clean_build_reloads_selectors_and_removes_all_products(self):
         root = Path(self.temporary.name)
         matrix = copy.deepcopy(self.matrix)
         matrix["shared"] = [
             {"scala": "2.12.20", "scalaBinary": "2.12", "modules": ["core"]},
             {"scala": "2.13.16", "scalaBinary": "2.13", "modules": ["core"]},
         ]
-        matrix["spark"].insert(0, {"line": "3.5", "project": "spark35", "scala": "2.12.20",
+        matrix["spark"].insert(0, {"line": "3.5", "project": "spark", "scala": "2.12.20",
                                    "scalaBinary": "2.12", "spark": "3.5.5"})
         products = []
 
-        def sbt_outputs(name, commands):
+        def sbt_outputs(name, commands, *, line="4.0", scala="2.13.16"):
             if name == "clean-restored":
                 for product in products:
                     product.unlink()
                 return
-            scala = None
             for command in commands:
-                if command.startswith("++"):
-                    scala = command[2:]
-                elif command.endswith("/checkReadBuild"):
+                if command.endswith("/checkReadBuild"):
                     project = command.split("/")[0]
                     binary = ".".join(scala.split(".")[:2])
                     product = root / (project + "-" + binary + ".jar")
@@ -260,11 +255,14 @@ class MatrixTest(unittest.TestCase):
                 mock.patch.object(validation, "save_report") as saved, \
                 mock.patch.object(validation, "run_sbt", side_effect=sbt_outputs) as sbt:
             validation.clean_checks(matrix)
-        self.assertEqual(sbt.call_count, 2)
-        cross_commands = sbt.call_args_list[0].args[1]
-        self.assertEqual([command for command in cross_commands if command.startswith("++")],
-                         ["++2.12.20", "++2.13.16", "++2.12.20", "++2.13.16", "++2.13.16"])
-        self.assertEqual(cross_commands[-1], "integration40/Test/compile")
+        self.assertEqual(sbt.call_count, 5)
+        selected = [(call.kwargs.get("line"), call.kwargs.get("scala"))
+                    for call in sbt.call_args_list[:-1]]
+        self.assertEqual(selected, [("3.5", "2.12.20"), ("4.0", "2.13.16"),
+                                    ("3.5", "2.12.20"), ("4.0", "2.13.16")])
+        self.assertEqual(sbt.call_args_list[-1].args[1], validation.MODULE_CLEAN)
+        for call in sbt.call_args_list[:-1]:
+            self.assertEqual(call.args[1][:len(validation.MODULE_CLEAN)], validation.MODULE_CLEAN)
         self.assertTrue(all(not product.exists() for product in products))
         self.assertEqual(saved.call_args.args[1]["result"], "passed")
 

@@ -102,7 +102,7 @@ class ConsumerTest(unittest.TestCase):
 
     def thin_manifest(self):
         names = ("native-runtime", "native-vector", "native-storage_2.13",
-                 "core_2.13", "compat_2.13", "client_2.13", "4.0-thin_2.13")
+                 "core_2.13", "4.0-thin_2.13")
         return {"plan": {"distribution": "thin", "native": []},
                 "artifacts": [self.jar("spark-milvus-" + name) for name in names]}
 
@@ -110,7 +110,7 @@ class ConsumerTest(unittest.TestCase):
         manifest = self.thin_manifest()
         entry, expected = consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "thin")
         self.assertEqual(entry, "spark-milvus-4.0-thin_2.13")
-        self.assertEqual(len(consumer.check_resolved(self.ivy, expected)), 7)
+        self.assertEqual(len(consumer.check_resolved(self.ivy, expected)), 5)
         self.jar("spark-milvus-4.0-jvm_2.13")
         with self.assertRaisesRegex(RuntimeError, "different connector artifacts"):
             consumer.check_resolved(self.ivy, expected)

@@ -70,18 +70,17 @@ class SnapshotCatalogTest extends AnyFunSuite {
   private def catalog(dir: Path) =
     new SnapshotCatalog(
       new LocalObjectStore(dir.toString),
-      bucket = "",
-      V2SegmentResolver.Unavailable
+      bucket = ""
     )
 
   private val avroKey = "files/snapshots/10/manifests/1/30.avro"
 
   test(
-    "unknown data storage versions fail before a resolver can discard them"
+    "non-V3 storage versions are rejected before planning"
   ) {
     withDir { dir =>
       Files.createDirectories(dir.resolve(avroKey).getParent)
-      for (version <- Seq(0L, 1L, 4L, -1L)) {
+      for (version <- Seq(0L, 1L, 2L, 4L, -1L)) {
         Files.write(
           dir.resolve(avroKey),
           SnapshotSegmentFixture.encode(storageVersion = version)
@@ -95,23 +94,12 @@ class SnapshotCatalogTest extends AnyFunSuite {
               )
           )
           .fold(error => throw new IllegalArgumentException(error), identity)
-        val resolver = new V2SegmentResolver {
-          override def resolve(
-              entries: Seq[SnapshotSegmentEntry],
-              bucket: String,
-              store: ObjectStore
-          ): Either[Throwable, Seq[Segment]] =
-            throw new AssertionError(
-              "unsupported data must fail before resolution"
-            )
-        }
         val failure = SnapshotCatalog
           .fromMetadata(
             metadata,
             SnapshotOrigin.Options,
             new LocalObjectStore(dir.toString),
-            "",
-            resolver
+            ""
           )
           .left
           .toOption
@@ -119,10 +107,38 @@ class SnapshotCatalogTest extends AnyFunSuite {
         assert(failure.getMessage.contains(s"30=$version"))
         assert(
           failure.getMessage.contains(
-            "unsupported data segment storage version"
+            "public snapshot reads require Storage V3"
           )
         )
       }
+    }
+  }
+
+  test(
+    "a V3 segment record without its physical manifest location fails closed"
+  ) {
+    withDir { dir =>
+      writeAvro(dir, avroKey, SnapshotSegmentFixture.encode(version = 1))
+      val metadata = SnapshotJson
+        .parse(
+          snapshotJson("unlocated", 100L, Seq.empty).replace(
+            "\"manifest_list\": []",
+            "\"manifest_list\": [\"" + avroKey + "\"]"
+          )
+        )
+        .fold(throw _, identity)
+      val error = SnapshotCatalog
+        .fromMetadata(
+          metadata,
+          SnapshotOrigin.Options,
+          new LocalObjectStore(dir.toString),
+          ""
+        )
+        .left
+        .toOption
+        .get
+      assert(error.getMessage.contains("no V3 manifest location"))
+      assert(error.getMessage.contains("30"))
     }
   }
 
@@ -162,8 +178,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
       write(dir, "snapshot.json", indexedSnapshotJson)
       val snapshot = new SnapshotCatalog(
         new LocalObjectStore(dir.toString),
-        "bucket",
-        V2SegmentResolver.Unavailable
+        "bucket"
       )
         .read("snapshot.json")
       val definition = snapshot.indexes.get.head
@@ -217,7 +232,6 @@ class SnapshotCatalogTest extends AnyFunSuite {
       val snapshot = new SnapshotCatalog(
         new LocalObjectStore(dir.toString),
         "bucket",
-        V2SegmentResolver.Unavailable,
         endpoint = endpoint
       ).read("snapshot.json")
       val loaded = snapshot.segments.head.indexes
@@ -229,7 +243,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
   }
 
   test(
-    "L0 Avro entries require a resolver and retain global deletes with index metadata"
+    "legacy L0 Avro entries are rejected by the V3 reader"
   ) {
     withDir { dir =>
       val key = "files/snapshots/10/manifests/1/41.avro"
@@ -255,38 +269,10 @@ class SnapshotCatalogTest extends AnyFunSuite {
       )
       val missing =
         intercept[IllegalArgumentException](catalog(dir).read("snapshot.json"))
-      assert(missing.getMessage.contains("no V2 resolver"))
-      val resolver = new V2SegmentResolver {
-        override def resolve(
-            entries: Seq[SnapshotSegmentEntry],
-            bucket: String,
-            store: ObjectStore
-        ): Either[Throwable, Seq[Segment]] = {
-          assert(entries.head.segmentLevel == 1L)
-          Right(
-            Seq(
-              Segment.v2(
-                41L,
-                -1L,
-                0L,
-                Seq.empty,
-                Seq(DeltaLogFile(1L, "l0.log", 1L))
-              )
-            )
-          )
-        }
-      }
-      val snapshot =
-        new SnapshotCatalog(new LocalObjectStore(dir.toString), "", resolver)
-          .read("snapshot.json")
-          .narrow(Seq(20L), Seq(30L))
-      assert(snapshot.dataSegments.map(_.id) == Seq(30L))
-      assert(snapshot.deleteOnlySegments.map(_.id) == Seq(41L))
       assert(
-        snapshot.deleteOnlySegments.head.deltaLogs.map(_.logPath) == Seq(
-          "l0.log"
-        )
+        missing.getMessage.contains("public snapshot reads require Storage V3")
       )
+
     }
   }
 
@@ -306,9 +292,6 @@ class SnapshotCatalogTest extends AnyFunSuite {
       write(dir, "snapshot.json", indexedSnapshotJson)
       val snapshot = catalog(dir).read("snapshot.json")
       assert(snapshot.segments.head.indexes == SegmentIndexes.Unindexed)
-      assert(
-        Segment.v2(1L, 2L, 0L, Seq.empty).indexes == SegmentIndexes.Unknown
-      )
     }
   }
 
@@ -336,8 +319,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
         val error = intercept[IllegalArgumentException] {
           new SnapshotCatalog(
             new LocalObjectStore(dir.toString),
-            "bucket",
-            V2SegmentResolver.Unavailable
+            "bucket"
           )
             .read("snapshot.json")
         }
@@ -390,143 +372,8 @@ class SnapshotCatalogTest extends AnyFunSuite {
     }
   }
 
-  test("latest, by name and as-of pick among the collection's snapshots") {
-    withDir { dir =>
-      write(dir, "files/snapshots/10/metadata/1.json", snapshotJson("s1", 100L))
-      write(dir, "files/snapshots/10/metadata/2.json", snapshotJson("s2", 300L))
-      write(dir, "files/snapshots/10/metadata/3.json", snapshotJson("s3", 200L))
-      write(dir, "files/snapshots/10/metadata/notes.txt", "ignored")
-      val c = catalog(dir)
-      assert(c.list("files", 10L).size == 3)
-      assert(c.latest("files", 10L).name == "s2")
-      assert(c.byName("files", 10L, "s3").name == "s3")
-      assert(c.asOf("files", 10L, 250L).name == "s3")
-      assert(c.asOf("files", 10L, 100L).name == "s1")
-      val none =
-        intercept[SnapshotNotFoundException](c.asOf("files", 10L, 50L))
-      assert(none.getMessage.contains("as of 50"))
-      val missing =
-        intercept[SnapshotNotFoundException](c.byName("files", 10L, "nope"))
-      assert(missing.getMessage.contains("named 'nope'"))
-      val empty = intercept[IllegalArgumentException](c.latest("files", 11L))
-      assert(!empty.isInstanceOf[SnapshotNotFoundException])
-      assert(empty.getMessage.contains("snapshots/11/metadata/"))
-    }
-  }
-
-  test("snapshot selection rejects missing or ambiguous create_ts") {
-    withDir { dir =>
-      write(dir, "files/snapshots/10/metadata/1.json", snapshotJson("s1", 100L))
-      write(dir, "files/snapshots/10/metadata/2.json", snapshotJson("s2", 100L))
-      val tied = intercept[IllegalArgumentException](
-        catalog(dir).latest("files", 10L)
-      )
-      assert(tied.getMessage.contains("share create_ts 100"))
-      assert(tied.getMessage.contains("1.json"))
-      assert(tied.getMessage.contains("2.json"))
-
-      val withoutCreateTs =
-        snapshotJson("s3", 300L).replace(", \"create_ts\": 300", "")
-      write(dir, "files/snapshots/10/metadata/3.json", withoutCreateTs)
-      val c = catalog(dir)
-      assert(c.byName("files", 10L, "s3").name == "s3")
-      val latest = intercept[IllegalArgumentException](c.latest("files", 10L))
-      assert(latest.getMessage.contains("create_ts"))
-      assert(latest.getMessage.contains("3.json"))
-      val asOf = intercept[IllegalArgumentException](c.asOf("files", 10L, 200L))
-      assert(asOf.getMessage.contains("create_ts"))
-    }
-  }
-
   // An older snapshot whose V2 files are gone must not stop the newest one, or
   // a named one, from being read.
-  test("selection materializes only the chosen snapshot") {
-    withDir { dir =>
-      def withV2(name: String, ts: Long, avro: String) =
-        snapshotJson(name, ts, Seq.empty)
-          .replace("\"manifest_list\": []", s""""manifest_list": ["$avro"]""")
-      write(
-        dir,
-        "files/snapshots/10/metadata/1.json",
-        withV2("s1", 100L, "files/snapshots/10/manifests/1/40.avro")
-      )
-      write(
-        dir,
-        "files/snapshots/10/metadata/2.json",
-        withV2("s2", 200L, "files/snapshots/10/manifests/2/50.avro")
-      )
-      // Snapshot JSON without format_version: Avro schema version 1.
-      Seq(40L -> "1/40.avro", 50L -> "2/50.avro").foreach { case (id, file) =>
-        writeAvro(
-          dir,
-          s"files/snapshots/10/manifests/$file",
-          SnapshotSegmentFixture.encode(
-            version = 1,
-            segmentId = id,
-            rows = 1L,
-            storageVersion = 2L
-          )
-        )
-      }
-      val calls = scala.collection.mutable.ListBuffer.empty[Seq[Long]]
-      val resolver = new V2SegmentResolver {
-        override def resolve(
-            entries: Seq[SnapshotSegmentEntry],
-            bucket: String,
-            store: ObjectStore
-        ): Either[Throwable, Seq[Segment]] = {
-          calls += entries.map(_.segmentId)
-          if (entries.exists(_.segmentId == 40L))
-            Left(
-              new java.io.IOException(
-                "failed to read bytes from files/insert_log/10/20/40/100/1"
-              )
-            )
-          else
-            Right(
-              Seq(
-                Segment.v2(
-                  id = 50L,
-                  partitionId = 20L,
-                  rows = 1L,
-                  columnGroups = Seq(
-                    V2ColumnGroup(
-                      Seq(100L),
-                      Seq("files/insert_log/10/20/50/100/1"),
-                      Seq(1L),
-                      slotFieldId = 100L
-                    )
-                  ),
-                  deltaLogs = Seq.empty
-                )
-              )
-            )
-        }
-      }
-      val c =
-        new SnapshotCatalog(new LocalObjectStore(dir.toString), "", resolver)
-      assert(c.latest("files", 10L).name == "s2")
-      assert(
-        calls.toList == List(Seq(50L))
-      )
-      assert(c.byName("files", 10L, "s2").name == "s2")
-      assert(c.asOf("files", 10L, 250L).name == "s2")
-      val broken = intercept[IllegalArgumentException](
-        c.byName("files", 10L, "s1")
-      )
-      assert(
-        broken.getMessage.contains("invalid snapshot at") &&
-          broken.getMessage.contains("files/snapshots/10/metadata/1.json")
-      )
-      assert(broken.getMessage.contains("failed to read bytes"))
-      // Metadata that cannot be parsed still fails selection.
-      write(dir, "files/snapshots/10/metadata/3.json", "{not json")
-      assert(
-        intercept[IllegalArgumentException](c.latest("files", 10L)).getMessage
-          .contains("failed to parse snapshot metadata")
-      )
-    }
-  }
 
   test("snapshot materialization rejects unsafe segment ids") {
     withDir { dir =>
@@ -577,62 +424,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
         sameLineDuplicate.getMessage.contains("duplicate segment id(s): 30")
       )
 
-      val json = snapshotJson("duplicate", 200L).replace(
-        "\"manifest_list\": []",
-        "\"manifest_list\": [\"files/snapshots/10/manifests/2/30.avro\"]"
-      )
-      write(dir, "files/snapshots/10/metadata/2.json", json)
-      val resolver = new V2SegmentResolver {
-        def resolve(
-            entries: Seq[SnapshotSegmentEntry],
-            bucket: String,
-            store: ObjectStore
-        ) = Right(
-          Seq(
-            Segment.v2(
-              id = 30L,
-              partitionId = 20L,
-              rows = 1L,
-              columnGroups = Seq(
-                V2ColumnGroup(
-                  Seq(100L),
-                  Seq("files/insert_log/10/20/30/100/1"),
-                  Seq(1L),
-                  slotFieldId = 100L
-                )
-              ),
-              deltaLogs = Seq.empty
-            )
-          )
-        )
-      }
-      writeAvro(
-        dir,
-        "files/snapshots/10/manifests/2/30.avro",
-        SnapshotSegmentFixture.encode(version = 1, storageVersion = 2L)
-      )
-      val duplicate = intercept[IllegalArgumentException](
-        new SnapshotCatalog(new LocalObjectStore(dir.toString), "", resolver)
-          .read("files/snapshots/10/metadata/2.json")
-      )
-      assert(duplicate.getMessage.contains("duplicate segment id(s): 30"))
     }
-  }
-
-  test("metadataPrefix follows DataCoord's layout") {
-    assert(
-      SnapshotCatalog.metadataPrefix(
-        "files",
-        10L
-      ) == "files/snapshots/10/metadata/"
-    )
-    assert(
-      SnapshotCatalog.metadataPrefix(
-        "files/",
-        10L
-      ) == "files/snapshots/10/metadata/"
-    )
-    assert(SnapshotCatalog.metadataPrefix("", 10L) == "snapshots/10/metadata/")
   }
 
   test("a snapshot in another bucket than the catalog's is refused") {
@@ -640,8 +432,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
       write(dir, "files/snapshots/10/metadata/1.json", snapshotJson("s1", 100L))
       val c = new SnapshotCatalog(
         new LocalObjectStore(dir.toString),
-        "a",
-        V2SegmentResolver.Unavailable
+        "a"
       )
       val err = intercept[IllegalArgumentException](
         c.read("s3a://b/files/snapshots/10/metadata/1.json")
@@ -658,8 +449,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
       write(dir, "files/snapshots/10/metadata/1.json", snapshotJson("s1", 100L))
       val c = new SnapshotCatalog(
         new LocalObjectStore(dir.toString),
-        "",
-        V2SegmentResolver.Unavailable
+        ""
       )
       Seq(
         "gs://b/files/snapshots/10/metadata/1.json",
@@ -679,7 +469,6 @@ class SnapshotCatalogTest extends AnyFunSuite {
       val c = new SnapshotCatalog(
         new LocalObjectStore(dir.toString),
         "a",
-        V2SegmentResolver.Unavailable,
         endpoint = "s3.us-west-2.amazonaws.com"
       )
       // CreateSnapshot's s3_location: scheme://endpoint/bucket/key.
@@ -716,7 +505,6 @@ class SnapshotCatalogTest extends AnyFunSuite {
       partitionIds = Seq(20L),
       schemaBytes = metadata.collection.schema.toProtobufBytes,
       v3Items = metadata.storageV2ManifestList.get,
-      v2Segments = Seq.empty,
       bucket = "expected",
       origin = SnapshotOrigin.Options
     )
@@ -750,7 +538,6 @@ class SnapshotCatalogTest extends AnyFunSuite {
         partitionIds = Seq(20L),
         schemaBytes = schema.toByteArray,
         v3Items = metadata.storageV2ManifestList.get,
-        v2Segments = Seq.empty,
         bucket = "",
         origin = SnapshotOrigin.Options
       )
@@ -794,7 +581,6 @@ class SnapshotCatalogTest extends AnyFunSuite {
       val c = new SnapshotCatalog(
         new LocalObjectStore(dir.toString),
         "",
-        V2SegmentResolver.Unavailable,
         maxJsonBytes = 10L
       )
       val err = intercept[IllegalArgumentException](
@@ -811,8 +597,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
           m,
           SnapshotOrigin.Options,
           new LocalObjectStore(""),
-          "",
-          V2SegmentResolver.Unavailable
+          ""
         )
         .left
         .get
@@ -880,172 +665,4 @@ class SnapshotCatalogTest extends AnyFunSuite {
     }
   }
 
-  test(
-    "V2 segments are materialized through the resolver and deduplicated by slot"
-  ) {
-    withDir { dir =>
-      write(
-        dir,
-        "files/snapshots/10/metadata/1.json",
-        snapshotJson("s1", 100L, Seq.empty).replace(
-          "\"manifest_list\": []",
-          "\"manifest_list\": [\"files/snapshots/10/manifests/1/40.avro\"]"
-        )
-      )
-      val resolver = new V2SegmentResolver {
-        def resolve(
-            entries: Seq[SnapshotSegmentEntry],
-            bucket: String,
-            store: ObjectStore
-        ) = {
-          assert(entries.map(_.segmentId) == Seq(40L))
-          assert(entries.head.indexFiles.contains(Vector.empty))
-          Right(
-            Seq(
-              Segment.v2(
-                id = 40L,
-                partitionId = 20L,
-                rows = 2L,
-                columnGroups = Seq(
-                  V2ColumnGroup(
-                    Seq(100L, 0L, 1L),
-                    Seq("a.parquet"),
-                    Seq(2L),
-                    slotFieldId = 3L
-                  ),
-                  V2ColumnGroup(
-                    Seq(100L),
-                    Seq("b.parquet"),
-                    Seq(2L),
-                    slotFieldId = 100L
-                  )
-                ),
-                deltaLogs = Seq(DeltaLogFile(1L, "d.log", 1L))
-              ),
-              Segment.v2(
-                41L,
-                20L,
-                0L,
-                Seq.empty,
-                Seq(DeltaLogFile(2L, "l0.log", 3L))
-              )
-            )
-          )
-        }
-      }
-      writeAvro(
-        dir,
-        "files/snapshots/10/manifests/1/40.avro",
-        SnapshotSegmentFixture.encode(
-          version = 1,
-          segmentId = 40L,
-          storageVersion = 2L
-        )
-      )
-      val snapshot =
-        new SnapshotCatalog(new LocalObjectStore(dir.toString), "", resolver)
-          .read("files/snapshots/10/metadata/1.json")
-      val data = snapshot.dataSegments
-      assert(data.map(_.id) == Seq(40L))
-      val groups =
-        data.head.layout.asInstanceOf[SegmentLayout.ColumnGroups].groups
-      assert(groups.find(_.slotFieldId == 3L).get.fieldIds == Seq(0L, 1L))
-      assert(data.head.rows.contains(2L))
-      assert(
-        data.head.deletes == DeleteFiles.Listed(
-          Seq(DeltaLogFile(1L, "d.log", 1L))
-        )
-      )
-      assert(snapshot.deleteOnlySegments.map(_.id) == Seq(41L))
-    }
-  }
-
-  test(
-    "Milvus endpoint paths become bucket-relative V3, V2 data and delete keys"
-  ) {
-    withDir { dir =>
-      val json = snapshotJson(
-        "s1",
-        100L,
-        Seq(
-          (
-            30L,
-            "s3://minio:9000/milvus-bucket/files/insert_log/10/20/30"
-          )
-        )
-      ).replace(
-        "\"manifest_list\": []",
-        "\"manifest_list\": [\"s3://minio:9000/milvus-bucket/files/snapshots/10/manifests/1/40.avro\"]"
-      )
-      write(dir, "files/snapshots/10/metadata/1.json", json)
-
-      val resolver = new V2SegmentResolver {
-        def resolve(
-            entries: Seq[SnapshotSegmentEntry],
-            bucket: String,
-            store: ObjectStore
-        ) = {
-          Right(
-            Seq(
-              Segment.v2(
-                id = 40L,
-                partitionId = 20L,
-                rows = 1L,
-                columnGroups = Seq(
-                  V2ColumnGroup(
-                    Seq(100L),
-                    Seq(
-                      "s3://minio:9000/milvus-bucket/files/insert_log/10/20/40/100/1"
-                    ),
-                    Seq(1L),
-                    slotFieldId = 100L
-                  )
-                ),
-                deltaLogs = Seq(
-                  DeltaLogFile(
-                    1L,
-                    "s3://minio:9000/milvus-bucket/files/delta_log/10/20/40/1",
-                    1L
-                  )
-                )
-              )
-            )
-          )
-        }
-      }
-
-      writeAvro(
-        dir,
-        "files/snapshots/10/manifests/1/40.avro",
-        SnapshotSegmentFixture.encode(
-          version = 1,
-          segmentId = 40L,
-          rows = 1L,
-          storageVersion = 2L
-        )
-      )
-      val snapshot = new SnapshotCatalog(
-        new LocalObjectStore(dir.toString),
-        bucket = "milvus-bucket",
-        resolver,
-        endpoint = "minio:9000"
-      ).read("files/snapshots/10/metadata/1.json")
-
-      val v3 = snapshot.v3Segments.head
-      assert(
-        v3.layout == SegmentLayout.Manifest(
-          "files/insert_log/10/20/30",
-          7L
-        )
-      )
-      val v2 = snapshot.v2Segments.head
-      assert(
-        v2.columnGroups.head.filePaths ==
-          Seq("files/insert_log/10/20/40/100/1")
-      )
-      assert(
-        v2.deltaLogs.map(_.logPath) == Seq("files/delta_log/10/20/40/1")
-      )
-    }
-  }
 }

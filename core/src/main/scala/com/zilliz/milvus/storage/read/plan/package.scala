@@ -16,9 +16,9 @@ package com.zilliz.milvus.storage.read
   * decoder; `DeletePlans` supplies its borrowed store on the executor.
   *
   * `ReadPlan.of` is the planning itself: one fixed `Snapshot` becomes one task
-  * per data segment, V3 first, each with its `fs.*` map, pinned manifest
-  * version, needed field ids, snapshot row count, exact persisted index builds
-  * and applicable delete-file descriptors. `DeleteFileListing.of` opens V3
+  * per V3 data segment, each with its `fs.*` map, pinned manifest version,
+  * needed field ids, snapshot row count, exact persisted index builds and
+  * applicable delete-file descriptors. `DeleteFileListing.of` opens V3
   * manifests on the driver only to list files; it never decodes delete rows.
   * The executor does that through `core.read.exec.DeletePlans`. What only Spark
   * knows stays in `spark.read`.

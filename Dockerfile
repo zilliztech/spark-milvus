@@ -4,8 +4,6 @@
 # Build arguments
 ARG GIT_BRANCH=unknown
 ARG TARGETARCH
-ARG MAVEN_SNAPSHOT_REPOSITORY_URL=https://central.sonatype.com/repository/maven-snapshots/
-ARG MAVEN_CREDENTIALS_FILE=/run/secrets/maven_credentials
 ARG NATIVE_JOBS=50
 ARG NATIVE_BUILD_OPTIONS
 # Optional prebuilt JAR and .properties sidecar inside the build context.
@@ -152,8 +150,6 @@ FROM toolchain AS builder
 
 ARG GIT_BRANCH
 ARG TARGETARCH
-ARG MAVEN_SNAPSHOT_REPOSITORY_URL
-ARG MAVEN_CREDENTIALS_FILE
 ARG NATIVE_JOBS
 ARG NATIVE_BUILD_OPTIONS
 ARG NATIVE_BUNDLE
@@ -187,18 +183,12 @@ RUN --mount=type=cache,id=spark-milvus-conan-2-${TARGETARCH},target=/root/.conan
     && make native-resources "NATIVE_JOBS=${NATIVE_JOBS}" \
     "NATIVE_BUILD_OPTIONS=${NATIVE_BUILD_OPTIONS}" "NATIVE_BUNDLE=${NATIVE_BUNDLE}"
 
-# Build and optionally publish the runnable assembly as the primary Maven JAR.
+# Build the read-only local bundle. Maven candidates are published by release.yml.
 ENV GIT_BRANCH=${GIT_BRANCH}
-ENV MAVEN_SNAPSHOT_REPOSITORY_URL=${MAVEN_SNAPSHOT_REPOSITORY_URL}
-ENV MAVEN_CREDENTIALS_FILE=${MAVEN_CREDENTIALS_FILE}
 ENV SBT_OPTS="-Xmx4g -Xms2g"
-# PUBLISH_TO_CENTRAL is retained while Jenkins migrates to the repository-neutral flag.
-ARG PUBLISH_MAVEN
-ARG PUBLISH_TO_CENTRAL=true
 RUN --mount=type=cache,id=spark-milvus-coursier,target=/root/.cache/coursier,sharing=locked \
     --mount=type=cache,id=spark-milvus-ivy2,target=/root/.ivy2/cache,sharing=locked \
     --mount=type=cache,id=spark-milvus-sbt,target=/root/.sbt,sharing=locked \
-    --mount=type=secret,id=maven_credentials,target=/run/secrets/maven_credentials,required=false \
     set -eux; \
     case "$(uname -m)" in \
         x86_64|amd64) native_platform=linux-x86_64 ;; \
@@ -209,9 +199,9 @@ RUN --mount=type=cache,id=spark-milvus-coursier,target=/root/.cache/coursier,sha
     native_bundle="$(readlink -f "${native_bundle}")"; \
     test -s "${native_bundle}"; \
     test -s "${native_bundle}.properties"; \
-    set -- "-Dmilvus.native.bundle=${native_bundle}"; \
-    sbt "$@" "compile; Test/compile; integration40/Test/compile; assembly"; \
-    assembly_jar="$(find target/scala-2.13 -maxdepth 1 -type f -name 'spark-connector-assembly-*.jar' -print -quit)"; \
+    set -- "-DsparkVersion=4.0" "-DscalaVersion=2.13.16" "-Dmilvus.native.bundle=${native_bundle}"; \
+    sbt "$@" "compile; Test/compile; integration/Test/compile; spark/assembly"; \
+    assembly_jar="$(find spark/target/scala-2.13 -maxdepth 1 -type f -name 'spark-milvus-4.0-bundle-*.jar' -print -quit)"; \
     test -n "${assembly_jar}"; \
     test -s "${assembly_jar}"; \
     entries_file="$(mktemp)"; \
@@ -232,13 +222,7 @@ RUN --mount=type=cache,id=spark-milvus-coursier,target=/root/.cache/coursier,sha
         exit 1; \
     fi; \
     rm -f "${entries_file}" "${manifest_file}"; \
-    sha256sum "${assembly_jar}"; \
-    publish_maven="${PUBLISH_MAVEN:-${PUBLISH_TO_CENTRAL}}"; \
-    case "${publish_maven}" in true|false) ;; *) echo "PUBLISH_MAVEN must be true or false" >&2; exit 1 ;; esac; \
-    if [ "${publish_maven}" = "true" ]; then \
-        test -s "${MAVEN_CREDENTIALS_FILE}"; \
-        sbt "$@" publish; \
-    fi
+    sha256sum "${assembly_jar}"
 
 # Stage 4: retain only the built package for local inspection. The release
 # pipeline publishes the Maven artifact and does not push this image.
@@ -246,6 +230,6 @@ FROM spark:4.0.1-scala2.13-java21-python3-ubuntu AS final
 
 USER root
 WORKDIR /opt/spark-milvus
-COPY --from=builder /workspace/target/scala-2.13/spark-connector-assembly-*.jar ./
+COPY --from=builder /workspace/spark/target/scala-2.13/spark-milvus-4.0-bundle-*.jar ./
 
 CMD ["/bin/bash"]

@@ -1,6 +1,0 @@
-{
-  "milvus.backup.dir": "s3a://read-fixture/backup",
-  "fs.bucket_name": "read-fixture",
-  "milvus.database.name": "default",
-  "milvus.collection.name": "fixed_read"
-}

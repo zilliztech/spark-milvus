@@ -86,7 +86,7 @@ object ReadValidation {
       val sparkDependencies = dependencies.filter(dependency =>
         (dependency \ "groupId").text == "org.apache.spark"
       )
-      Versions.lines.find(_.projectId == project) match {
+      (if (project == "spark") Some(Versions.selected) else None) match {
         case Some(line) =>
           require(
             sparkDependencies.exists(dependency =>

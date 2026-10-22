@@ -4,13 +4,13 @@ object Versions {
   val scala212 = "2.12.20"
   val scala213 = "2.13.16"
 
-  /** `id` is the directory suffix; `projectId` is the sbt id without dots. */
+  /** A supported Spark line; all lines compile the same selected sbt project.
+    */
   final case class SparkLine(
       id: String,
       projectId: String,
       spark: String,
       arrow: String,
-      antlr: String,
       javaRelease: String,
       scalas: Seq[String],
       /** The Hadoop and Netty versions the Spark distribution ships. A line's
@@ -28,10 +28,9 @@ object Versions {
   val lines: Seq[SparkLine] = Seq(
     SparkLine(
       "3.5",
-      "spark35",
+      "spark",
       "3.5.5",
       "12.0.1",
-      "4.9.3",
       "11",
       Seq(scala212, scala213),
       hadoop = "3.3.4",
@@ -39,10 +38,9 @@ object Versions {
     ),
     SparkLine(
       "4.0",
-      "spark40",
+      "spark",
       "4.0.0",
       "18.1.0",
-      "4.13.1",
       "17",
       Seq(scala213),
       hadoop = "3.4.1",
@@ -50,10 +48,9 @@ object Versions {
     ),
     SparkLine(
       "4.1",
-      "spark41",
+      "spark",
       "4.1.1",
       "18.3.0",
-      "4.13.1",
       "17",
       Seq(scala213),
       hadoop = "3.4.2",
@@ -61,10 +58,9 @@ object Versions {
     ),
     SparkLine(
       "4.2",
-      "spark42",
+      "spark",
       "4.2.0",
       "19.0.0",
-      "4.13.1",
       "17",
       Seq(scala213),
       hadoop = "3.5.0",
@@ -74,6 +70,28 @@ object Versions {
 
   def line(id: String): SparkLine =
     lines.find(_.id == id).getOrElse(sys.error(s"unknown Spark line: $id"))
+
+  /** Select a supported compile version at build load, before dependencies
+    * resolve.
+    */
+  val selected: SparkLine = {
+    val requested = sys.props.getOrElse("sparkVersion", "4.0")
+    lines
+      .find(line => requested == line.id || requested == line.spark)
+      .getOrElse(
+        sys.error(
+          s"Unsupported -DsparkVersion=$requested; choose ${lines.map(_.id).mkString(", ")}"
+        )
+      )
+  }
+  val selectedScala: String = {
+    val requested = sys.props.getOrElse("scalaVersion", scala213)
+    require(
+      selected.scalas.contains(requested),
+      s"Spark ${selected.id} does not support Scala $requested"
+    )
+    requested
+  }
 
   /** Shared modules must remain loadable on the 3.5 line's Java baseline. */
   val sharedJavaRelease = "11"
@@ -107,7 +125,7 @@ object Versions {
       )
     )
     val shared = sharedScalas.map { scala =>
-      val modules = Seq("native-storage", "core", "compat", "client") ++
+      val modules = Seq("native-storage", "core") ++
         (if (scala == scala213) Seq("native-runtime", "native-vector")
          else Seq.empty)
       JSONObject(
@@ -146,14 +164,12 @@ object Versions {
   }
 
   val scalapb = "0.11.3"
-  val grpcJava = "1.37.0"
   val parquet = "1.13.1"
   val parquetAvro = "1.15.2"
 
   /** Layer 2's own tests; each Spark line pins its distribution's version. */
   val hadoop = "3.4.1"
   val avro = "1.12.0"
-  val iceberg = "1.10.2"
   val awsSdkV2 = "2.30.38"
   val awsSdkV1Core = "1.12.780"
   val munit = "0.7.29"
@@ -171,7 +187,4 @@ object Versions {
   /** Supplies scala.jdk.CollectionConverters on Scala 2.12. */
   val scalaCollectionCompat = "2.12.0"
 
-  /** Retained for the root's existing assembly; Spark modules use their line.
-    */
-  val legacyRootArrow = "17.0.0"
 }

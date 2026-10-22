@@ -129,7 +129,6 @@ final case class SegmentReadTask(
     */
   def readVersionOrLatest: Long = layout match {
     case SegmentLayout.Manifest(_, version)    => version
-    case SegmentLayout.ColumnGroups(_)         => -1L
     case _: SegmentLayout.PhysicalColumnGroups => -1L
   }
 
@@ -138,8 +137,7 @@ final case class SegmentReadTask(
     * manifest and only the native library has read it.
     */
   def dataFiles: Seq[String] = layout match {
-    case SegmentLayout.Manifest(_, _)   => Seq.empty
-    case SegmentLayout.ColumnGroups(gs) => gs.flatMap(_.filePaths)
+    case SegmentLayout.Manifest(_, _) => Seq.empty
     case physical: SegmentLayout.PhysicalColumnGroups =>
       physical.groups.flatMap(_.filePaths)
   }
@@ -153,8 +151,6 @@ final case class SegmentReadTask(
     */
   def expectedRows: Option[Long] = snapshotRows.orElse(layout match {
     case SegmentLayout.Manifest(_, _) => scala.None
-    case SegmentLayout.ColumnGroups(gs) =>
-      gs.headOption.map(_.fileRowCounts.sum)
     case physical: SegmentLayout.PhysicalColumnGroups =>
       physical.groups.headOption.map(_.fileRowCounts.sum)
   })
@@ -170,8 +166,6 @@ final case class SegmentReadTask(
     case Some(rows) => if (rows >= 0L) Some(rows) else None
     case None =>
       val counts = layout match {
-        case SegmentLayout.ColumnGroups(groups) =>
-          groups.map(group => group.filePaths.size -> group.fileRowCounts)
         case physical: SegmentLayout.PhysicalColumnGroups =>
           physical.groups.map(group =>
             group.filePaths.size -> group.fileRowCounts

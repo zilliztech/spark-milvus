@@ -4,7 +4,7 @@ package com.zilliz.milvus.storage
   *
   * Main types: SegmentSearch with ExactScan and IndexSearch, SearchPlan,
   * TopKMerger, CandidateBytes, CandidateDictionary, CandidateEncoding,
-  * CandidateRuns, QueryMatrix, KnowhereBuffers, MachineResources, IndexBuilder,
+  * CandidateRuns, QueryMatrix, KnowhereBuffers, MachineResources,
   * RankingFunction and EngineRange. SearchPlan cuts a search into one task per
   * segment set and query range; TopKMerger keeps each query's best k in a task,
   * and CandidateRuns batches the tasks' sorted answers for bounded multiway
@@ -12,12 +12,11 @@ package com.zilliz.milvus.storage
   * this machine's memory limit from cgroup and /proc/meminfo, which local mode
   * plans against. KnowhereBuffers hands one Arrow batch of a dense vector
   * column to Knowhere, as it lies when the layout allows and copied once
-  * otherwise. IndexBuilder gathers a segment's vectors into one buffer, builds
-  * over it and hands over what Knowhere serialized. A task loads its segment's
-  * index once and closes it; there is no cross-task index cache.
-  * IndexSearch.Pipeline overlaps collecting one group's answer with the next
-  * group's search, and SegmentSearch.Prefetcher opens the next segment's source
-  * on one background thread inside the task; neither survives the task.
+  * otherwise. A task loads its segment's index once and closes it; there is no
+  * cross-task index cache. IndexSearch.Pipeline overlaps collecting one group's
+  * answer with the next group's search, and SegmentSearch.Prefetcher opens the
+  * next segment's source on one background thread inside the task; neither
+  * survives the task.
   *
   * This package keeps the computation only
   * (docs/design/projects/spark-milvus/architecture/ vector-search.html sections
@@ -51,9 +50,7 @@ package com.zilliz.milvus.storage
   * outside UInt32 before encoding. Neither belongs to CandidateRuns merge
   * state. CandidateHeads selects from the heads of multiple sorted runs, with
   * two-run merges retaining a direct walk; KnowhereBuffers hands Arrow data
-  * buffers to Knowhere as ByteBuffers, and IndexBuilder builds a segment's
-  * index and hands its BinarySet to the Milvus TableFormat side, which encodes
-  * and writes the files (W6).
+  * buffers to Knowhere as ByteBuffers.
   *
   * A search can be ranked by a RankingFunction, the vector function of a
   * nearest-by join
@@ -74,7 +71,7 @@ package com.zilliz.milvus.storage
   * (docs/design/projects/spark-milvus/architecture/ dataframe-api.html section
   * 4).
   *
-  * Capabilities: V5, V7, V9, W6 (see
+  * Capabilities: V5, V7, V9 (see
   * docs/design/projects/spark-milvus/capabilities.md).
   */
 package object vector

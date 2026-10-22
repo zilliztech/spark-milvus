@@ -7,38 +7,18 @@ import io.milvus.grpc.schema.CollectionSchema
 
 class SnapshotTest extends AnyFunSuite with Matchers {
 
-  private val data20a = Segment.v2(
-    id = 30L,
-    partitionId = 20L,
-    rows = 1L,
-    columnGroups = Seq(V2ColumnGroup(Seq(100L), Seq("p20-a"), Seq(1L)))
-  )
-  private val data20b = Segment.v2(
-    id = 31L,
-    partitionId = 20L,
-    rows = 1L,
-    columnGroups = Seq(V2ColumnGroup(Seq(100L), Seq("p20-b"), Seq(1L)))
-  )
-  private val data21 = Segment.v2(
-    id = 40L,
-    partitionId = 21L,
-    rows = 1L,
-    columnGroups = Seq(V2ColumnGroup(Seq(100L), Seq("p21"), Seq(1L)))
-  )
-  private val l0For20 = Segment.v2(
-    id = 50L,
-    partitionId = 20L,
-    rows = 0L,
-    columnGroups = Seq.empty,
-    deltaLogs = Seq(DeltaLogFile(1L, "delete-20", 1L))
-  )
-  private val globalL0 = Segment.v2(
-    id = 51L,
-    partitionId = -1L,
-    rows = 0L,
-    columnGroups = Seq.empty,
-    deltaLogs = Seq(DeltaLogFile(2L, "delete-all", 1L))
-  )
+  private def data(id: Long, partition: Long): Segment =
+    Segment(
+      id,
+      partition,
+      3,
+      Some(1L),
+      SegmentLayout.Manifest(s"segments/$id", 1L),
+      DeleteFiles.InManifest
+    )
+  private val data20a = data(30L, 20L)
+  private val data20b = data(31L, 20L)
+  private val data21 = data(40L, 21L)
 
   private def snapshot: Snapshot = Snapshot(
     name = "fixed",
@@ -46,7 +26,7 @@ class SnapshotTest extends AnyFunSuite with Matchers {
     createdAt = Some(1L),
     schema = CollectionSchema(name = "c"),
     partitionIds = Seq(20L, 21L),
-    segments = Seq(data20a, data20b, data21, l0For20, globalL0),
+    segments = Seq(data20a, data20b, data21),
     origin = SnapshotOrigin.Options,
     bucket = ""
   )
@@ -58,18 +38,18 @@ class SnapshotTest extends AnyFunSuite with Matchers {
     selected.segments shouldBe snapshot.segments
   }
 
-  test("segment selection retains partition and collection-wide deletes") {
+  test("segment selection preserves snapshot order and partitions") {
     val selected = snapshot.narrow(Seq.empty, Seq(31L, 40L))
 
     selected.partitionIds shouldBe Seq(20L, 21L)
-    selected.segments shouldBe Seq(data20b, data21, l0For20, globalL0)
+    selected.segments shouldBe Seq(data20b, data21)
   }
 
-  test("optimizer segment retention keeps only applicable L0 sources") {
+  test("optimizer segment retention keeps the selected segments") {
     val selected = snapshot.retainDataSegments(Set(31L))
 
     selected.partitionIds shouldBe Seq(20L)
-    selected.segments shouldBe Seq(data20b, l0For20, globalL0)
+    selected.segments shouldBe Seq(data20b)
 
     val none = snapshot.retainDataSegments(Set.empty)
     none.partitionIds shouldBe empty
@@ -80,7 +60,7 @@ class SnapshotTest extends AnyFunSuite with Matchers {
     val selected = snapshot.narrow(Seq(20L), Seq(31L))
 
     selected.partitionIds shouldBe Seq(20L)
-    selected.segments shouldBe Seq(data20b, l0For20, globalL0)
+    selected.segments shouldBe Seq(data20b)
   }
 
   test("unknown partition and segment ids fail planning") {

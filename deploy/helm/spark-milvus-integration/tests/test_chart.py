@@ -1,6 +1,5 @@
-"""Render the external/managed deployment contracts without a Kubernetes cluster."""
+"""Render the public fixed-input read contract without a Kubernetes cluster."""
 
-import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -12,10 +11,9 @@ import yaml
 CHART = Path(__file__).resolve().parents[1]
 
 
-def render(managed=False, release="test-a", namespace="tests", overrides=None):
-    example = "ci-values.managed.example.yaml" if managed else "ci-values.example.yaml"
+def render(release="test-a", namespace="tests", overrides=None):
     command = ["helm", "template", release, str(CHART), "--namespace", namespace,
-               "--values", str(CHART / example)]
+               "--values", str(CHART / "ci-values.read.example.yaml")]
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml") as values:
         yaml.safe_dump(overrides or {}, values)
         values.flush()
@@ -27,7 +25,7 @@ def resources(**kwargs):
     result = render(**kwargs)
     if result.returncode:
         raise AssertionError(result.stderr)
-    return {doc["kind"]: doc for doc in yaml.safe_load_all(result.stdout) if doc}
+    return [doc for doc in yaml.safe_load_all(result.stdout) if doc]
 
 
 def pod(resource):
@@ -39,136 +37,68 @@ def environment(container):
 
 
 class ChartTest(unittest.TestCase):
-    def test_fixed_reader_has_no_service_configuration(self):
-        result = subprocess.run(["helm", "template", "reader", str(CHART), "--values",
-                                 str(CHART / "ci-values.read.example.yaml")], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        docs = list(yaml.safe_load_all(result.stdout))
+    def test_fixed_reader_has_only_two_input_identities_and_no_service_configuration(self):
+        docs = resources()
         self.assertEqual([doc["kind"] for doc in docs], ["Job"])
         spec = pod(docs[0])
         self.assertNotIn("initContainers", spec)
+        self.assertEqual(len(spec["containers"]), 1)
         env = environment(spec["containers"][0])
         self.assertEqual(set(env), {"CI_RUN_ID", "MILVUS_READ_IT_OPTIONS", "MILVUS_READ_IT_OPTIONS_B"})
+        self.assertEqual(env["MILVUS_READ_IT_OPTIONS"]["value"], "/etc/milvus-read/a.json")
+        self.assertEqual(env["MILVUS_READ_IT_OPTIONS_B"]["value"], "/etc/milvus-read/b.json")
         self.assertTrue(spec["containers"][0]["volumeMounts"][0]["readOnly"])
         self.assertEqual(spec["volumes"][0]["secret"]["secretName"], "v3-read-options")
 
-    def test_reader_rejects_service_setup(self):
-        result = render(overrides={"readOptions": {"existingSecret": "v3-read-options"}})
-        self.assertNotEqual(result.returncode, 0)
+    def test_secret_is_external_and_values_cannot_embed_credentials(self):
+        docs = resources(overrides={"readOptions": {"existingSecret": "different-identities"}})
+        self.assertEqual([doc["kind"] for doc in docs], ["Job"])
+        self.assertEqual(pod(docs[0])["volumes"][0]["secret"]["secretName"], "different-identities")
+        for values in ({"readOptions": {"token": "must-not-appear"}},
+                       {"readOptions": {"a.json": "must-not-appear"}}):
+            with self.subTest(values=values):
+                self.assertNotEqual(render(overrides=values).returncode, 0)
 
-    def test_external_instance_keeps_its_uri_and_storage_root(self):
-        docs = resources()
-        self.assertEqual(set(docs), {"Job"})
-        spec = pod(docs["Job"])
-        self.assertNotIn("initContainers", spec)
-        env = environment(spec["containers"][0])
-        self.assertEqual(env["MILVUS_UAT_URI"]["value"],
-                         "http://milvus-proxy.milvus.svc:19530")
-        self.assertEqual(env["MILVUS_JNI_S3_ROOT_PATH"]["value"], "files")
+    def test_retired_service_setup_and_write_settings_are_rejected(self):
+        for values in ({"milvus": {"uri": "http://service:19530"}},
+                       {"milvus": {"deployment": {"enabled": True}}},
+                       {"runner": {"setup": {"command": ["/private/prepare"]}}},
+                       {"objectStorage": {"writePrefix": "output"}}):
+            with self.subTest(values=values):
+                self.assertNotEqual(render(overrides=values).returncode, 0)
 
-    def test_managed_server_and_runner_use_the_same_storage_and_secret_references(self):
-        docs = resources(managed=True)
-        self.assertEqual(set(docs), {"Job", "Deployment", "Service", "ConfigMap"})
-        server = pod(docs["Deployment"])
-        runner = pod(docs["Job"])
-        env = environment(runner["containers"][0])
-        config = yaml.safe_load(docs["ConfigMap"]["data"]["user.yaml"])
-        self.assertEqual(config["minio"]["rootPath"],
-                         env["MILVUS_JNI_S3_ROOT_PATH"]["value"])
-        self.assertEqual(config["minio"]["bucketName"],
-                         env["MILVUS_JNI_S3_BUCKET"]["value"])
-        self.assertEqual(config["minio"]["port"], 443)
-        self.assertEqual(env["MILVUS_UAT_URI"]["value"],
-                         "http://" + docs["Service"]["metadata"]["name"] + ":19530")
-        self.assertTrue(config["common"]["security"]["authorizationEnabled"])
-        self.assertEqual(server["securityContext"]["runAsUser"], 999)
-        self.assertEqual([c["name"] for c in server["containers"]], ["milvus", "etcd"])
-        server_env = environment(server["containers"][0])
-        for source, target in [("MINIO_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID"),
-                               ("MINIO_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY")]:
-            self.assertEqual(server_env[source]["valueFrom"], env[target]["valueFrom"])
-        password = server_env["COMMON_SECURITY_DEFAULTROOTPASSWORD"]
-        self.assertNotIn("value", password)
-        self.assertEqual(password["valueFrom"]["secretKeyRef"]["key"], "root-password")
-        self.assertNotIn("accessKeyID", config["minio"])
-        self.assertNotIn("secretAccessKey", config["minio"])
-        self.assertFalse(server["automountServiceAccountToken"])
-        self.assertEqual(docs["Service"]["spec"]["type"], "ClusterIP")
-        self.assertEqual({p["port"] for p in docs["Service"]["spec"]["ports"]}, {19530, 9091})
-        self.assertEqual(docs["Service"]["spec"]["selector"],
-                         docs["Deployment"]["spec"]["selector"]["matchLabels"])
+    def test_input_identity_and_immutable_image_are_required(self):
+        for values in ({"readOptions": {"existingSecret": ""}},
+                       {"readOptions": {"existingSecret": "../invalid"}},
+                       {"image": {"repository": ""}},
+                       {"image": {"digest": "latest"}},
+                       {"runner": {"command": []}}):
+            with self.subTest(values=values):
+                self.assertNotEqual(render(overrides=values).returncode, 0)
 
-    def test_releases_and_namespaces_cannot_share_managed_storage_roots(self):
-        roots = set()
-        for release, namespace in [("a", "tests"), ("b", "tests"), ("a", "other")]:
-            docs = resources(managed=True, release=release, namespace=namespace)
-            env = environment(pod(docs["Job"])["containers"][0])
-            roots.add(env["MILVUS_JNI_S3_ROOT_PATH"]["value"])
-        self.assertEqual(len(roots), 3)
-        long_name = "r" * 53
-        docs = resources(managed=True, release=long_name)
-        for doc in docs.values():
-            self.assertLessEqual(len(doc["metadata"]["name"]), 63)
+    def test_security_and_single_attempt_deadline_remain_explicit(self):
+        job = resources()[0]
+        spec = pod(job)
+        self.assertEqual(job["spec"]["backoffLimit"], 0)
+        self.assertEqual(spec["restartPolicy"], "Never")
+        self.assertFalse(spec["automountServiceAccountToken"])
+        self.assertTrue(spec["securityContext"]["runAsNonRoot"])
+        self.assertFalse(spec["containers"][0]["securityContext"]["allowPrivilegeEscalation"])
+        self.assertEqual(spec["containers"][0]["securityContext"]["capabilities"]["drop"], ["ALL"])
+        self.assertIn("@sha256:", spec["containers"][0]["image"])
+        self.assertNotEqual(render(overrides={"job": {"activeDeadlineSeconds": 0}}).returncode, 0)
 
-    def test_private_setup_runs_after_readiness_with_the_exact_test_environment(self):
-        setup = {"runner": {"setup": {"command": ["/private/prepare"],
-                                       "args": ["--collection", "test-data"]}}}
-        spec = pod(resources(managed=True, overrides=setup)["Job"])
-        self.assertEqual([c["name"] for c in spec["initContainers"]],
-                         ["wait-for-milvus", "prepare-test-data"])
-        preparation = spec["initContainers"][1]
-        test = spec["containers"][0]
-        self.assertEqual(preparation["image"], test["image"])
-        self.assertEqual(preparation["env"], test["env"])
-        self.assertEqual(preparation["args"], ["--collection", "test-data"])
-        self.assertEqual(resources(managed=True)["Job"]["spec"]["backoffLimit"], 0)
-        external = pod(resources(overrides=setup)["Job"])
-        self.assertEqual([c["name"] for c in external["initContainers"]], ["prepare-test-data"])
-
-    def test_endpoint_ports_are_consistent_for_http_and_https(self):
-        for endpoint, ssl, expected in [("s3.example", False, 80),
-                                        ("s3.example", True, 443),
-                                        ("minio.example:9000", False, 9000)]:
-            docs = resources(managed=True, overrides={"objectStorage": {
-                "endpoint": endpoint, "useSSL": ssl}})
-            config = yaml.safe_load(docs["ConfigMap"]["data"]["user.yaml"])
-            self.assertEqual(config["minio"]["port"], expected)
-            self.assertEqual(config["minio"]["useSSL"], ssl)
-
-    def test_invalid_managed_or_external_configuration_is_rejected(self):
-        for managed, values in [
-            (False, {"milvus": {"uri": ""}}),
-            (True, {"milvus": {"uri": "http://unrelated:19530"}}),
-            (True, {"milvus": {"credentials": {"rootPasswordKey": ""}}}),
-            (True, {"objectStorage": {"endpoint": "https://s3.example/path"}}),
-            (True, {"objectStorage": {"endpoint": "s3.example:65536"}}),
-            (True, {"objectStorage": {"rootPath": "../existing"}}),
-            (True, {"job": {"activeDeadlineSeconds": 60}}),
-            (True, {"runner": {"setup": {"args": ["orphan-argument"]}}}),
-        ]:
-            with self.subTest(managed=managed, values=values):
-                self.assertNotEqual(render(managed=managed, overrides=values).returncode, 0)
-
-    def test_readiness_command_succeeds_when_healthy_and_fails_at_its_deadline(self):
-        init = pod(resources(managed=True)["Job"])["initContainers"][0]
-        with tempfile.TemporaryDirectory() as directory:
-            folder = Path(directory)
-            date = folder / "date"
-            date.write_text('#!/bin/sh\nif [ -f "$CHECK_MARKER" ]; then echo 9999; '
-                            'else touch "$CHECK_MARKER"; echo 0; fi\n')
-            date.chmod(0o755)
-            curl = folder / "curl"
-            env = dict(os.environ, PATH=directory + ":" + os.environ["PATH"],
-                       CHECK_MARKER=str(folder / "marker"))
-            for status in (0, 1):
-                curl.write_text(f"#!/bin/sh\nexit {status}\n")
-                curl.chmod(0o755)
-                (folder / "marker").unlink(missing_ok=True)
-                result = subprocess.run(init["command"] + init["args"], env=env,
-                                        capture_output=True, text=True, timeout=10)
-                self.assertEqual(result.returncode, status)
-                if status:
-                    self.assertIn("readiness deadline", result.stderr)
+    def test_releases_preserve_distinct_ownership_labels_and_bounded_names(self):
+        names = set()
+        for release in ("a", "b", "r" * 53):
+            job = resources(release=release)[0]
+            name = job["metadata"]["name"]
+            names.add(name)
+            self.assertLessEqual(len(name), 63)
+            self.assertEqual(job["metadata"]["labels"]["app.kubernetes.io/instance"], release)
+            self.assertEqual(job["spec"]["template"]["metadata"]["labels"]
+                             ["app.kubernetes.io/instance"], release)
+        self.assertEqual(len(names), 3)
 
 
 if __name__ == "__main__":

@@ -9,13 +9,6 @@ import org.apache.avro.io.DecoderFactory
 import org.apache.avro.util.Utf8
 import org.apache.avro.Schema
 
-import com.zilliz.milvus.storage.snapshot.{
-  DeltaLogFile,
-  Segment,
-  SegmentStatistics,
-  V2ColumnGroup
-}
-
 /** Low-level mirror of one AVRO binlog group (`AvroFieldBinlog`):
   *   - `slotFieldId`: the value milvus writes for `AvroFieldBinlog.field_id`.
   *     This is NOT the real field ID(s) inside the parquet file — it is the
@@ -84,8 +77,7 @@ case class SnapshotSegmentEntry(
   * {{{
   *   val bytes: Array[Byte] = readBytesFromS3(path)
   *   SnapshotSegmentReader.parse(bytes) match {
-  *     case Right(entry) if entry.storageVersion == 2L => ...
-  *     case Right(entry) => // skip — v0/v1/v3 handled elsewhere
+  *     case Right(entry) => // validate the storage version before planning
   *     case Left(err) => throw err
   *   }
   * }}}
@@ -165,97 +157,6 @@ object SnapshotSegmentReader extends com.zilliz.milvus.storage.Logging {
     }
   }
 
-  /** Join a snapshot segment record with the segment's `group_field_id_list`
-    * kv-metadata (read from any one of the segment's parquet files) to produce
-    * the `Segment` with real field IDs per column group.
-    *
-    * @param entry
-    *   Parsed snapshot segment record (must have `storageVersion == 2L`).
-    * @param groupFieldIdList
-    *   Positional list of groups, each element being the real field IDs carried
-    *   by that group. Obtained from `ParquetFooterReader` by splitting the kv
-    *   string `"100,0,1;101;102"` on `;` and then `,`.
-    */
-  def toSegment(
-      entry: SnapshotSegmentEntry,
-      groupFieldIdList: Seq[Seq[Long]]
-  ): Either[Throwable, Segment] = {
-    if (entry.storageVersion != 2L) {
-      Left(
-        new IllegalArgumentException(
-          s"expected storageVersion=2 (StorageV2), got ${entry.storageVersion} " +
-            s"for segmentId=${entry.segmentId}"
-        )
-      )
-    } else if (entry.binlogFiles.isEmpty) {
-      // Empty segment — no column groups to build; downstream must handle.
-      Right(
-        Segment.v2(
-          id = entry.segmentId,
-          partitionId = entry.partitionId,
-          rows = entry.numOfRows,
-          columnGroups = Seq.empty,
-          deltaLogs = entry.deltaLogFiles
-            .flatMap(_.binlogs)
-            .sortBy(_.logId)
-            .map(log =>
-              DeltaLogFile(
-                logId = log.logId,
-                logPath = log.logPath,
-                entriesNum = log.entriesNum
-              )
-            ),
-          statistics = statistics(entry)
-        )
-      )
-    } else if (entry.binlogFiles.size != groupFieldIdList.size) {
-      Left(
-        new IllegalStateException(
-          s"AVRO/parquet column-group count mismatch for segment " +
-            s"${entry.segmentId}: avro has ${entry.binlogFiles.size} " +
-            s"binlog entries but group_field_id_list has ${groupFieldIdList.size} groups"
-        )
-      )
-    } else {
-      val cgs = entry.binlogFiles
-        .zip(groupFieldIdList)
-        .map { case (afb, realFieldIds) =>
-          // Sort binlogs by logId so reads stream in row order.
-          val sorted = afb.binlogs.sortBy(_.logId)
-          V2ColumnGroup(
-            fieldIds = realFieldIds,
-            filePaths = sorted.map(_.logPath),
-            fileRowCounts = sorted.map(_.entriesNum),
-            // Surface the AVRO slot id so downstream can dedup when the same
-            // fieldID is claimed by multiple groups (e.g. an old multi-field
-            // group at slot < 100 plus a backfill-written single-field group
-            // at slot == fieldID). See Segment.dedupColumnGroupsBySlot.
-            slotFieldId = afb.slotFieldId
-          )
-        }
-      val deltaLogs = entry.deltaLogFiles
-        .flatMap(_.binlogs)
-        .sortBy(_.logId)
-        .map(log =>
-          DeltaLogFile(
-            logId = log.logId,
-            logPath = log.logPath,
-            entriesNum = log.entriesNum
-          )
-        )
-      Right(
-        Segment.v2(
-          id = entry.segmentId,
-          partitionId = entry.partitionId,
-          rows = entry.numOfRows,
-          columnGroups = cgs,
-          deltaLogs = deltaLogs,
-          statistics = statistics(entry)
-        )
-      )
-    }
-  }
-
   // -------------------------------------------------------------------------
   // Private helpers — project GenericRecord -> our case classes.
   // -------------------------------------------------------------------------
@@ -309,15 +210,6 @@ object SnapshotSegmentReader extends com.zilliz.milvus.storage.Logging {
       throw new IllegalStateException(
         s"expected boolean, got ${other.getClass.getName}: $other"
       )
-  }
-
-  private def statistics(entry: SnapshotSegmentEntry): SegmentStatistics = {
-    val byField = entry.statsLogFiles
-      .groupBy(_.slotFieldId)
-      .map { case (fieldId, groups) =>
-        fieldId -> groups.flatMap(_.binlogs).sortBy(_.logId).map(_.logPath)
-      }
-    SegmentStatistics.Listed(byField)
   }
 
   private def projectIndexes(value: Any): Vector[IndexFileEntry] = {

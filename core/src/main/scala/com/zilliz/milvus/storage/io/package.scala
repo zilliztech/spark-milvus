@@ -5,10 +5,10 @@ package com.zilliz.milvus.storage
   * NativeObjectStore owns the upstream MilvusStorageFileSystem and its
   * MilvusStorageProperties until close, and offers readAll, readAt, size, list,
   * exists and a scoped low-level filesystem operation. Business mutations
-  * belong to write.io, which wraps the same session. The upstream binding owns
-  * JNI and library loading. It is a wrapper, not an implementation: the seven
-  * cloud backends, their credential providers and the filesystem itself all
-  * live in the C layer.
+  * belong to external adapters borrowing the same session. The upstream binding
+  * owns JNI and library loading. It is a wrapper, not an implementation: the
+  * seven cloud backends, their credential providers and the filesystem itself
+  * all live in the C layer.
   *
   * A handle is a pointer inside this process. It must never reach an
   * InputPartition, which Spark serializes and ships; partitions carry the
@@ -33,7 +33,7 @@ package com.zilliz.milvus.storage
   * several threads at once.
   *
   * Main types: ObjectStore, ObjectStoreFactory, NativeObjectStore, FileInfo,
-  * ConcurrentRangeReads. Capabilities: R2, R3, W1 (see
+  * ConcurrentRangeReads. Capabilities: R2, R3 (see
   * docs/design/projects/spark-milvus/capabilities.md). Design:
   * docs/design/projects/spark-milvus/architecture/storage-access.html section
   * 4.

@@ -29,6 +29,9 @@ CORE_SUITES = (
 RUNTIME_SUITE = "com.zilliz.milvus.jni.runtime.NativeLibrariesTest"
 INTEGRATION_SUITE = "com.zilliz.spark.connector.sources.MilvusDataSourceTest"
 
+MODULE_CLEAN = [project + "/clean" for project in
+                ("native-runtime", "native-storage", "native-vector", "core", "spark", "integration")]
+
 
 def read_matrix(path):
     matrix = json.loads(Path(path).read_text())
@@ -156,11 +159,12 @@ def signal_environment():
     return {"LD_PRELOAD": str(signal)}
 
 
-def run_sbt(name, commands, *, bundle=None, environment=None):
+def run_sbt(name, commands, *, bundle=None, environment=None, line="4.0", scala="2.13.16"):
     logs = ROOT / "target/read-ci"
     logs.mkdir(parents=True, exist_ok=True)
     path = logs / (name + ".log")
     command = ["sbt", "-batch", "-Dsbt.log.noformat=true", "-Dsbt.supershell=false"]
+    command.extend(("-DsparkVersion=" + line, "-DscalaVersion=" + scala))
     if bundle:
         bundle = Path(bundle).resolve(strict=True)
         command.append("-Dmilvus.native.bundle=" + str(bundle))
@@ -176,10 +180,7 @@ def run_sbt(name, commands, *, bundle=None, environment=None):
 
 
 def report_directory(project):
-    directory = "spark-" + project[5:][0] + "." + project[5:][1:] if project.startswith("spark") else project
-    if project == "integration40":
-        directory = "integration-4.0"
-    return ROOT / directory / "target/test-reports"
+    return ROOT / project / "target/test-reports"
 
 
 def reset_reports(projects):
@@ -208,8 +209,8 @@ def spark_checks(matrix, line, scala, bundle):
     suites = SPARK_SUITES + ((CONNECT_SUITE,) if line != "3.5" else ()) if bundle else (SPARK_SUITES[3],)
     name = ("spark-native-" if bundle else "spark-source-") + line + "-" + scala
     reset_reports((project,))
-    log = run_sbt(name, ["++" + scala, project + "/checkReadBuild", project + "/Test/compile",
-                        project + "/Test/testOnly " + " ".join(suites)], bundle=bundle)
+    log = run_sbt(name, MODULE_CLEAN + [project + "/checkReadBuild", project + "/Test/compile",
+                        project + "/Test/testOnly " + " ".join(suites)], bundle=bundle, line=line, scala=scala)
     reports = check_reports(report_directory(project), suites)
     counts = check_execution(log, [(project, reports)])[project]
     save_report(name, {"selection": row, "native": bool(bundle),
@@ -222,7 +223,7 @@ def shared_checks(matrix, scala, bundle):
     name = ("shared-native-" if bundle else "shared-source-") + scala
     projects = ["core"] + (["native-runtime"] if "native-runtime" in modules else []) if bundle else modules
     reset_reports(projects)
-    commands = ["++" + scala]
+    commands = list(MODULE_CLEAN)
     if bundle:
         commands.append("core/Test/testOnly " + " ".join(CORE_SUITES))
         if "native-runtime" in projects:
@@ -231,7 +232,8 @@ def shared_checks(matrix, scala, bundle):
         for project in modules:
             commands.extend((project + "/checkReadBuild", project + "/Test/test"))
     log = run_sbt(name, commands, bundle=bundle,
-                  environment=signal_environment() if bundle else None)
+                  environment=signal_environment() if bundle else None,
+                  line="3.5" if scala.startswith("2.12.") else "4.0", scala=scala)
     results = {}
     for project in projects:
         required = CORE_SUITES if bundle and project == "core" else (
@@ -249,11 +251,11 @@ def integration_checks(bundle):
     for name in ("MILVUS_READ_IT_OPTIONS", "MILVUS_READ_IT_OPTIONS_B"):
         if not Path(os.environ.get(name, "")).is_file():
             raise ValueError("Missing input identity options: " + name)
-    reset_reports(("integration40",))
-    log = run_sbt("object-storage", ["integration40/Test/testOnly " + INTEGRATION_SUITE],
+    reset_reports(("integration",))
+    log = run_sbt("object-storage", ["integration/Test/testOnly " + INTEGRATION_SUITE],
                   bundle=bundle, environment=signal_environment())
-    reports = check_reports(report_directory("integration40"), (INTEGRATION_SUITE,))
-    counts = check_execution(log, [("integration40", reports)])["integration40"]
+    reports = check_reports(report_directory("integration"), (INTEGRATION_SUITE,))
+    counts = check_execution(log, [("integration", reports)])["integration"]
     save_report("object-storage", {"xmlSuites": xml_evidence(reports), "execution": counts})
 
 
@@ -273,30 +275,26 @@ def assert_clean_outputs(records):
 
 def clean_checks(matrix):
     before = source_hashes()
-    commands = []
-    record_paths = []
+    records = []
     for row in matrix["shared"]:
-        commands.append("++" + row["scala"])
+        commands = list(MODULE_CLEAN)
         for project in row["modules"]:
             commands.extend((project + "/checkReadBuild", project + "/Test/compile"))
-        record_paths.extend(ROOT / "target/read-build" / (project + "-" + row["scalaBinary"] + ".json")
-                            for project in row["modules"])
+        selector = "3.5" if row["scala"].startswith("2.12.") else "4.0"
+        run_sbt("clean-shared-" + row["scala"], commands, line=selector, scala=row["scala"])
+        records.extend(json.loads((ROOT / "target/read-build" /
+                                  (project + "-" + row["scalaBinary"] + ".json")).read_text())
+                       for project in row["modules"])
     for row in matrix["spark"]:
-        commands.extend(("++" + row["scala"], row["project"] + "/checkReadBuild",
-                         row["project"] + "/Test/compile"))
-        record_paths.append(ROOT / "target/read-build" / (row["project"] + "-" + row["scalaBinary"] + ".json"))
-    integration_rows = [row for row in matrix["spark"] if row["line"] == "4.0"]
-    if len(integration_rows) != 1:
-        raise ValueError("Integration must match one Spark 4.0 source combination")
-    integration = integration_rows[0]
-    commands.extend(("++" + integration["scala"], "integration40/Test/compile"))
-    run_sbt("clean-cross-build", commands)
-    records = [json.loads(path.read_text()) for path in record_paths]
-    integration_target = ROOT / "integration-4.0/target"
-    records.append({"cleanOutputs": [str(integration_target / ("scala-" + integration["scalaBinary"]) / "test-classes")]})
-    modules = list(dict.fromkeys(project for row in matrix["shared"] for project in row["modules"]))
-    modules += list(dict.fromkeys(row["project"] for row in matrix["spark"])) + ["apps40", "integration40"]
-    run_sbt("clean-restored", [project + "/clean" for project in modules])
+        commands = MODULE_CLEAN + ["spark/checkReadBuild", "spark/Test/compile",
+                    "integration/Test/compile"]
+        run_sbt("clean-spark-" + row["line"] + "-" + row["scala"], commands,
+                line=row["line"], scala=row["scala"])
+        records.append(json.loads((ROOT / "target/read-build" /
+                                   ("spark-" + row["scalaBinary"] + ".json")).read_text()))
+        integration_target = ROOT / "integration/target" / ("scala-" + row["scalaBinary"])
+        records.append({"cleanOutputs": [str(integration_target / "test-classes")]})
+    run_sbt("clean-restored", MODULE_CLEAN)
     assert_clean_outputs(records)
     if source_hashes() != before:
         raise ValueError("Clean or cross compilation changed source files")

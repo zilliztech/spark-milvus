@@ -70,8 +70,8 @@ All artifacts use group `com.zilliz` and the same final version. `<line>` is
 
 Resolve an entry through Maven or `spark-submit --packages`. Supplying its small
 JAR alone through `--jars` does not resolve the implementation or native JARs.
-The existing `sbt assembly` for Spark 4.0 and `sbt spark42/assembly` for Spark 4.2
-remain available for local fat-JAR workflows.
+Use `sbt -DsparkVersion=<line> spark/assembly` with a selected native bundle
+for local fat-JAR workflows. Root assembly/publication is retired.
 
 The JVM release contains no Storage/Knowhere platform bundle. It does retain
 the official Arrow C Data JAR's native runtime resources, which Spark does not
@@ -88,13 +88,12 @@ also carry their provenance and license material.
 ### Thin modules for downstream libraries
 
 `com.zilliz:spark-milvus-4.0-thin_2.13` contains the Spark connector classes.
-Its POM resolves `spark-milvus-core_2.13`, `spark-milvus-compat_2.13`,
-`spark-milvus-native-storage_2.13`, `spark-milvus-native-runtime`,
-`spark-milvus-native-vector` and, during migration, `spark-milvus-client_2.13`.
-All seven artifacts use the same candidate version. Each has a POM, binary,
+Its POM resolves `spark-milvus-core_2.13`,
+`spark-milvus-native-storage_2.13`, `spark-milvus-native-runtime` and
+`spark-milvus-native-vector`. All five artifacts use the same candidate version. Each has a POM, binary,
 sources and Javadoc; `native-vector` includes the pinned Knowhere Java API.
 The exported POMs preserve module boundaries and resolve external dependencies.
-The Spark module marks dependencies supplied by Spark as `provided`; the six
+The Spark module marks dependencies supplied by Spark as `provided`; the four
 lower-level modules retain their declared scopes so their compile dependencies
 remain available to downstream libraries without Spark.
 
@@ -106,9 +105,10 @@ loader checks its Storage and Knowhere source pins against `native-runtime`.
 Do not combine thin modules with the bundled `-jvm` or assembly JAR: their
 connector classes overlap.
 
-This candidate is transitional: existing client, Catalog and write code are
-still present. It is not yet the final read-only distribution. None of the
-thin POMs introduces the Milvus SDK.
+The candidate is read-only. Verification rejects client, Catalog, CALL, writer,
+backup and legacy-format connector classes/sources; retired DataFrame methods
+and service/backup options; private dependencies; and the Milvus SDK. Thin
+metadata must declare `migrationState=read-only`.
 
 Load the **running JRE's** `libjsig.so` before both the driver and every executor
 start. Paths may differ between driver and workers. For example, with an
@@ -144,20 +144,23 @@ release_version=2.0.0-rc.1
 sbt "exportBuildMatrix target/build-matrix.json"
 python3 scripts/release.py plan --matrix target/build-matrix.json \
   --version "$release_version" --output target/release-plan.json
-sbt "-Drelease.version=$release_version" releaseJvmArtifacts
-sbt "-Drelease.version=$release_version" spark40/releaseThinArtifacts
+sbt -DsparkVersion=4.0 -DscalaVersion=2.13.16 "-Drelease.version=$release_version" \
+  "spark/releaseJvmArtifacts" "spark/releaseThinArtifacts"
+# Restart sbt and clean module products before changing the selected line.
+sbt -DsparkVersion=4.2 -DscalaVersion=2.13.16 "-Drelease.version=$release_version" \
+  "native-runtime/clean; native-storage/clean; native-vector/clean; core/clean; spark/clean; integration/clean" \
+  "spark/releaseJvmArtifacts"
 ```
 
-The JVM task writes `target/release-jvm/4.0` and `target/release-jvm/4.2`, each
-with its binary, sources, Javadoc and `artifact.json`. A matrix job can instead
-run `spark40/releaseJvmArtifacts` or `spark42/releaseJvmArtifacts`. These exports
-do not select or compile a native bundle.
+Each selected JVM task writes `target/release-jvm/<line>` with binary, sources,
+Javadoc and `artifact.json`. Module clean does not remove these release exports;
+root `clean` does, so retain/stage completed exports before using root clean.
+The tasks neither select nor compile a native bundle.
 
-The thin task writes seven module exports and `thin-artifacts.json` to
-`target/release-thin/4.0`. It does not change local project coordinates or
-enable sbt publication. The candidate verifier checks POM closure, duplicate
-coordinates/classes, the Knowhere API, source pins and absence of platform
-resources or the Milvus SDK.
+The 4.0 thin task writes five module exports and `thin-artifacts.json` to
+`target/release-thin/4.0`. It does not enable direct sbt publication. The verifier
+checks the final read-only surface, POM closure, duplicate coordinates/classes,
+upstream APIs, source pins and absence of embedded platform resources.
 
 Build on **each** Ubuntu 22.04 architecture; change `native_platform` to match
 the host. Do not use a newer OS to produce the older-baseline binary.
@@ -248,10 +251,6 @@ helper; its JAR is rejected if it contains production classes or references
 writers, procedures, Catalog, management parser or the online client. No normal consumer command generates
 segments, builds indexes, publishes snapshots or calls Milvus.
 
-The previous `LocalEndToEndSmoke` remains in the source tree with its write,
-index-build and output-write assertions for later private-repository migration.
-It is no longer the public release consumer entry point.
-
 `local-cluster` starts an independent executor JVM, and the smoke checks its PID
 is different from the driver's. Both processes preload their JRE's `libjsig`.
 Missing native libraries or canceled native tests cannot satisfy this gate.
@@ -264,15 +263,16 @@ code alone does not identify the native failure; inspect these reports. CI also
 records the consumer CPU, operating system and exact JDK version.
 
 This is an **offline native end-to-end test on local files**, not a live Milvus
-service test. The separate `integration40/test` suites use live object storage; their write
-and backfill cases also require Milvus. The read-only DataSource suite consumes
-pre-uploaded fixed inputs. The public native CI runs the V3 DataSource suite using an isolated MinIO
+service test. The separate `integration/test` suite reads fixed V3 inputs
+from live object storage. The public native CI runs the V3 DataSource suite using an isolated MinIO
 fixture with two identities. Registration and online service behavior remain
-outside the public gate.
+outside the public gate. The public integration Helm chart renders only
+a fixed-input read Job with an existing two-identity Secret; service setup and
+write integration charts belong to the private repository.
 
 | Event | Required work |
 |---|---|
-| Pull request to `main` or `refactor/v2` | Formatting, Versions-derived five-combination source/POM/source-JAR checks, shared unit tests, legacy aggregate coverage, clean checks, scripts and Helm; existing JVM/thin exports |
+| Pull request to `main` or `refactor/v2` | Formatting, Versions-derived five-combination source/POM/source-JAR checks, shared unit tests, selected-line aggregate coverage, clean checks, scripts and Helm; existing JVM/thin exports |
 | Push to those branches or manual CI dispatch | The checks above, native builds, mandatory read/search/Arrow/Connect suites, isolated object-storage reads, candidate verification and all eight consumer jobs |
 | `v2.x.y-central-test.<digits>` tag | Full CI, signed `USER_MANAGED` upload, Central validation, authenticated byte verification, one consumer job and deployment deletion; no public release |
 | Other accepted `v2.*` release tag | Full CI explicitly enabled, nonempty validated candidate, controlled publication and public Central consumer check |

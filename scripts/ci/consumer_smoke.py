@@ -25,7 +25,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = (
-    "spark-4.0/src/test/scala/com/zilliz/spark/connector/read/ReadOnlyConsumerSmoke.scala",
+    "spark/src/test/scala/com/zilliz/spark/connector/read/ReadOnlyConsumerSmoke.scala",
     "core/src/test/scala/com/zilliz/milvus/storage/io/ReadFixtures.scala",
 )
 MAIN = "com.zilliz.spark.connector.read.ReadOnlyConsumerSmoke"
@@ -146,7 +146,6 @@ def expected_artifacts(manifest, line, platform, entry):
         names = {
             "spark-milvus-native-runtime", "spark-milvus-native-vector",
             "spark-milvus-native-storage_2.13", "spark-milvus-core_2.13",
-            "spark-milvus-compat_2.13", "spark-milvus-client_2.13",
             "spark-milvus-4.0-thin_2.13",
         }
         available = main_jars(manifest)

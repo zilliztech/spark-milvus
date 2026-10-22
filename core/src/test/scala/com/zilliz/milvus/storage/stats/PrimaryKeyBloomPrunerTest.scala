@@ -74,7 +74,7 @@ class PrimaryKeyBloomPrunerTest extends AnyFunSuite with Matchers {
       .values shouldBe empty
   }
 
-  test("pruning keeps applicable partition and global L0 delete sources") {
+  test("pruning retains matching data and its partition") {
     val root = Files.createTempDirectory("milvus-bloom-pruner")
     val store = new LocalObjectStore(root.toString)
     val counting = new CountingObjectStore(store)
@@ -93,10 +93,7 @@ class PrimaryKeyBloomPrunerTest extends AnyFunSuite with Matchers {
 
     val data20 = segment(30L, 20L, Seq("stats/30"))
     val data21 = segment(31L, 21L, Seq("stats/31"))
-    val l020 = l0(40L, 20L)
-    val l021 = l0(41L, 21L)
-    val global = l0(42L, -1L)
-    val fixed = snapshot(Seq(data20, data21, l020, l021, global))
+    val fixed = snapshot(Seq(data20, data21))
     val pruner = PrimaryKeyBloomPruner.load(
       fixed,
       primaryKey,
@@ -113,7 +110,7 @@ class PrimaryKeyBloomPrunerTest extends AnyFunSuite with Matchers {
       Set(LongValue(candidate))
     )
     val pruned = fixed.retainDataSegments(pruner.retainedSegmentIds(filter))
-    pruned.segments shouldBe Seq(data21, l021, global)
+    pruned.segments shouldBe Seq(data21)
     pruned.partitionIds shouldBe Seq(21L)
     fixed
       .retainDataSegments(pruner.retainedSegmentIds(filter))
@@ -227,21 +224,14 @@ class PrimaryKeyBloomPrunerTest extends AnyFunSuite with Matchers {
       partitionId: Long,
       paths: Seq[String]
   ): Segment =
-    Segment.v2(
+    Segment(
       id,
       partitionId,
-      rows = 1L,
-      columnGroups = Seq(V2ColumnGroup(Seq(100L), Seq(s"data/$id"), Seq(1L))),
+      storageVersion = 3,
+      rows = Some(1L),
+      layout = SegmentLayout.Manifest(s"data/$id", 1L),
+      deletes = DeleteFiles.Empty,
       statistics = SegmentStatistics.Listed(Map(100L -> paths))
-    )
-
-  private def l0(id: Long, partitionId: Long): Segment =
-    Segment.v2(
-      id,
-      partitionId,
-      rows = 0L,
-      columnGroups = Seq.empty,
-      deltaLogs = Seq(DeltaLogFile(id, s"delete/$id", 1L))
     )
 
   private def snapshot(

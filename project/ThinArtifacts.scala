@@ -10,7 +10,7 @@ import sbt._
 import sbt.Keys._
 
 /** Exports the existing module graph as independently consumable JVM artifacts.
-  * This transitional candidate retains client until its callers have migrated.
+  * Only read/search modules belong in the public candidate.
   */
 object ThinArtifacts {
   val releaseThinArtifacts = taskKey[Seq[File]](
@@ -77,15 +77,13 @@ object ThinArtifacts {
       "native-storage",
       "native-vector",
       "core",
-      "compat",
-      "client",
-      "spark40"
+      "spark"
     )
     require(
       modules
         .map(_.projectId)
         .toSet == expected && modules.size == expected.size,
-      "The thin candidate must include the complete seven-module closure"
+      "The thin candidate must include the complete five-module closure"
     )
     val destination = outputDirectory(root)
     IO.createDirectory(destination)
@@ -96,7 +94,7 @@ object ThinArtifacts {
       modules.map(module => module.projectId -> XML.loadFile(module.pom)).toMap
     val names = modules.map { module =>
       val id =
-        if (module.projectId == "spark40")
+        if (module.projectId == "spark")
           s"spark-milvus-${line.id}-thin_$scalaBinary"
         else module.artifactId
       module.projectId -> id
@@ -274,7 +272,7 @@ object ThinArtifacts {
       Map(
         "schemaVersion" -> 1,
         "kind" -> "thin",
-        "migrationState" -> "transition",
+        "migrationState" -> "read-only",
         "groupId" -> "com.zilliz",
         "version" -> version,
         "sourceSha" -> sourceSha,
@@ -288,7 +286,7 @@ object ThinArtifacts {
     val metadataFile = destination / "thin-artifacts.json"
     IO.write(metadataFile, metadata.toString() + "\n", StandardCharsets.UTF_8)
     IO.delete(work)
-    log.info(s"Exported transitional thin release candidate: $destination")
+    log.info(s"Exported read-only thin release candidate: $destination")
     exported.flatMap(_._2) :+ metadataFile
   }
 
@@ -302,7 +300,7 @@ object ThinArtifacts {
       projectId: String,
       sourceSha: String
   ): Elem = {
-    val sparkModule = projectId == "spark40"
+    val sparkModule = projectId == "spark"
     val dependencies = (original \ "dependencies" \ "dependency")
       .collect {
         // sbt writes `provided,test` dependencies as test in makePom. Retain
@@ -414,14 +412,12 @@ object ThinArtifacts {
       case "native-vector" =>
         "Knowhere Java bindings and vector search/index adapters."
       case "core" =>
-        "Milvus schemas, storage formats, read/search computation and write helpers."
-      case "compat" => "Milvus backup, snapshot and segment format adapters."
-      case "client" => "ScalaPB/gRPC client for Milvus service APIs."
-      case "spark40" =>
-        "Spark 4.0 DataSource, search, Catalog and write interfaces."
+        "Milvus V3 schemas, storage formats and read/search computation."
+      case "spark" =>
+        "Spark 4.0 read-only DataSource and vector search interfaces."
       case other => sys.error(s"Unknown thin module: $other")
     }
-    s"Transitional Spark Milvus thin module. $purpose"
+    s"Read-only Spark Milvus thin module. $purpose"
   }
 
   private def fields(element: Elem, replacements: Map[String, String]): Elem = {

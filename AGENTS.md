@@ -15,41 +15,40 @@ enough to build, test and change the code.
 
 ## What this project is
 
-Spark reads and writes Milvus collections by going straight at the Milvus
-storage format on object storage, not through the Milvus query path. A read
-lists a snapshot, plans one Spark partition per segment, and pulls Arrow column
-batches out of the segment files. A DataFrame append stages segment files and
-commits a job manifest on object storage. Registering new segments still waits
-for Milvus's `RegisterSegments` API; successful staging does not make the new
-rows queryable in Milvus. Vector search is written as a
-NEAREST BY join: Spark 4.2's own, and the connector's `nearestByJoin` and
-`nearest_by_join` on 3.5 to 4.1. Over a Milvus table the connector executes it
-and returns each query's top-k over the snapshot's persisted indexes or by
-exact scan.
+Spark reads and searches fixed Milvus Storage V3 snapshots directly from object
+storage. The caller provides an existing snapshot and storage configuration;
+the public connector does not call Milvus or prepare snapshots. Reads plan
+segment partitions and consume Arrow batches. NEAREST BY returns top-k matches
+using exact scans or compatible persisted indexes. Spark 4.2 supplies the join
+syntax; the connector supplies `nearestByJoin` and `nearest_by_join` on 3.5–4.1.
+Writing, backfill, index construction, snapshot output, service clients, backup
+and legacy storage compatibility belong to the private offline repository.
 
 The 1.x line stopped at tag `v1.6.0` and is no longer maintained: it takes no
 fixes. The 2.0 line is a rewrite on branch `refactor/v2`, versioned
 `2.0.0-{branch}-{arch}-SNAPSHOT`. Everything below describes 2.0.
 
-## The four layers
+## The three public layers
 
-Twelve sbt modules, and dependencies only point downward.
+Five production modules, with dependencies only pointing downward.
 
 | Layer | Modules | What lives there |
 |---|---|---|
-| 1 | `native-runtime`, `native-storage`, `native-vector` | Storage uses milvus-storage's upstream JNI and Java/Scala API; vector library loading through Knowhere's upstream C/JNI and Java API. `native-runtime` verifies and extracts the unified platform bundle for both bindings. Nothing above this layer loads a `.so`. |
-| 2 | `core`, `compat`, `client` | The Milvus storage format and the client for the online service. All computation happens here. No Spark: a source file mentioning `org.apache.spark` fails the build. |
-| 3 | `spark-base`, `spark-3.5`, `spark-4.0`, `spark-4.1`, `spark-4.2` | The DataSource V2 surface. `spark-base` is a shared source directory, not a project; each line project compiles it against its own Spark, Arrow, antlr and Java version. |
-| 4 | `apps-4.0` | The backfill job users run. Vector search is written as a NEAREST BY join, which layer 3 takes over. |
+| 1 | `native-runtime`, `native-storage`, `native-vector` | Unified platform loading and the upstream Storage/Knowhere APIs; nothing above this layer loads a `.so`. |
+| 2 | `core` | V3 snapshot formats, read/search computation and storage access; no Spark dependencies. |
+| 3 | `spark` | Read-only DataSource V2 and vector search, with shared sources and selected Spark shims. |
 
-`integration-4.0` sits outside the layering and outside root's aggregate: its
-suites need a live Milvus and MinIO.
+The root aggregates those modules and publishes no artifact. `integration`
+is outside the aggregate and tests fixed V3 inputs in a real object store;
+it needs no Milvus service. Use `spark/assembly` for the selected local bundle.
 
-Only layer 3 splits per Spark line, because the `TableCatalog` and
-`ParserInterface` method sets differ there, while Arrow, antlr and the Java
-target are also pinned per line. During migration, the usable fat jars are
-root's `assembly` for Spark 4.0 and `spark42/assembly` for Spark 4.2.
-[README.md](README.md) has the full module table and the build commands.
+`-DsparkVersion` selects 3.5, 4.0 (default), 4.1 or 4.2;
+`-DscalaVersion` selects a supported full Scala version (default 2.13.16).
+Only Spark 3.5 also supports 2.12.20. Restart sbt and clean module outputs when
+switching combinations. `spark/src/main/scala` is shared; explicit
+`scala-shims` roots contain the remaining Dataset and NEAREST BY differences.
+Formatting and source/package checks cover every root, while compilation and
+source JARs contain only the selected roots. See [README.md](README.md).
 
 Four git submodules: `milvus-proto`, `milvus-storage` and `knowhere` supply
 the protobuf definitions and the two native engines and must be initialized to
@@ -58,7 +57,7 @@ build or by CI.
 
 ## Rules any change has to satisfy
 
-1. **No Spark below layer 3.** A source file in `core`, `compat` or `client`
+1. **No Spark below layer 3.** A source file in `core` or `native-storage`
    that mentions `org.apache.spark` fails the build. The check strips comments
    first. Use `com.zilliz.milvus.storage.Logging` instead of Spark's.
 2. **Directories mirror packages.** Scala allows a mismatch; this repository

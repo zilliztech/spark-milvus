@@ -32,7 +32,7 @@ services:
       - ivy2:/home/dev/.ivy2
       - sbt:/home/dev/.sbt
 
-  # Local Milvus for integration-4.0, which addresses localhost:19530 and
+  # Local Milvus for integration, which addresses localhost:19530 and
   # localhost:9000. The three services join the dev container's network
   # namespace, so those addresses resolve without any test change.
   # Start them with `scripts/devcontainer.sh up --services`.

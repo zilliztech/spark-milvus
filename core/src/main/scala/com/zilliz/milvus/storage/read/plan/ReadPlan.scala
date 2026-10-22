@@ -33,19 +33,8 @@ final case class ReadPlan(specs: Seq[SegmentReadTask]) extends Serializable {
   */
 object ReadPlan extends Logging {
 
-  /** @param properties
-    *   the parsed `fs.*` map a task of the given `storage_version` carries. A
-    *   function, and called at most once per version present, because the two
-    *   lines are configured differently: a backup read has a bucket derived
-    *   from `milvus.backup.dir` and no `fs.bucket_name`, produces V2 tasks
-    *   only, and must not be made to validate the V3 configuration no task
-    *   would use.
-    * @param applyDeletes
-    *   false turns every task's deletes into `DeleteSource.None`.
-    * @param deletes
-    *   the delete files the driver listed. Every task carries the files it has
-    *   to apply as `DeleteSource.Files`: the L0 files of its partition and of
-    *   the whole collection, then its own. The executor reads them.
+  /** Plans V3 data and carries the fixed manifest versions and delete files
+    * resolved on the driver. Properties are requested once for Storage V3.
     */
   def of(
       snapshot: Snapshot,
@@ -55,6 +44,10 @@ object ReadPlan extends Logging {
       neededFieldIds: Seq[Long] = Seq.empty,
       limits: ReadLimits = ReadLimits.Default
   ): ReadPlan = {
+    require(
+      snapshot.segments.forall(_.storageVersion == 3),
+      "public reads require Storage V3 segments"
+    )
     val propertiesByVersion =
       collection.mutable.Map.empty[Int, Map[String, String]]
     def propertiesFor(version: Int): Map[String, String] =
@@ -101,35 +94,7 @@ object ReadPlan extends Logging {
       )
     }
 
-    val v2Tasks = snapshot.v2Segments.filter(_.hasData).map { seg =>
-      val groups = seg.layout match {
-        case SegmentLayout.ColumnGroups(gs) => gs
-        case _ =>
-          throw new IllegalStateException(
-            s"segment ${seg.id} is storage_version 2 but carries a manifest layout"
-          )
-      }
-      SegmentReadTask(
-        segmentId = seg.id,
-        partitionId = seg.partitionId,
-        layout = SegmentLayout.ColumnGroups(groups),
-        schemaBytes = schemaBytes,
-        properties = propertiesFor(2),
-        neededFieldIds = neededFieldIds,
-        deletes = deleteSourceFor(seg.id, seg.partitionId),
-        indexes = seg.indexes,
-        snapshotRows = seg.rows,
-        limits = limits
-      )
-    }
-
-    val deleteOnly = snapshot.v2Segments.count(!_.hasData)
-    if (deleteOnly > 0) {
-      logInfo(s"Skipped $deleteOnly delete-only StorageV2 segment(s)")
-    }
-    logInfo(
-      s"Planned ${v3Tasks.size} V3 and ${v2Tasks.size} V2 task(s) of ${snapshot.name}"
-    )
-    ReadPlan(v3Tasks ++ v2Tasks)
+    logInfo(s"Planned ${v3Tasks.size} V3 task(s) of ${snapshot.name}")
+    ReadPlan(v3Tasks)
   }
 }

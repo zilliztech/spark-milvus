@@ -5,14 +5,6 @@ import java.nio.file.{Files, Paths}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.snapshot.{
-  DeltaLogFile,
-  Segment,
-  SegmentStatistics,
-  V2ColumnGroup
-}
-import com.zilliz.milvus.storage.snapshot.json.SegmentListJson
-
 /** Tests for [[SnapshotSegmentReader]] against a real milvus-produced
   * per-segment AVRO.
   *
@@ -50,7 +42,7 @@ class SnapshotSegmentReaderTest extends AnyFunSuite with Matchers {
     }
   }
 
-  test("all manifest versions expose StorageV2 statslog files") {
+  test("all manifest versions decode the neutral statslog entries") {
     val logs = Seq(
       FieldBinlogEntry(
         100L,
@@ -69,13 +61,7 @@ class SnapshotSegmentReaderTest extends AnyFunSuite with Matchers {
         .toOption
         .get
       entry.statsLogFiles shouldBe logs
-      val segment = SnapshotSegmentReader
-        .toSegment(entry.copy(storageVersion = 2L), Seq.empty)
-        .toOption
-        .get
-      segment.statistics shouldBe SegmentStatistics.Listed(
-        Map(100L -> Seq("files/stats_log/100/7", "files/stats_log/100/9"))
-      )
+
     }
   }
 
@@ -96,10 +82,6 @@ class SnapshotSegmentReaderTest extends AnyFunSuite with Matchers {
 
   private val avroBytes: Array[Byte] =
     Files.readAllBytes(Paths.get("core/src/test/data/seg_manifest.avro"))
-
-  // Pre-captured from the parquet kv-metadata — avoids needing minio at test time.
-  private val expectedGroupFieldIdList: Seq[Seq[Long]] =
-    Seq(Seq(100L, 0L, 1L), Seq(101L), Seq(102L))
 
   test("parse decodes one ManifestEntry with expected top-level fields") {
     val result = SnapshotSegmentReader.parse(avroBytes)
@@ -129,159 +111,6 @@ class SnapshotSegmentReaderTest extends AnyFunSuite with Matchers {
     firstBinlog.logPath shouldBe
       "files/insert_log/465602255560377587/465602255560377588/465602255560578628/0/465602255560688629"
     firstBinlog.entriesNum should be > 0L
-  }
-
-  test(
-    "toSegment joins AVRO binlog order with group_field_id_list positionally"
-  ) {
-    val entry = SnapshotSegmentReader.parse(avroBytes).toOption.get
-    val result =
-      SnapshotSegmentReader.toSegment(
-        entry,
-        expectedGroupFieldIdList
-      )
-    result shouldBe a[Right[_, _]]
-
-    val seg = result.toOption.get
-    seg.id shouldBe 465602255560578628L
-    seg.storageVersion shouldBe 2
-    seg.columnGroups should have size 3
-
-    // Group 0: /0/ directory carries real fields {100, 0, 1}.
-    seg.columnGroups(0).fieldIds shouldBe Seq(100L, 0L, 1L)
-    seg.columnGroups(0).filePaths shouldBe Seq(
-      "files/insert_log/465602255560377587/465602255560377588/465602255560578628/0/465602255560688629"
-    )
-    seg.columnGroups(0).fileRowCounts.size shouldBe 1
-    seg.columnGroups(0).fileRowCounts.head should be > 0L
-
-    // Group 1: /1/ directory carries only varchar (fid=101).
-    seg.columnGroups(1).fieldIds shouldBe Seq(101L)
-    seg.columnGroups(1).filePaths shouldBe Seq(
-      "files/insert_log/465602255560377587/465602255560377588/465602255560578628/1/465602255560688630"
-    )
-
-    // Group 2: /102/ directory carries only embeddings (fid=102).
-    seg.columnGroups(2).fieldIds shouldBe Seq(102L)
-    seg.columnGroups(2).filePaths shouldBe Seq(
-      "files/insert_log/465602255560377587/465602255560377588/465602255560578628/102/465602255560688631"
-    )
-
-    // The AVRO slot id (AvroFieldBinlog.field_id) must be propagated onto
-    // V2ColumnGroup so Segment.dedupColumnGroupsBySlot can resolve
-    // multi-group fieldID conflicts. Slots match the per-group directory
-    // names {0, 1, 102} for this fixture.
-    seg.columnGroups.map(_.slotFieldId) shouldBe Seq(0L, 1L, 102L)
-    seg.deltaLogs shouldBe empty
-  }
-
-  test("toSegment flattens and sorts delta logs by logId") {
-    val entry = SnapshotSegmentEntry(
-      segmentId = 123L,
-      partitionId = 456L,
-      segmentLevel = 1L,
-      numOfRows = 789L,
-      storageVersion = 2L,
-      binlogFiles = Seq(
-        FieldBinlogEntry(
-          slotFieldId = 100L,
-          binlogs = Seq(BinlogEntry(1L, "files/insert_log/.../1", 10L))
-        )
-      ),
-      deltaLogFiles = Seq(
-        FieldBinlogEntry(
-          slotFieldId = 100L,
-          binlogs = Seq(
-            BinlogEntry(9L, "files/delete_log/.../9", 1L),
-            BinlogEntry(7L, "files/delete_log/.../7", 3L)
-          )
-        ),
-        FieldBinlogEntry(
-          slotFieldId = 101L,
-          binlogs = Seq(BinlogEntry(8L, "files/delete_log/.../8", 2L))
-        )
-      )
-    )
-
-    val result =
-      SnapshotSegmentReader.toSegment(entry, Seq(Seq(100L)))
-
-    result shouldBe a[Right[_, _]]
-    val seg = result.toOption.get
-    seg.deltaLogs shouldBe Seq(
-      DeltaLogFile(7L, "files/delete_log/.../7", 3L),
-      DeltaLogFile(8L, "files/delete_log/.../8", 2L),
-      DeltaLogFile(9L, "files/delete_log/.../9", 1L)
-    )
-  }
-
-  test("toSegment rejects non-StorageV2 entries") {
-    val entry = SnapshotSegmentReader.parse(avroBytes).toOption.get
-    val bogus = entry.copy(storageVersion = 0L) // StorageV1
-    val result = SnapshotSegmentReader.toSegment(bogus, Seq.empty)
-    result shouldBe a[Left[_, _]]
-    result.left.toOption.get.getMessage should include("storageVersion=2")
-  }
-
-  test(
-    "serialize/deserialize round-trip keeps fieldIds as unboxed-safe Longs"
-  ) {
-    // Regression: Jackson erases Seq[Long] → Seq[Object] and small JSON
-    // integers come back as java.lang.Integer, causing a ClassCastException
-    // when downstream code maps over the Seq (Scala emits unboxToLong). The
-    // DTO stores JsonNode and converts via JsonValues.toLong on the
-    // way back to hide this from callers.
-    val seg = Segment.v2(
-      id = 465602255560578628L,
-      partitionId = 465602255560377588L,
-      rows = 20480L,
-      columnGroups = Seq(
-        V2ColumnGroup(
-          fieldIds = Seq(100L, 0L, 1L),
-          filePaths = Seq("files/insert_log/.../0/100"),
-          fileRowCounts = Seq(20480L),
-          slotFieldId = 3L
-        ),
-        V2ColumnGroup(
-          fieldIds = Seq(103L),
-          filePaths = Seq("p/103"),
-          fileRowCounts = Seq(20480L),
-          slotFieldId = 103L
-        )
-      ),
-      deltaLogs = Seq(
-        DeltaLogFile(
-          logId = 7L,
-          logPath = "files/delete_log/.../7",
-          entriesNum = 3L
-        ),
-        DeltaLogFile(
-          logId = 9L,
-          logPath = "files/delete_log/.../9",
-          entriesNum = 1L
-        )
-      )
-    )
-    val json = SegmentListJson.encodeV2Segments(Seq(seg))
-    val roundTripped =
-      SegmentListJson.decodeV2Segments(json).toOption.get
-    roundTripped should have size 1
-    val got = roundTripped.head
-    got.id shouldBe seg.id
-    got.columnGroups(0).fieldIds shouldBe Seq(100L, 0L, 1L)
-    got.columnGroups(0).fileRowCounts shouldBe Seq(20480L)
-    // slotFieldId round-trips so slot-based dedup is not a silent no-op for
-    // the milvus.snapshot.v2.segments option path.
-    got.columnGroups.map(_.slotFieldId) shouldBe Seq(3L, 103L)
-    got.deltaLogs shouldBe seg.deltaLogs
-    // Exercise the exact pattern that failed at runtime — mapping over the
-    // rehydrated Seq[Long]. Must not throw ClassCastException.
-    val asStrings = got.columnGroups(0).fieldIds.map(_.toString)
-    asStrings shouldBe Seq("100", "0", "1")
-    val rcStrings = got.columnGroups(0).fileRowCounts.map(_.toString)
-    rcStrings shouldBe Seq("20480")
-    val deltaStrings = got.deltaLogs.map(_.logId.toString)
-    deltaStrings shouldBe Seq("7", "9")
   }
 
   /** Milvus v3.0.2 writes format version 5: one boolean more, `is_sorted` and
@@ -347,14 +176,4 @@ class SnapshotSegmentReaderTest extends AnyFunSuite with Matchers {
     mismatched.toOption.flatMap(_.indexFiles).map(_.size) should not be Some(1)
   }
 
-  test("toSegment fails when group count disagrees with AVRO") {
-    val entry = SnapshotSegmentReader.parse(avroBytes).toOption.get
-    // AVRO has 3 binlog groups; feed a 2-group list.
-    val result = SnapshotSegmentReader.toSegment(
-      entry,
-      Seq(Seq(100L, 0L, 1L), Seq(101L))
-    )
-    result shouldBe a[Left[_, _]]
-    result.left.toOption.get.getMessage should include("mismatch")
-  }
 }

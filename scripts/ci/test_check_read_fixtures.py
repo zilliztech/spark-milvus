@@ -63,6 +63,23 @@ class ReadFixtureChecksTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "production write/control"):
                 checks.check_source(source)
 
+    def test_package_check_includes_unselected_main_and_test_shims(self):
+        for scope, shim in (("main", "spark-4.2"), ("test", "spark-4.0-4.2")):
+            path = self.root / "spark/src" / scope / "scala-shims" / shim / "example/Reader.scala"
+            path.parent.mkdir(parents=True)
+            path.write_text("package wrong\nclass Reader\n")
+            with self.assertRaisesRegex(ValueError, "package does not match"):
+                checks.check_source_layout(self.root)
+            path.write_text("package example\nclass Reader\n")
+        self.assertEqual(checks.check_source_layout(self.root), 2)
+
+    def test_package_object_counts_its_own_directory(self):
+        source_root = self.root / "scala"
+        path = source_root / "example/reader/package.scala"
+        path.parent.mkdir(parents=True)
+        path.write_text("package example\npackage object reader {}\n")
+        checks.check_package(path, source_root)
+
 
 if __name__ == "__main__":
     unittest.main()

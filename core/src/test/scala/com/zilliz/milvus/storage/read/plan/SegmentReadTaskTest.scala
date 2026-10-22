@@ -16,7 +16,6 @@ import com.zilliz.milvus.storage.read.exec.{DeletePlans, PhysicalColumnGroup}
 import com.zilliz.milvus.storage.snapshot.{SegmentIndex, SegmentIndexes}
 import com.zilliz.milvus.storage.snapshot.DeltaLogFile
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
-import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
 import io.milvus.grpc.schema.{DataType, FieldSchema}
 
 object SegmentReadTaskTest {
@@ -44,26 +43,33 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
     finally in.close()
   }
 
-  private val group = V2ColumnGroup(
-    fieldIds = Seq(100L, 0L, 1L),
+  private val group = PhysicalColumnGroup(
+    columnNames = Seq("100", "0", "1"),
     filePaths =
       Seq("files/insert_log/1/2/3/100/0", "files/insert_log/1/2/3/100/1"),
-    fileRowCounts = Seq(3000L, 1500L),
-    slotFieldId = 100L
+    fileRowCounts = Seq(3000L, 1500L)
   )
 
-  private def v2Task = SegmentReadTask(
+  private def physicalGroups(groups: Seq[PhysicalColumnGroup]) =
+    SegmentLayout.PhysicalColumnGroups(
+      groups,
+      "{\"fields\":[]}",
+      Map(100L -> "100"),
+      Map.empty
+    )
+
+  private def physicalTask = SegmentReadTask(
     segmentId = 451L,
     partitionId = 7L,
-    layout = SegmentLayout.ColumnGroups(Seq(group)),
+    layout = physicalGroups(Seq(group)),
     schemaBytes = Array[Byte](1, 2, 3),
     properties = Map("fs.storage_type" -> "remote", "fs.bucket_name" -> "b")
   )
 
   // Shipping this object to an executor is the whole reason it exists, so a
   // field that cannot survive the trip is a defect, not an inconvenience.
-  test("a V2 task survives serialization") {
-    val task = v2Task.copy(limits = ReadLimits(1024, 8388608L, 67108864L))
+  test("a physical task survives serialization") {
+    val task = physicalTask.copy(limits = ReadLimits(1024, 8388608L, 67108864L))
     val copy = roundTrip(task)
     copy.segmentId shouldBe 451L
     copy.partitionId shouldBe 7L
@@ -75,7 +81,7 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
   }
 
   test("a manifest task survives serialization") {
-    val task = v2Task.copy(
+    val task = physicalTask.copy(
       layout =
         SegmentLayout.Manifest("files/insert_log/1/2/3", readVersion = 11L)
     )
@@ -87,7 +93,7 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
     "a deferred format decoder survives task serialization without an open store"
   ) {
     val copy = roundTrip(
-      v2Task.copy(deletes =
+      physicalTask.copy(deletes =
         DeleteSource.Deferred(
           SegmentReadTaskTest.TestDeleteReader(42L)
         )
@@ -117,7 +123,7 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
       Map(100L -> "key"),
       Map("id" -> "key")
     )
-    val task = roundTrip(v2Task.copy(layout = physical))
+    val task = roundTrip(physicalTask.copy(layout = physical))
     task.layout shouldBe physical
     task.dataFiles shouldBe Seq("data/a", "data/b")
     task.expectedRows shouldBe Some(5L)
@@ -152,7 +158,7 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
       Some(10),
       None
     )
-    val task = v2Task.copy(
+    val task = physicalTask.copy(
       layout = SegmentLayout.Manifest("files/insert_log/1/7/451", 11L),
       indexes = SegmentIndexes.Available(Vector(index)),
       snapshotRows = Some(4500L)
@@ -164,7 +170,7 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
   }
 
   test("a persisted index's row count sizes a segment the snapshot did not") {
-    val indexed = v2Task
+    val indexed = physicalTask
       .copy(
         segmentId = 7L,
         layout = SegmentLayout.Manifest("segments/7", 3L)
@@ -203,48 +209,54 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
     "physical address bounds use complete snapshot counts without narrowing"
   ) {
     val manifest =
-      v2Task.copy(layout = SegmentLayout.Manifest("segments/451", 3L))
+      physicalTask.copy(layout = SegmentLayout.Manifest("segments/451", 3L))
     Seq(0L, 4500L, 1L << 32, (1L << 32) + 1L, Long.MaxValue).foreach { rows =>
       manifest.copy(snapshotRows = Some(rows)).provenPhysicalRows shouldBe Some(
         rows
       )
     }
     manifest.provenPhysicalRows shouldBe None
-    v2Task.copy(snapshotRows = Some(-1L)).provenPhysicalRows shouldBe None
-    v2Task.copy(snapshotRows = Some(5000L)).provenPhysicalRows shouldBe Some(
+    physicalTask.copy(snapshotRows = Some(-1L)).provenPhysicalRows shouldBe None
+    physicalTask
+      .copy(snapshotRows = Some(5000L))
+      .provenPhysicalRows shouldBe Some(
       5000L
     )
   }
 
   test("physical address bounds require complete and agreeing column groups") {
-    def rows(groups: V2ColumnGroup*): Option[Long] =
-      v2Task
-        .copy(layout = SegmentLayout.ColumnGroups(groups))
+    def rows(groups: PhysicalColumnGroup*): Option[Long] =
+      physicalTask
+        .copy(layout = physicalGroups(groups))
         .provenPhysicalRows
 
     val sameTotal = group.copy(
-      fieldIds = Seq(102L),
+      columnNames = Seq("102"),
       filePaths = Seq("other-column"),
       fileRowCounts = Seq(4500L)
     )
     rows(group, sameTotal) shouldBe Some(4500L)
     rows(group, sameTotal.copy(fileRowCounts = Seq(4501L))) shouldBe None
-    rows(group.copy(fileRowCounts = Seq.empty)) shouldBe None
-    rows(group.copy(fileRowCounts = Seq(4500L))) shouldBe None
-    rows(group.copy(fileRowCounts = Seq(4500L, 0L, 0L))) shouldBe None
-    rows(group.copy(fileRowCounts = Seq(4501L, -1L))) shouldBe None
-    rows(group.copy(fileRowCounts = Seq(Long.MaxValue, 1L))) shouldBe None
+    Seq(
+      Seq.empty[Long],
+      Seq(4500L),
+      Seq(4500L, 0L, 0L),
+      Seq(4501L, -1L),
+      Seq(Long.MaxValue, 1L)
+    ).foreach { invalid =>
+      an[IllegalArgumentException] should be thrownBy group.copy(fileRowCounts =
+        invalid
+      )
+    }
     rows(group.copy(fileRowCounts = Seq(Long.MaxValue, 0L))) shouldBe Some(
       Long.MaxValue
     )
-    rows(
-      group.copy(filePaths = Seq.empty, fileRowCounts = Seq.empty)
-    ) shouldBe Some(0L)
-    rows() shouldBe None
+    an[IllegalArgumentException] should be thrownBy physicalGroups(Seq.empty)
+
   }
 
   test("a materialized delete plan survives serialization") {
-    val task = v2Task.copy(
+    val task = physicalTask.copy(
       deletes = DeleteSource.Materialized(
         DeletePlan.fromLongPks(Map(1L -> 100L, 2L -> 200L))
       )
@@ -260,7 +272,7 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
   }
 
   test("delta log files survive serialization") {
-    val task = v2Task.copy(
+    val task = physicalTask.copy(
       deletes = DeleteSource.Files(
         Seq(
           DeltaLogFile(1L, "files/_delta/1", 10L),
@@ -276,23 +288,25 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
   // "unknown" into "empty".
   test("a manifest layout states no row count and no files") {
     val task =
-      v2Task.copy(layout = SegmentLayout.Manifest("files/insert_log/1/2/3"))
+      physicalTask.copy(layout =
+        SegmentLayout.Manifest("files/insert_log/1/2/3")
+      )
     task.expectedRows shouldBe None
     task.dataFiles shouldBe empty
   }
 
   test("appliesDeletes is false when the source says nothing is deleted") {
-    v2Task.appliesDeletes shouldBe false
-    v2Task
+    physicalTask.appliesDeletes shouldBe false
+    physicalTask
       .copy(deletes = DeleteSource.Materialized(DeletePlan.empty))
       .appliesDeletes shouldBe false
-    v2Task
+    physicalTask
       .copy(deletes = DeleteSource.Files(Seq.empty))
       .appliesDeletes shouldBe false
   }
 
   test("a plan sums the row counts its partitions state") {
-    val plan = ReadPlan(Seq(v2Task, v2Task))
+    val plan = ReadPlan(Seq(physicalTask, physicalTask))
     plan.totalRows shouldBe Some(9000L)
     plan.partitionsApplyingDeletes shouldBe 0
   }
@@ -302,8 +316,10 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
   test("a plan reports no total when any partition cannot state one") {
     val plan = ReadPlan(
       Seq(
-        v2Task,
-        v2Task.copy(layout = SegmentLayout.Manifest("files/insert_log/1/2/4"))
+        physicalTask,
+        physicalTask.copy(layout =
+          SegmentLayout.Manifest("files/insert_log/1/2/4")
+        )
       )
     )
     plan.totalRows shouldBe None
@@ -315,11 +331,11 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
   }
 
   test("a plan counts the partitions that will evaluate deletes") {
-    val withDeletes = v2Task.copy(
+    val withDeletes = physicalTask.copy(
       deletes = DeleteSource.Materialized(DeletePlan.fromLongPks(Map(1L -> 1L)))
     )
     ReadPlan(
-      Seq(v2Task, withDeletes, withDeletes)
+      Seq(physicalTask, withDeletes, withDeletes)
     ).partitionsApplyingDeletes shouldBe 2
   }
 }

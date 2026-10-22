@@ -18,8 +18,7 @@ import com.zilliz.milvus.storage.snapshot.{
   SegmentLayout,
   Snapshot,
   SnapshotCatalog,
-  SnapshotOrigin,
-  V2ColumnGroup
+  SnapshotOrigin
 }
 import com.zilliz.milvus.storage.snapshot.json.ManifestItemJson
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
@@ -48,7 +47,6 @@ class DeleteFileListingTest extends AnyFunSuite with Matchers {
 
   private def snapshotOf(
       v3: Seq[ManifestItemJson] = Seq.empty,
-      v2: Seq[Segment] = Seq.empty,
       collectionSchema: CollectionSchema = schema,
       bucket: String = ""
   ): Snapshot =
@@ -60,17 +58,10 @@ class DeleteFileListingTest extends AnyFunSuite with Matchers {
         partitionIds = Seq(20L),
         schemaBytes = collectionSchema.toByteArray,
         v3Items = v3,
-        v2Segments = v2,
         bucket = bucket,
         origin = SnapshotOrigin.Options
       )
       .fold(e => throw e, identity)
-
-  private val group = V2ColumnGroup(
-    fieldIds = Seq(100L),
-    filePaths = Seq("files/insert_log/10/20/31/100/1.parquet"),
-    fileRowCounts = Seq(1L)
-  )
 
   private def withDir(f: Path => Unit): Unit = {
     val dir = Files.createTempDirectory("delete-listing")
@@ -128,25 +119,6 @@ class DeleteFileListingTest extends AnyFunSuite with Matchers {
     val target = dir.resolve(s"$basePath/_metadata/manifest-$version.avro")
     Files.createDirectories(target.getParent)
     Files.write(target, Array[Byte](1, 2, 3))
-  }
-
-  test("V2 segments list their own files, L0 segments list their partition's") {
-    val own = DeltaLogFile(5L, "files/delta_log/10/20/31/5", 2L)
-    val l0 = DeltaLogFile(6L, "files/delta_log/10/20/32/6", 3L)
-    val snapshot = snapshotOf(v2 =
-      Seq(
-        Segment.v2(31L, 20L, 1L, Seq(group), Seq(own)),
-        Segment.v2(32L, 20L, 0L, Seq.empty, Seq(l0))
-      )
-    )
-    val listing = DeleteFileListing
-      .of(snapshot, applyDeletes = true, "", new LocalObjectStore())
-      .fold(e => throw e, identity)
-    listing.v2BySegment shouldBe Map(31L -> Seq(own))
-    listing.inheritedByPartition shouldBe Map(20L -> Seq(l0))
-    listing.v3BySegment shouldBe empty
-    listing.filesFor(31L, 20L) shouldBe Seq(l0, own)
-    listing.filesFor(31L, 21L) shouldBe Seq(own)
   }
 
   test(
@@ -244,72 +216,6 @@ class DeleteFileListingTest extends AnyFunSuite with Matchers {
     }
   }
 
-  test("unknown V2 and L0 delete state fails when deletes are enabled") {
-    val segments = Seq(
-      "V2 data" -> Segment(
-        id = 31L,
-        partitionId = 20L,
-        storageVersion = 2,
-        rows = Some(1L),
-        layout = SegmentLayout.ColumnGroups(Seq(group)),
-        deletes = DeleteFiles.Unknown
-      ),
-      "L0" -> Segment(
-        id = 32L,
-        partitionId = 20L,
-        storageVersion = 2,
-        rows = Some(0L),
-        layout = SegmentLayout.ColumnGroups(Seq.empty),
-        deletes = DeleteFiles.Unknown
-      )
-    )
-
-    segments.foreach { case (label, segment) =>
-      val result = DeleteFileListing.of(
-        snapshotOf(v2 = Seq(segment)),
-        applyDeletes = true,
-        "",
-        new LocalObjectStore()
-      )
-      withClue(label) {
-        result.isLeft shouldBe true
-        val message = result.left.toOption.get.getMessage
-        message should include(s"V2 segment ${segment.id}")
-        message should include("delete-file state is unknown")
-      }
-    }
-  }
-
-  test("unknown V2 and L0 delete state is ignored when deletes are disabled") {
-    val segments = Seq(
-      Segment(
-        id = 31L,
-        partitionId = 20L,
-        storageVersion = 2,
-        rows = Some(1L),
-        layout = SegmentLayout.ColumnGroups(Seq(group)),
-        deletes = DeleteFiles.Unknown
-      ),
-      Segment(
-        id = 32L,
-        partitionId = 20L,
-        storageVersion = 2,
-        rows = Some(0L),
-        layout = SegmentLayout.ColumnGroups(Seq.empty),
-        deletes = DeleteFiles.Unknown
-      )
-    )
-
-    DeleteFileListing
-      .of(
-        snapshotOf(v2 = segments),
-        applyDeletes = false,
-        "",
-        new FailingObjectStore(new IllegalStateException("must not be opened"))
-      )
-      .fold(e => throw e, identity) shouldBe DeleteFileListing.empty
-  }
-
   test(
     "a listed V3 version needs no storage access when deletes are disabled"
   ) {
@@ -334,16 +240,10 @@ class DeleteFileListingTest extends AnyFunSuite with Matchers {
     withDir { dir =>
       val base = "files/insert_log/10/20/30"
       writeUnparseableManifest(dir, base, 4L)
-      val own = DeltaLogFile(5L, "files/delta_log/10/20/31/5", 2L)
-      val l0 = DeltaLogFile(6L, "files/delta_log/10/20/32/6", 3L)
       val listing = DeleteFileListing
         .of(
           snapshotOf(
-            v3 = Seq(ManifestItemJson(30L, base)),
-            v2 = Seq(
-              Segment.v2(31L, 20L, 1L, Seq(group), Seq(own)),
-              Segment.v2(32L, 20L, 0L, Seq.empty, Seq(l0))
-            )
+            v3 = Seq(ManifestItemJson(30L, base))
           ),
           applyDeletes = false,
           "",
@@ -363,16 +263,10 @@ class DeleteFileListingTest extends AnyFunSuite with Matchers {
     withDir { dir =>
       val base = "files/insert_log/10/20/30"
       writeUnparseableManifest(dir, base, 5L)
-      val own = DeltaLogFile(5L, "files/delta_log/10/20/31/5", 2L)
-      val l0 = DeltaLogFile(6L, "files/delta_log/10/20/32/6", 3L)
       val listing = DeleteFileListing
         .of(
           snapshotOf(
             v3 = Seq(ManifestItemJson(30L, base)),
-            v2 = Seq(
-              Segment.v2(31L, 20L, 1L, Seq(group), Seq(own)),
-              Segment.v2(32L, 20L, 0L, Seq.empty, Seq(l0))
-            ),
             collectionSchema = schemaWithoutPrimaryKey
           ),
           applyDeletes = true,

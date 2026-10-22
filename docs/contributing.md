@@ -1,29 +1,9 @@
 # Working in this repository
 
-## Caller migration boundary
-
-T14 changes maintained callers before T15 changes the source/build structure.
-Use [the fixed V3 example](../scripts/spark_submit_demo.sh) with an explicit
-public candidate. Service preparation, backfill, index construction, snapshot
-output and registration callers live in the private offline repository.
-
-| Existing build/path | Caller now | T15 structural change |
-| --- | --- | --- |
-| Root `assembly`, `spark-connector-assembly-*` | Read candidate JVM + OSS native; private apps candidate for jobs | Remove mixed root delivery and update Docker/Make together |
-| `spark35` / `spark40` / `spark41` / `spark42` | Existing build commands remain valid during T14 | Select one `spark` project through `-DsparkVersion` / `-DscalaVersion` |
-| `apps40`, `apps-4.0` | Private `apps` / `apps/exportJobArtifacts` | Remove migrated public apps project |
-| `integration40`, `integration-4.0` | Public fixed V3 read suite; private `integration` for service/write suites | Update public integration paths with the Spark directory change |
-| `spark-base` and line-specific source paths | Keep the existing read/search matrix | Merge common sources and selected `scala-shims` directories |
-
-Do not execute the T15 command names before that task lands. Candidate execution
-and Helm template checks do not publish artifacts or deploy workloads; T16
-performs final pairing, acceptance, publication and deployment. Keep the old
-released bytes and their recorded runtime pairing for rollback.
-
-
-[README.md](../README.md) covers installing the toolchain, building the
-jar and running the example. This file covers what a contributor needs beyond
-that.
+[README.md](../README.md) covers the V3 read/search entry and environment.
+This guide describes contributor builds, tests and native artifacts. Service
+preparation, writing, backfill, backup and legacy-format compatibility live in
+the private offline repository; public callers supply existing V3 inputs.
 
 ## Development container
 
@@ -38,55 +18,50 @@ scripts/devcontainer.sh up                 # build the dev image if needed, star
 scripts/devcontainer.sh init               # submodules, Conan profile and remote (idempotent)
 scripts/devcontainer.sh shell              # login shell; NATIVE_JOBS defaults to the container's CPUs
 scripts/devcontainer.sh run make package   # one command, then return
-scripts/devcontainer.sh up --services      # also start Milvus, etcd and MinIO for integration40/test
-scripts/devcontainer.sh run --env-file my.env sbt spark40/test   # environment variables from a file
+scripts/devcontainer.sh up --services      # optional local services; public reads only need object storage
+scripts/devcontainer.sh run --env-file my.env sbt spark/test   # environment variables from a file
 scripts/devcontainer.sh down               # stop everything; caches survive
 scripts/devcontainer.sh clean              # stop and delete the cache and service volumes
 ```
 
-Milvus, etcd and MinIO share the dev container's network namespace, so the
-`localhost:19530` and `localhost:9000` addresses in `integration-4.0` work
-unchanged. The container's architecture is the host's: on Apple Silicon it is
-linux-aarch64, which has its own unified native build profile; the container
-may also consume a bundle built elsewhere.
+The optional services share the dev container's network namespace. Public
+integration uses fixed V3 data in an isolated object store, as described below.
+The container uses the host architecture and can consume a matching native
+bundle built elsewhere.
 
-## Project ids
+## Project ids and version selection
 
-sbt project ids cannot contain a dot, so the id and the directory differ for the
-Spark lines. The directory is `spark-4.0`, the id is `spark40`, and the publish
-coordinate is `spark-milvus-4.0`. The same split applies to `apps-4.0` /
-`apps40` and `integration-4.0` / `integration40`.
+The five production project IDs match their directories: `native-runtime`,
+`native-storage`, `native-vector`, `core` and `spark`. The root only aggregates
+these projects. `integration` is separate because it needs a real object store.
 
-Per-module commands take the id as a prefix:
+`-DsparkVersion` selects a supported line or its pinned compile version;
+`-DscalaVersion` selects the full Scala version. Defaults are 4.0 / 2.13.16;
+3.5 also supports 2.12.20. Unsupported combinations fail while loading the
+build. `Versions` is the authoritative matrix.
 
 ```bash
-sbt core/test spark40/compile apps40/test
-sbt spark35/compile spark41/compile spark42/compile   # cross-line check
+sbt core/test spark/compile
+sbt -DsparkVersion=4.2 -DscalaVersion=2.13.16 'clean; integration/clean; compile; test'
+sbt -DsparkVersion=3.5 -DscalaVersion=2.12.20 'clean; integration/clean; compile; test'
 ```
 
-The root project has no sources of its own. It depends on `spark40` and
-`apps40` and exists to assemble the fat jar under the 1.x artifact name, so the
-Dockerfile and downstream consumers do not have to change.
+Restart sbt and clean when switching combinations; the ordinary `target` and
+`crossTarget` directories are retained. Do not change the selected line with
+interactive `++`. CI uses independent invocations and cleans all module outputs,
+including integration; its evidence is kept outside those module targets.
 
-The existing root assembly publication omits the
-embedded `spark40` and `apps40` module dependencies, which are not published
-separately; external dependencies remain in its POM. The Maven release workflow
-uses `releaseJvmArtifacts` to export a JVM implementation for each released
-Spark line, then adds small entry JARs and separate native resources. See
-[Building and releasing Maven artifacts](releasing.md) for the exact coordinates
-and candidate validation process.
+`spark/src/main/scala` and `spark/src/test/scala` contain shared sources.
+`scala-shims` contains only explicit version-dependent roots; `Modules` selects
+the matching roots for compilation and source JARs. Formatting and package-path
+checks cover all retained main/test roots, including unselected shims.
 
-Use root's `assembly` for the runnable fat jar on Spark 4.0 and
-`spark42/assembly` on Spark 4.2. The two share one set of merge and shading
-rules (`fatJarRules` in `build.sbt`), and the 4.2 jar leaves out the Jackson and
-Arrow modules Spark 4.2 ships, so the connector uses Spark's under
-`spark.driver.userClassPathFirst` and `spark.executor.userClassPathFirst` too.
-Root's jar carries its own Arrow: under either setting an Arrow vector that
-passes between the connector and Spark can fail with a `LinkageError`, so leave
-both unset with it. The other per-line assembly tasks do not share the rules
-yet: `spark40/assembly` currently fails on module descriptors, Netty version
-metadata and FastDoubleParser notices. A successful source-classpath test does
-not validate those unfinished bundles.
+Use `spark/assembly` with a selected native bundle for a local fat JAR. All
+lines use the same merge/shading rules and leave Spark-supplied Arrow/Jackson
+modules out. Published candidates use `spark/releaseJvmArtifacts` and, for 4.0,
+`spark/releaseThinArtifacts`; root `assembly` and direct root publication have
+been retired. See [the release guide](releasing.md) for supported release lines
+and final artifact validation.
 
 ## Imports
 
@@ -113,8 +88,8 @@ configuration still use the complete package name.
 Follow the build constraints when reviewing or changing the build, using the
 repository's
 [sbt skill](../.agents/skills/spark-milvus-sbt/SKILL.md). `build.sbt` holds module
-wiring and publication decisions; root run, assembly and publication details
-are named settings in the same file.
+wiring, source selection and candidate exports; assembly settings are named
+blocks in the same file.
 
 | File | What to change there |
 |---|---|
@@ -134,123 +109,80 @@ Existing files in `core/src/test/data` also have a checksum manifest; their
 original locations stay stable.
 `ReadFixtures.copyTo` verifies and copies a named group; it never regenerates a
 missing or corrupt sample. Run `python3 scripts/ci/check_read_fixtures.py` to
-verify all files and the selected read suites' production dependency boundary.
+verify files, reader dependency boundaries and all source package paths,
+including every Spark shim directory.
 The same check runs in public CI, without the private knowledge submodule.
 
 Each sample group records its origin and expected results. Changes to binary
-samples require a deliberate regeneration and review of both expected results
-and hashes. `scripts/fixtures/generate_read_inputs.py` is an explicit maintenance
-command for the synthetic V2 consumer/integration groups (PyArrow 22.0.0 and
-fastavro 1.12.2); builds and CI never run it. V3 and Knowhere samples record the
-producer revisions and native bundle used when they were frozen. Writer,
-index-build and control-plane assertions remain in their existing migration
-scope; they are not evidence for the public reader's independence.
+samples require deliberate regeneration and review of expected results and
+hashes. V3 and Knowhere groups record their producer revisions and native
+bundle. Old V2/backup fixtures and their generator belong to the private
+repository. Ordinary tests and CI only verify and copy committed inputs.
 
 ## Tests that need the native library
 
-Suites that call into C check for upstream `libmilvus-storage-jni` first and cancel
-themselves when it is absent, so a machine without it still gets a green run
-with those suites reported as canceled rather than failed:
+Tests that require upstream Storage or Knowhere JNI cancel when the selected
+bundle is unavailable. This does not count as successful native validation.
+Core segment/Arrow read suites and Spark `nearestby`, `V3ReadContractTest` and
+`ConnectReadSessionTest` use frozen V3 inputs. Connect runs on the 4.x lines,
+with the client isolated from the classic Spark classpath. Environment-driven
+UAT reader suites additionally require their named input options.
 
-- `StorageNativeTest`, `NativeSegmentReadTest` and `SegmentReaderTakeTest` in core
-  read frozen inputs. `NativeWritableObjectStoreTest`, `WriterRoundTripTest` and
-  `SegmentWriterTest` cover the separate write contracts
-- `MilvusV3PartitionWriterLifecycleTest` and `HadoopEndpointSnapshotTest` in spark-4.0
-- `nearestby.NearestByJoinTest`, `nearestby.FrameSearchTest` and
-  `implicits.MilvusDataFrameTest`, which live in spark-4.0's tests and are
-  compiled into all four lines: NEAREST BY (Spark's own on 4.2, the
-  connector's `nearestByJoin` and `nearest_by_join` before it, over a Milvus
-  table input and a DataFrame input) and the DataFrame methods `buildIndex`
-  and `writeSnapshot`. They also need Knowhere's libraries
-- `read.V3ReadContractTest`, shared across all four lines, checks V3 lifecycle,
-  invalid inputs and real task retries using the native libraries
-- `connect.ConnectReadSessionTest` and the legacy `connect.ConnectSessionTest`,
-  compiled into the three 4.x lines: it starts a
-  Spark Connect server in the test JVM and runs the client in a JVM of its own,
-  whose classpath the build resolves from the line's Connect client jar and
-  passes in `milvus.test.connect.client.classpath`
-- `BackfillSegmentWriteTest` in apps-4.0
+Spark 3.5 uses Arrow 12, whose C Data allocation needs a Java 17 test JVM.
+Set `SPARK35_TEST_JAVA_HOME` to that JDK while running sbt itself on Java 21.
+`ArrowReadOwnershipTest` requires Arrow's C Data JNI but no Milvus native bundle.
+The release/native CI explicitly requires each named suite to execute and
+rejects canceled, ignored, pending, failed or missing cases.
 
-`NativeVectorSearchTest` and `NativeVectorSearchBatchedTest` in core cancel on
-the Knowhere library instead.
+Report each run's actual successful, failed and canceled counts and completed
+or aborted suites. Name missing native/UAT prerequisites; a green ordinary
+unit run with cancellations does not establish native compatibility.
 
-The UAT suites — `StorageNativeUatTest` and `SegmentReaderUatTest` in core,
-`StorageFullChainUatTest`, `SnapshotReadUatTest`, `ConnectorWriteReadUatTest`,
-the scenario suite `uat.DataFrameScenariosUatTest` and the NEAREST BY suite
-`uat.NearestByUatTest` in spark-4.0 — cancel on their own environment
-variables as well, so they stay canceled even with the library present.
-`NearestByUatTest` additionally needs Knowhere's native libraries, which the
-unified bundle carries on all four platforms, and its APPROX case needs a
-snapshot whose vector field carries a persisted index
-(`MILVUS_UAT_INDEXED_SNAPSHOT`, which its prepare case creates and prints).
-The UAT directory is also compiled into the 3.5, 4.1 and 4.2 lines, so
-`spark35/testOnly ...DataFrameScenariosUatTest` runs the same scenarios there,
-and `NearestByUatTest` judges the connector's `nearestByJoin` on the older
-lines and Spark's own NEAREST BY on 4.2 against the same answers. The 3.5 line needs a JDK 17 for that run: Arrow 12, which
-Spark 3.5 ships, cannot allocate on JDK 21. Name it in
-`SPARK35_TEST_JAVA_HOME` and the line's test JVM forks from it. The suites
-over a local collection read it through the same interface, so on 3.5 they
-cancel under JDK 21 and run when `SPARK35_TEST_JAVA_HOME` is set; the other
-non-C-Data unit tests run on the build's JDK 21. The shared
-`ArrowReadOwnershipTest` uses Arrow's own C Data JNI and needs no Milvus bundle;
-it also requires the Java 17 test JVM on Spark 3.5.
-
-Use the current run's summary to report successful, failed, canceled, ignored
-and pending tests, and completed or aborted suites. Name the native or UAT
-suites that canceled and state the missing library or environment prerequisite;
-canceled tests did not pass and provide no coverage for that run.
-
-`integration-4.0` is outside the root aggregate. Its legacy write and backfill
-suites still require Milvus. The public `MilvusDataSourceTest` only reads the
-committed `collections/nearest` V3 files from object storage. It checks filtering,
-projection, deletes, repeated actions, real task retries, and two explicit
-identities in the same bucket. Each identity can read its own snapshot JSON and
-its segment files; reading the other snapshot or segment must fail.
-
-Prepare an isolated MinIO fixture without a Milvus server:
+`integration` is outside the root aggregate. Its `MilvusDataSourceTest` reads
+committed `collections/nearest` V3 files from a real object store and checks
+filtering, projection, deletes, repeated actions, task retries and two explicit
+identities in the same bucket. Each identity must fail to read the other
+identity's snapshot or segment files. No Milvus server is needed.
 
 ```bash
 python3 scripts/ci/read_storage.py start --directory /tmp/milvus-read-fixture
 export MILVUS_READ_IT_OPTIONS=/tmp/milvus-read-fixture/a.json
 export MILVUS_READ_IT_OPTIONS_B=/tmp/milvus-read-fixture/b.json
-sbt -Dmilvus.native.bundle=/absolute/path/to/milvus-native-linux-x86_64.jar \
-  'integration40/testOnly *MilvusDataSourceTest'
+sbt -DsparkVersion=4.0 -Dmilvus.native.bundle=/absolute/path/to/milvus-native-linux-x86_64.jar \
+  'integration/testOnly *MilvusDataSourceTest'
 python3 scripts/ci/read_storage.py stop --directory /tmp/milvus-read-fixture
 ```
 
-Always run `stop`, including after failed tests. The helper owns only its newly
-created container and removes its credential files. A containerized workspace
-can pass `--network-container <workspace-id>` to bind the fixture to that
-workspace's loopback. For existing object storage, upload the fixed files to a
-dedicated bucket, create the equivalent two read policies, and supply JSON options
-files yourself. Remote keys are bucket-relative; `fs.root_path` does not prepend
-a prefix. Keep credentials out of Git and test artifacts.
+Always run `stop`, including after failures. The helper removes only its owned
+container and credential files. A containerized workspace can pass
+`--network-container <workspace-id>` to bind the store to its loopback.
+Existing object stores can supply equivalent fixed files and two read policies.
+Remote keys are bucket-relative; `fs.root_path` does not prepend a prefix.
+Keep credentials out of Git and test artifacts.
 
-The [integration Helm chart](../deploy/helm/spark-milvus-integration/README.md)
-accepts `readOptions.existingSecret` with `a.json` and `b.json` and runs without
-Milvus configuration. The test image must supply the declared runner; chart
-linting does not prove that a Kubernetes job ran. Existing service modes remain
-available for the legacy integration suites until migration cleanup.
+The [integration chart](../deploy/helm/spark-milvus-integration/README.md)
+accepts `readOptions.existingSecret` with `a.json` and `b.json`. The test image
+must supply the runner; chart linting alone does not prove that a job ran.
+The earlier service-management chart is maintained under private `deploy/helm`;
+public values reject service setup and write settings.
 
 ### Public read CI
 
-`sbt 'exportBuildMatrix target/build-matrix.json'` exports the Spark/Scala/JDK
-matrix from `Versions`. Shared libraries run with their own dependency settings;
-PRs compile all five source combinations and run the native-free spill suite.
-Push/manual/full-validation CI runs their read/search native suites on Linux
-x86_64; this is separate from the existing eight release consumer jobs. Spark
-3.5 uses JDK 17 for Arrow 12 native tests, while the sbt build and formatting use
-JDK 21. The native lane checks its required XML suites and rejects absent,
-failed or canceled tests. The ordinary root suite retains legacy coverage and
-reports native cancellations separately.
+`exportBuildMatrix` derives five Spark/Scala source combinations from `Versions`.
+Each CI invocation selects a line and Scala version, validates source JAR/POM
+contents and runs source/spill checks. Shared modules run with their own
+configuration. The default root unit run tests Spark 4.0; other lines receive
+the matrix checks. Push/manual/full-validation CI adds mandatory native
+read/search/Arrow/Connect suites and real object-storage reads on Linux x86_64.
+The eight independent release consumer jobs cover Spark 4.0/4.2 on the two Linux
+architectures and two supported OS versions.
 
-`MilvusReadSparkSessionExtensions` installs only NEAREST BY/search rules. Public
-V3 fixture and Connect consumers use it without the management CALL parser or a
-Milvus endpoint. Existing `MilvusSparkSessionExtensions`, Catalog, client and
-legacy input modes remain transitional until T15; the new CI is not evidence
-that those classes have already left the distribution. Independent candidate
-consumers still validate the existing Spark 4.0/4.2 release scope; source matrix
-coverage does not add a new published coordinate.
+Public code has no client, Catalog, CALL parser, backup or writer surface.
+Candidate validation rejects those classes and sources, retired DataFrame
+methods, service/backup options, private dependencies and the Milvus SDK.
+Native engine bindings retain upstream APIs needed by downstream libraries;
+the final boundary applies to connector capabilities. Source matrix coverage
+does not expand the published release matrix.
 
 ## Building the native library
 
@@ -331,7 +263,7 @@ compile unpatched against the macOS SDK's libc++.
 
 The JVM's signal-chaining library is preloaded with `DYLD_INSERT_LIBRARIES`
 (`libjsig.dylib`) where Linux uses `LD_PRELOAD` (`libjsig.so`); both the
-Makefile and the root `run` settings pick the right one.
+Makefile and the forked test settings pick the right one.
 
 If Conan Center or crates.io are slow from your network, `[platform_tool_requires]
 cmake/3.31.12` in the Conan profile (with Homebrew's CMake on the PATH and
@@ -362,7 +294,7 @@ to one CMake/Ninja build tree.
 Build both engines, package their shared dependencies, and select the result:
 
 ```bash
-make native-bundle NATIVE_JOBS=50 NATIVE_BUILD_OPTIONS=--with-cardinal
+make native-bundle NATIVE_JOBS=50
 make package NATIVE_BUNDLE="$PWD/target/native-build/$platform/milvus-native-$platform.jar"
 ```
 
@@ -445,13 +377,12 @@ Select the resulting resource-only JAR and its `.properties` checksum sidecar:
 ```bash
 sbt -Dmilvus.native.bundle=/absolute/path/to/milvus-native-$platform.jar \
   native-runtime/verifyNativeBundle native-vector/knowhereSmoke
-sbt -Dmilvus.native.bundle=/absolute/path/to/milvus-native-$platform.jar test assembly
+sbt -Dmilvus.native.bundle=/absolute/path/to/milvus-native-$platform.jar test spark/assembly
 ```
 
 Before native tests, preload the selected JRE's `lib/libjsig.so`
 (`lib/libjsig.dylib` through `DYLD_INSERT_LIBRARIES` on macOS) as described
-below. The resulting root assembly contains the bundle resources, as does
-`spark42/assembly` built with the same property. At runtime,
+below. The selected `spark/assembly` contains the bundle resources. At runtime,
 one class loader extracts and verifies them in one private directory; both
 upstream JNI loaders use that directory. The external `.properties` checksum
 sidecar is a build input and is not needed next to the deployed assembly.
@@ -531,7 +462,7 @@ the probe does not validate the final artifact or its runtime classpath.
 
 ## Knowhere library loading
 
-The root `knowhere` submodule follows the Knowhere PR #1829 branch; the
+The root `knowhere` submodule follows upstream `main`, including merged PR #1829; the
 superproject gitlink fixes the exact commit used by every build. After pulling
 a change of the submodule URL, run `git submodule sync knowhere` before
 `git submodule update`. `native-vector`
@@ -541,45 +472,23 @@ implement another C API or JNI bridge. The API JAR is cached under
 JDK and an initialized submodule, but does not download source or compile or
 load the native engine.
 
-Cardinal comes from the same build: `make native-bundle
-NATIVE_BUILD_OPTIONS=--with-cardinal` compiles both pinned Cardinal revisions
-into the bundle, which records `with_cardinal=true`. The Cardinal sources use
-`-march=native`, so a Cardinal bundle needs a host with the build machine's
-instruction set. `NativeVectorLibrary.RuntimeInfo.cardinalSupported()` reads
-that feature from the selected native platform manifest at runtime. The JVM's
-`META-INF/milvus-native/compatibility.properties` records the expected Storage
-and Knowhere source revisions; the loader rejects a mismatch before JNI
-initialization. An arbitrary `knowhere.native.path` override does not establish
-Cardinal support. Public release bundles disable Cardinal.
+Public release bundles use open-source Knowhere and disable Cardinal. Private
+Cardinal builds use their pinned historical native build tools, pin the plugin revisions and record
+`with_cardinal=true`; they are outside public release acceptance. The JVM
+compatibility resource records Storage/Knowhere pins and rejects mismatches
+before JNI initialization.
 
-The loader reads
-Milvus binlog/Parquet payloads and optional `SLICE_META`, or a Cardinal raw
-`_mem.index.bin` stream. Payload markers select the matching Faiss or Cardinal
-engine; a shared HNSW name alone does not establish format compatibility.
-Each task owns and closes its index. There is no cross-task index cache.
+Persisted-index readers consume Milvus index payloads and `SLICE_META`; each
+task owns and closes its index. Native loading and format compatibility are
+separate checks. NEAREST BY executes `SegmentSearch` over the segment sets from
+`SearchPlan`, with global TopK merging. Missing libraries fail the query.
 
-A NEAREST BY over a Milvus table returns each query's global TopK, running
-`core.vector.SegmentSearch` over the segment sets `SearchPlan` cut. Missing
-native libraries fail the query. Planning, packing and merge tests run in the
-ordinary suite. `LocalEndToEndSmoke` runs the whole chain over real native code
-on local files -- a write, reads, deletes, EXACT NEAREST BY, `build_index`,
-`write_snapshot`, APPROX NEAREST BY and a write of the hits -- and needs the
-selected unified bundle and the JRE's `libjsig`:
-
-```bash
-sbt -java-home "$JAVA_HOME" -Dmilvus.native.bundle=/absolute/path/to/milvus-native-$platform.jar \
-  "set core / Test / envVars += \"LD_PRELOAD\" -> \"$JAVA_HOME/lib/libjsig.so\"" \
-  "set spark40 / Test / envVars += \"LD_PRELOAD\" -> \"$JAVA_HOME/lib/libjsig.so\"" \
-  'spark40/Test/runMain com.zilliz.spark.connector.read.LocalEndToEndSmoke'
-```
-
-The [release consumer](releasing.md#consumer-gates-and-ci-triggers) instead compiles
-`ReadOnlyConsumerSmoke` and `ReadFixtures` in an independent project, embeds the
-checked-in V2/V3 and index samples, and loads production classes from
-the candidate using real `spark-submit --packages`. The test-only
-`milvus.smoke.master` property selects `local-cluster` for an independent executor
-JVM; the default remains `local[4]`. This validates native operations on local
-files. It does not validate a live Milvus service or segment registration.
+The [release consumer](releasing.md#consumer-gates-and-ci-triggers) compiles
+`ReadOnlyConsumerSmoke` and `ReadFixtures` independently, embeds checked V3 and
+index samples, and loads production classes from the candidate through real
+`spark-submit --packages`. `milvus.smoke.master=local-cluster` requests an
+independent executor JVM. It verifies native reads/search, not Milvus service
+registration. Write/index-build/snapshot-output workloads are private.
 
 `NativeVectorLibrary.load()` explicitly initializes the upstream binding and
 reports the native C ABI and index format versions. The upstream loader owns
@@ -632,22 +541,20 @@ git diff --check
 ```
 
 The restriction serializes tasks for this sbt session while preserving existing
-restrictions. All four Spark projects include `spark-base`, so an unrestricted
-aggregated `scalafmtAll` can write the same file concurrently. Do not run multiple
-formatter processes against the same checkout, and review the diff for missing
-code as well as formatting changes before staging. An empty Scala file can pass
-`scalafmtCheckAll`.
+restrictions. The Spark formatter includes all common and shim roots even when
+only one combination is compiled. Do not run multiple formatter processes
+against one checkout. Review the diff for missing code; an empty Scala file
+can pass `scalafmtCheckAll`.
 
-The root commands cover the aggregated projects. When changing
-`integration-4.0`, which is outside that aggregate, also run:
+`integration` is outside root's aggregate. When changing it, also run:
 
 ```bash
-sbt integration40/scalafmtAll integration40/scalafmtCheckAll
+sbt integration/scalafmtAll integration/scalafmtCheckAll
 ```
 
 When changing `build.sbt` or Scala/sbt files under `project/`, also run
 `sbt scalafmtSbt scalafmtSbtCheck`. CI runs the root `scalafmtCheckAll` and
-`scalafmtSbtCheck`; `integration40/scalafmtCheckAll` remains a local check.
+`scalafmtSbtCheck`; `integration/scalafmtCheckAll` remains a local check.
 Use the pinned `.scalafmt.conf`; do not
 change its rules to make a check pass. Repeat the relevant check after further
 source edits and resolve failures before committing. Keep unrelated formatting
@@ -676,8 +583,8 @@ filters, ignored tests or cancellation conditions to make the run pass.
 Existing native-library and UAT cancellation conditions remain part of the test
 setup; report them and the actual counts as described in
 [Tests that need the native library](#tests-that-need-the-native-library).
-The root run does not include `integration40/test`; its read suite requires a
-real object store, and its write suites also require Milvus. Additional Scala
+The root run does not include `integration/test`; its V3 read suite requires a
+real object store. Additional Scala
 cross-version checks, integration tests, native
 builds and publication follow the task's scope and authorization.
 
@@ -687,16 +594,12 @@ submodule checked out, and CI does not run it. CI does run
 `python3 -m unittest discover -s native-build -p 'test_*.py'` plus the same
 discovery over `scripts/tests`; run them when touching `native-build/`.
 
-## The protobuf split
+## Storage protobufs
 
-`common.proto` and `schema.proto` are generated into `core` with `grpc = false`,
-because the storage format itself is defined in protobuf: a snapshot embeds a
-`CollectionSchema`. The five files that carry gRPC services are generated into
-`client` with `grpc = true`, using an include path so they reference the message
-classes core already produced. Neither module generates the same `.proto` twice.
-
-Adding a proto file means deciding which side it belongs on, and adjusting the
-`includeFilter` in core or the `excludeFilter` in client to match.
+Only `common.proto` and `schema.proto` are generated into `core`, with
+`grpc = false`, because snapshots embed the protobuf `CollectionSchema`.
+Public builds generate no Milvus service stubs. Service protocols and the
+custom client are owned by the private repository.
 
 ## Jackson
 
@@ -717,8 +620,7 @@ so in the message and fix the document in the same commit.
 ## Documents
 
 Public documents are English Markdown files in `docs/`, including this
-guide, [reference-en.md](reference-en.md) and
-[user-guide-snapshot-backfill.md](user-guide-snapshot-backfill.md), and the
+guide, [reference-en.md](reference-en.md), and the
 [release guide](releasing.md). They describe the connector, its use, build and
 release process. Public contributions may include design proposals, decisions
 and the rationale needed to review a change in the same pull request. External

@@ -87,14 +87,44 @@ object Modules {
     javacOptions ++= Seq("--release", l.javaRelease)
   )
 
-  /** Keep the Jackson artifacts aligned on one version. Layer 2 applies it so
-    * its own classpath is consistent; the Spark line modules use Spark's set.
-    * Root applies it too, because its assembly ships jackson-module-scala with
-    * Spark and Arrow excluded: Arrow 18 otherwise drags jackson-databind to
-    * 2.18 while module-scala stays on `Versions.jackson`, and the module then
-    * refuses to register under `spark.driver.userClassPathFirst=true` ("Scala
-    * module 2.17.3 requires Jackson Databind version >= 2.17.0 and < 2.18.0"),
-    * which fails every snapshot read.
+  /** Only these shim roots enter compilation; formatting covers every retained
+    * root.
+    */
+  def sparkSources(line: Versions.SparkLine): Seq[Setting[_]] = {
+    import org.scalafmt.sbt.ScalafmtPlugin.autoImport._
+    val mainShims = line.id match {
+      case "3.5"         => Seq("spark-3.5", "spark-3.5-4.1")
+      case "4.0" | "4.1" => Seq("spark-4.0-4.1", "spark-3.5-4.1")
+      case "4.2"         => Seq("spark-4.2")
+    }
+    Seq(
+      Compile / unmanagedSourceDirectories ++= mainShims.map(name =>
+        baseDirectory.value / "src" / "main" / "scala-shims" / name
+      ),
+      Test / unmanagedSourceDirectories ++= (if (line.id == "3.5") Seq.empty
+                                             else
+                                               Seq(
+                                                 baseDirectory.value / "src" / "test" / "scala-shims" / "spark-4.0-4.2"
+                                               )),
+      // scalafmt reads its source list separately from its directory list.
+      // Enumerate unselected shims here without adding them to compilation.
+      Compile / scalafmt / unmanagedSources :=
+        ((Compile / unmanagedSources).value ++
+          ((baseDirectory.value / "src" / "main" / "scala-shims") ** "*.scala").get).distinct,
+      Test / scalafmt / unmanagedSources :=
+        ((Test / unmanagedSources).value ++
+          ((baseDirectory.value / "src" / "test" / "scala-shims") ** "*.scala").get).distinct,
+      Compile / scalafmt / unmanagedSourceDirectories ++=
+        ((baseDirectory.value / "src" / "main" / "scala-shims") * "*").get
+          .filter(_.isDirectory),
+      Test / scalafmt / unmanagedSourceDirectories ++=
+        ((baseDirectory.value / "src" / "test" / "scala-shims") * "*").get
+          .filter(_.isDirectory)
+    )
+  }
+
+  /** Keep standalone core's Jackson family aligned. The Spark module relies on
+    * its distribution's own Jackson set and excludes it from bundles.
     */
   val jacksonPin: Seq[Setting[_]] = Seq(
     dependencyOverrides ++= Seq(

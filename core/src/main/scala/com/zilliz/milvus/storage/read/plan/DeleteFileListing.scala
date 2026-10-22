@@ -15,20 +15,17 @@ import com.zilliz.milvus.storage.snapshot.{
 /** The delete files a snapshot names, listed on the driver and read nowhere on
   * the driver.
   *
-  * A V2 segment lists its delete files in the snapshot itself
-  * (`DeleteFiles.Listed`). A V3 segment lists them in its manifest at the read
-  * version, so listing means opening that manifest, and resolving the version
-  * first when the snapshot entry carries none; the versions resolved that way
-  * are returned so the tasks are pinned to them. An L0 segment holds only
-  * delete files, which apply to every segment of its partition (partition `-1`
-  * meaning all).
+  * A V3 segment lists its delete files in its manifest at the read version, so
+  * listing means opening that manifest, and resolving the version first when
+  * the snapshot entry carries none; the versions resolved that way are returned
+  * so the tasks are pinned to them. An L0 segment holds only delete files,
+  * which apply to every segment of its partition (partition `-1` meaning all).
   *
   * The files themselves are read on the executor by
   * `core.read.exec.DeletePlans`; the driver never holds a primary-key map.
   */
 final case class DeleteFileListing(
     v3BySegment: Map[Long, Seq[DeltaLogFile]],
-    v2BySegment: Map[Long, Seq[DeltaLogFile]],
     inheritedByPartition: Map[Long, Seq[DeltaLogFile]],
     v3ReadVersions: Map[Long, Long],
     /** Rows of the V3 segments whose manifest was opened, by segment id. A
@@ -47,8 +44,7 @@ final case class DeleteFileListing(
       Seq.empty
     ) ++
       inheritedByPartition.getOrElse(partitionId, Seq.empty) ++
-      v3BySegment.getOrElse(segmentId, Seq.empty) ++
-      v2BySegment.getOrElse(segmentId, Seq.empty)
+      v3BySegment.getOrElse(segmentId, Seq.empty)
 }
 
 object DeleteFileListing {
@@ -59,11 +55,10 @@ object DeleteFileListing {
   val AllPartitions: Long = -1L
 
   val empty: DeleteFileListing =
-    DeleteFileListing(Map.empty, Map.empty, Map.empty, Map.empty)
+    DeleteFileListing(Map.empty, Map.empty, Map.empty)
 
-  /** Whether listing has to open object storage. V2 delete files are already
-    * named by the snapshot; V3 needs its manifest only to resolve an unpinned
-    * version or to list enabled delete files.
+  /** Whether listing has to open object storage. V3 needs its manifest to
+    * resolve an unpinned version or to list enabled delete files.
     */
   def requiresStore(snapshot: Snapshot, applyDeletes: Boolean): Boolean = {
     val listsV3Deletes = applyDeletes && snapshot.primaryKeyField.nonEmpty
@@ -94,7 +89,10 @@ object DeleteFileListing {
       endpoint: String = ""
   ): Either[Throwable, DeleteFileListing] =
     try {
-      if (applyDeletes) validateV2DeleteState(snapshot)
+      require(
+        snapshot.segments.forall(_.storageVersion == 3),
+        "public reads require Storage V3 segments"
+      )
       Right(
         list(
           snapshot,
@@ -163,16 +161,6 @@ object DeleteFileListing {
       )
       (seg.id, readVersion, deltaLogs, files.rows)
     }
-    val v2 =
-      if (!listDeleteFiles) Seq.empty[(Long, Seq[DeltaLogFile])]
-      else
-        snapshot.v2Segments.collect {
-          case seg if seg.hasData =>
-            seg.deletes match {
-              case DeleteFiles.Listed(files) => seg.id -> files
-              case _ => seg.id -> Seq.empty[DeltaLogFile]
-            }
-        }
     val inherited =
       if (!listDeleteFiles) Map.empty[Long, Seq[DeltaLogFile]]
       else
@@ -185,7 +173,6 @@ object DeleteFileListing {
       v3BySegment = v3.collect {
         case (id, _, files, _) if files.nonEmpty => id -> files
       }.toMap,
-      v2BySegment = v2.filter(_._2.nonEmpty).toMap,
       inheritedByPartition = inherited.filter(_._2.nonEmpty),
       v3ReadVersions = v3.map { case (id, version, _, _) =>
         id -> version
@@ -193,14 +180,6 @@ object DeleteFileListing {
       v3Rows = v3.collect { case (id, _, _, Some(rows)) => id -> rows }.toMap
     )
   }
-
-  private def validateV2DeleteState(snapshot: Snapshot): Unit =
-    snapshot.v2Segments.find(_.deletes == DeleteFiles.Unknown).foreach { seg =>
-      throw new IllegalStateException(
-        s"cannot plan deletes for V2 segment ${seg.id} in snapshot '${snapshot.name}' " +
-          s"from ${snapshot.origin}: its delete-file state is unknown"
-      )
-    }
 
   private def deleteLogKey(
       path: String,

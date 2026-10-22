@@ -37,15 +37,15 @@ single-use implementation block can also be named when that makes a module's
 purpose clearer. Do not optimize for line count, a fixed number of files, or
 removing every repeated literal.
 
-Use the document's actual patterns: one factory for Spark lines, direct apps and
-integration declarations, an explicit publication decision, and named root
-run/assembly/publication settings. Read helper implementations before changing
+Use the document's actual patterns: one selected `spark` project, explicit
+main/test shim roots, a separate integration declaration, an aggregate-only root
+and explicit candidate export tasks. Read helper implementations before changing
 their scope; names must account for their effects.
 
 Keep module IDs, directories, dependency scopes and exclusions, version values,
 task aggregation, resource paths and artifact coordinates stable during a
-structural cleanup unless changing them is part of the request. Account for the
-temporary root artifact and upstream JNI binding described in the document.
+structural cleanup unless changing them is part of the request. Keep the public five-module thin graph and the upstream JNI binding contract
+consistent with the candidate verifier.
 Follow AGENTS.md's removal rule; a grep result alone does not authorize removing
 a user-facing contract.
 
@@ -60,8 +60,8 @@ Before every commit, including documentation-only commits, run formatting and
 then the formatting checks using the
 [pre-commit formatting commands](../../../docs/contributing.md#formatting).
 Use the repository's pinned Scalafmt configuration and Java 21. Serialize
-formatting tasks: the four Spark projects share `spark-base`, and concurrent
-writes have truncated a source file. Do not run multiple formatter processes
+formatting tasks and include every retained main/test shim root, not only the
+selected compile roots. Concurrent formatter writes have truncated a source file. Do not run multiple formatter processes
 against the same checkout.
 
 Review the resulting diff before staging; a passing formatter check does not
@@ -83,7 +83,10 @@ test and suite counts, including existing native-library and UAT cancellations
 and their reasons, as described in contributing.md; canceled tests did not pass.
 
 When build settings change, compare the before/after module graph, aggregation
-and affected dependency or publication settings. Additional Scala cross-version
+and affected dependency or publication settings. Select Spark and Scala through
+`-DsparkVersion` and `-DscalaVersion` in separate sbt invocations, cleaning module
+outputs between combinations. Compile and source JARs use selected shim roots;
+formatting and package checks inspect all roots. Additional Scala cross-version
 checks, integration services, native builds and publication follow the session's
 scope and authorization. Report static checks separately from commands actually
 run, and do not claim runtime compatibility from compilation or POM correctness

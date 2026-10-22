@@ -1,29 +1,18 @@
 package com.zilliz.milvus.storage
 
-/** Lists the snapshot directory, picks a snapshot and turns its JSON and Avro
-  * into the read model.
+/** Resolves a fixed Storage V3 snapshot file into the read model.
   *
   * Main types: Snapshot, Segment, SegmentLayout, DeleteFiles,
-  * SegmentStatistics, SnapshotCatalog, V2ColumnGroup, DeltaLogFile (what a V2
-  * segment's layout, statistics and delete list are made of), CollectionIndex,
-  * SegmentIndex and SegmentIndexes (definitions, exact persisted builds, and
-  * whether a source supplied index metadata), the JSON shapes in `json`,
-  * V2SegmentResolver (the hook through which compat materializes V2 packed
-  * segments, since core does not depend on compat). SnapshotSource is the
-  * common read entry point. The catalog decodes each snapshot Avro once and
-  * shares its records with V2 footer recovery. `SnapshotSelection` validates
-  * and intersects partition and segment selectors from neutral identity/data
-  * descriptors; public and private `Snapshot.narrow` share these rules.
-  * `retainDataSegments` applies optimizer output. Both retain the applicable
-  * partition and collection-wide L0 delete segments. See
-  * docs/design/projects/spark-milvus/architecture/snapshot.html and
-  * vector-search.html section 2.4.
+  * SegmentStatistics, SnapshotCatalog, DeltaLogFile, CollectionIndex,
+  * SegmentIndex and SegmentIndexes. SnapshotSource resolves the input once;
+  * SnapshotCatalog validates its JSON and segment Avro records, including
+  * persisted index identity and file locations. Legacy storage formats are
+  * rejected before planning.
   *
-  * `Snapshot` is the Milvus snapshot. Decision 25, as revised on 2026-09-17,
-  * evolves it into `TableVersion`, the table model every input produces: the
-  * format-neutral part moves there and these Milvus fields become the Milvus
-  * part that only the Milvus `TableFormat` reads. See
-  * docs/design/projects/spark-milvus/architecture/table-version.html.
+  * SnapshotSelection validates partition and segment selections from neutral
+  * identity descriptors; external format adapters share the same selection
+  * rules. PhysicalColumnGroups carries already-resolved files and column names
+  * for consumers of the low-level reader, without compatibility interpretation.
   *
   * Capabilities: R2, R3, R9, R13, R16, C3 (see
   * docs/design/projects/spark-milvus/capabilities.md).

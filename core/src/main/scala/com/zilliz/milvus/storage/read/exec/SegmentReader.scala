@@ -240,23 +240,6 @@ object SegmentReader {
         task.segmentId,
         allocator
       )
-    case SegmentLayout.ColumnGroups(groups) =>
-      openColumnGroups(
-        groups.map { group =>
-          PhysicalColumnGroup(
-            group.fieldIds.flatMap(id => columnNameFor(id).toList),
-            group.filePaths,
-            group.fileRowCounts
-          )
-        },
-        arrowSchema,
-        neededColumns,
-        task.properties,
-        task.limits,
-        task.expectedRows,
-        task.segmentId,
-        allocator
-      )
     case physical: SegmentLayout.PhysicalColumnGroups =>
       openColumnGroups(
         physical.groups,

@@ -2,16 +2,7 @@ package com.zilliz.milvus.storage.snapshot
 
 import scala.util.control.NonFatal
 
-/** One read entry point, already bound to where its snapshot is: a location in
-  * the snapshot directory, a milvus-backup export, the 1.x option strings.
-  *
-  * `getTable` builds one for the read's `ReadMode` and calls it once; the
-  * `Snapshot` it returns is carried from the table to the scan, so no stage
-  * after it opens storage to find out what the collection looks like.
-  * Implementations: `SnapshotCatalog.at`, `latestOf` and `named` (core),
-  * `BackupSnapshotSource` (compat.backup), and the client and option-string
-  * sources in `spark.table`, which need types core does not have.
-  */
+/** One fixed file input, resolved once before partition planning. */
 trait SnapshotSource {
   def snapshot(): Either[Throwable, Snapshot]
 }

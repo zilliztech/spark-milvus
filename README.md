@@ -11,12 +11,10 @@ APPROX uses compatible persisted indexes. Deletions and scalar predicates apply
 before ranking. Use the read-only session extension and `MilvusSparkPlugin`;
 see [the search reference](docs/reference-en.md#vector-search).
 
-During the repository migration, the source tree and transitional artifacts
-still contain the old Catalog, client, management CALL, write and backup
-implementations. New callers use the V3 file entry below. Writing, backfill,
+The public distribution contains only V3 reads and search. Writing, backfill,
 index construction, snapshot output, old storage formats, backup and Cardinal
-belong to the private `milvus-offline-compute` repository. Existing APIs remain
-until the T15 source cleanup; their presence is not a public support commitment.
+belong to the private offline repository. Public APIs contain no Catalog,
+management CALL, service client or Milvus SDK dependency.
 
 The 1.x line stopped at `v1.6.0` and is no longer maintained. The 2.0 rewrite
 continues on `refactor/v2`. Candidate versions and artifact coordinates are
@@ -24,41 +22,37 @@ explicitly recorded by the [release workflow](docs/releasing.md).
 
 ## Project structure
 
-The build has twelve sbt modules in four layers. Dependencies only point
-downward, and the boundary between layer 2 and layer 3 is enforced at compile
-time: a source file in `core`, `compat` or `client` that mentions
-`org.apache.spark` fails the build.
+The public build has five production modules in three layers. Dependencies
+point downward; `core` and `native-storage` reject Spark imports at compile time.
 
 | Layer | Module | What it holds |
 |---|---|---|
-| 1 | `native-runtime` | Verifies and extracts one unified native dependency bundle shared by both upstream bindings |
-| 1 | `native-storage` | Compiles and packages the pinned milvus-storage JNI and Java/Scala API |
-| 1 | `native-vector` | Compiles the pinned Knowhere PR #1829 Java API and delegates vector operations through its upstream JNI |
-| 2 | `core` | The storage format itself: snapshots, manifests, delete files, schema, codecs, statistics, planning, segment read and write, indexes, object-storage access. No Spark. |
-| 2 | `compat` | Adapters for the two non-standard read entry points that need format code: Storage V2 packed segments and a milvus-backup export directory. The option-string segment list is resolved in `spark-base`'s `options` package. |
-| 2 | `client` | The gRPC client for the online Milvus service |
-| 3 | `spark-base` | Connector sources shared by every Spark line. Not an sbt project, just a source directory. |
-| 3 | `spark-3.5`, `spark-4.0`, `spark-4.1`, `spark-4.2` | One project per maintained Spark line. Each pins its own Spark, Arrow, antlr and Java version and compiles the shared sources. |
-| 4 | `apps-4.0` | The backfill job users run; vector search is a NEAREST BY join that `spark-base` takes over |
-| — | `integration-4.0` | Integration tests. Needs a real Milvus and MinIO; never published. |
+| 1 | `native-runtime` | Verification and extraction of the unified native bundle |
+| 1 | `native-storage` | The pinned milvus-storage JNI and Java/Scala API |
+| 1 | `native-vector` | The upstream Knowhere Java API and persisted-index search adapter |
+| 2 | `core` | V3 snapshots, manifests, deletes, schema, codecs, read planning and search; no Spark |
+| 3 | `spark` | Read-only DataSource, DataFrame and NEAREST BY interfaces |
+| — | `integration` | V3 reads from a real object store, outside root's aggregate |
 
-Why the core layer carries no Spark dependency: one artifact serves all four
-Spark lines, its tests run without a SparkSession, and the boundary is checked
-by the compiler instead of by review.
+The root only aggregates modules. It has no mixed assembly or publication.
+Select a Spark line and Scala version when starting sbt; the `spark` module
+compiles common sources with the required `scala-shims` directories.
 
-Only the Spark layer has to be split per line, because the `TableCatalog` and
-`ParserInterface` method sets differ, and Arrow, antlr and the Java target
-version are pinned per line. The fat jar is an `assembly` task on
-`spark-<line>`, not a module of its own. During the migration two fat jars are
-usable, packed by the same rules: root's `sbt assembly`
-(`spark-connector-assembly-*.jar`) for Spark 4.0, and `sbt spark42/assembly`
-(`spark-milvus-4.2-bundle-*.jar`) for Spark 4.2. The 3.5, 4.0 and 4.1 tasks
-have no merge or shading rules yet.
+| Spark selector | Compile version | Supported Scala | Java bytecode |
+|---|---|---|---|
+| `3.5` | 3.5.5 | 2.12.20, 2.13.16 | 11 |
+| `4.0` (default) | 4.0.0 | 2.13.16 | 17 |
+| `4.1` | 4.1.1 | 2.13.16 | 17 |
+| `4.2` | 4.2.0 | 2.13.16 | 17 |
+
+The build runs on Java 21. Spark 3.5 native Arrow tests fork Java 17 via
+`SPARK35_TEST_JAVA_HOME`. The published release matrix remains Spark 4.0/4.2;
+source compilation of another line does not expand that release commitment.
 
 Four git submodules sit in the repository. `milvus-proto` supplies the
 protobuf definitions: `common.proto` and `schema.proto` are generated into
-`core` because the storage format itself is defined in protobuf, and the five
-files carrying gRPC services are generated into `client`. `milvus-storage`
+`core` because the storage format itself is defined in protobuf. No service
+protocols or gRPC clients are generated. `milvus-storage`
 supplies the native storage library from `milvus-io/milvus-storage`, pinned at
 official commit `5694520`, including PR #714's Tencent OIDC role chain while
 retaining eager Parquet pre-buffering and the IO pool API from PR #703.
@@ -80,8 +74,7 @@ git submodule update --init docs/design
 
 | Document | What it answers |
 |---|---|
-| [docs/reference-en.md](docs/reference-en.md) | Every option and entry point: vector search, the catalog, reads, writes, backup directories, SQL procedures, data types |
-| [docs/user-guide-snapshot-backfill.md](docs/user-guide-snapshot-backfill.md) | Retained pre-migration guide; maintained backfill callers now live in the private offline repository |
+| [docs/reference-en.md](docs/reference-en.md) | V3 read options, vector search, data types and supported entry points |
 | [docs/contributing.md](docs/contributing.md) | Building, formatting, testing and the native bundle, beyond this README |
 | [docs/releasing.md](docs/releasing.md) | Maven coordinates, the supported release matrix, candidate validation and Central publication |
 | [native-build/README.md](native-build/README.md) | How the per-platform native bundle is built and published |
@@ -99,7 +92,7 @@ The quickest way to a complete build, package and test environment is the
 development container: it is the `dev` stage of the root `Dockerfile`, built
 locally on top of its toolchain stage, with the dependency caches in named
 volumes and an optional
-local Milvus and MinIO for the integration suite.
+local object-storage services for integration tests.
 
 ```bash
 scripts/devcontainer.sh up        # build the dev image once, start the container
@@ -167,17 +160,21 @@ alias spark-submit-wrapper="/xxx/spark-submit-wrapper.sh"
 The native libraries, the toolchain versions and the two ways to build the
 native bundle are described in [native-build/README.md](native-build/README.md).
 
-Knowhere library loading uses the Java API and JNI from pinned PR #1829.
+Knowhere library loading uses the Java API and JNI from pinned upstream `main`,
+which includes merged PR #1829.
 The API builds automatically; the native platform JAR is selected explicitly.
 See [Knowhere library loading](docs/contributing.md#knowhere-library-loading)
 for the real JNI smoke command and the `libjsig` preload requirement.
 
 ```bash
-sbt clean compile package publishLocal   # compile and publish to the local repository
-sbt assembly                             # fat jar with every dependency, Spark 4.0
-sbt spark42/assembly                     # the same for Spark 4.2
-sbt test                                 # unit tests, all modules
-sbt integration40/test                   # integration tests, needs Milvus and MinIO
+sbt compile test                           # default Spark 4.0, Scala 2.13.16
+sbt -DsparkVersion=4.2 -DscalaVersion=2.13.16 \
+  'clean; integration/clean; compile; test'
+sbt -DsparkVersion=3.5 -DscalaVersion=2.12.20 \
+  'clean; integration/clean; compile; test'
+# Select a matching native bundle before assembly or native integration tests.
+sbt -DsparkVersion=4.0 -Dmilvus.native.bundle=/absolute/path/native.jar spark/assembly
+sbt -DsparkVersion=4.0 -Dmilvus.native.bundle=/absolute/path/native.jar integration/test
 ```
 
 The Maven release workflow exports JVM and native artifacts independently and
@@ -192,10 +189,10 @@ them into the unified Storage/Knowhere bundle from the platform's profile under
 toolchain and its Conan configuration are in
 [contributing.md](docs/contributing.md#macos).
 
-`sbt compile` builds every module except `integration-4.0`, which sits outside
-root's aggregate. To work on one, prefix the command with
-its project id: `core/test`, `spark40/compile`, `apps40/test`. The ids drop the
-dot, so the project for `spark-4.0` is `spark40`.
+`sbt compile` builds the five production modules for the selected combination.
+Use project IDs such as `core/test`, `spark/compile` and `integration/Test/compile`
+for individual work. Restart sbt and clean when changing the Spark or Scala
+selection. `spark/assembly` produces `spark/target/scala-<binary>/spark-milvus-<line>-bundle-*.jar`.
 
 ### Docker
 
@@ -205,24 +202,19 @@ Storage/Knowhere bundle; either accepts a matching prebuilt unified JAR and its
 `.properties` sidecar through `NATIVE_BUNDLE` instead.
 
 ```bash
-docker build --build-arg PUBLISH_MAVEN=false -t spark-milvus .  # current architecture
-
-# Trusted publication: BuildKit exposes the credential only to the publish RUN.
-docker build \
-  --secret id=maven_credentials,src=/path/to/sbt-credentials \
-  --build-arg PUBLISH_MAVEN=true \
-  -t spark-milvus .
+docker build -t spark-milvus .  # current architecture, Spark 4.0 local read bundle
 ```
 
 | Build argument | Default | Meaning |
 |---|---|---|
 | `GIT_BRANCH` | `unknown` | Goes into the version string |
-| `PUBLISH_TO_CENTRAL` | `true` | Whether to publish to Maven Central Snapshots |
-| `PUBLISH_MAVEN` | unset | Repository-neutral publication override used by trusted CI |
-| `MAVEN_CREDENTIALS_FILE` | `/run/secrets/maven_credentials` | In-build path of the BuildKit `maven_credentials` secret |
 | `NATIVE_BUNDLE` | empty | Prebuilt unified Linux JAR inside the build context, with its checksum sidecar |
 | `NATIVE_JOBS` | `50` | Native build concurrency, from 1 to 50 |
-| `NATIVE_BUILD_OPTIONS` | empty | Unified source build options, including `--conan-lock` and `--with-cardinal` |
+| `NATIVE_BUILD_OPTIONS` | empty | Unified OSS source build options, including `--conan-lock` |
+
+Docker does not publish Maven artifacts; use the verified [release workflow](docs/releasing.md).
+The [integration chart](deploy/helm/spark-milvus-integration/README.md) only runs
+V3 reads with an existing Secret; service deployment/setup lives in the private repository.
 
 The version is derived as `2.0.0-{branch}-{arch}-SNAPSHOT`, for example
 `2.0.0-refactor-v2-amd64-SNAPSHOT`.
@@ -239,9 +231,8 @@ docker rm temp
 
 Use the public candidate's JVM implementation and matching OSS native JAR, or
 its universal/platform-specific Maven entry, for the selected Spark line. See
-[release coordinates](docs/releasing.md). The old root assembly remains a
-transitional build target; new callers do not discover it by glob or assume it
-contains the private jobs.
+[release coordinates](docs/releasing.md). For a local build, use the selected
+`spark/assembly` bundle.
 
 ### Run the read and search demo
 
@@ -320,9 +311,7 @@ the [search reference](docs/reference-en.md#vector-search) for these semantics
 and the [read examples](docs/reference-en.md#31-reading-data) for direct
 `spark.read.format("milvus")` options.
 
-Backfill and other write jobs run from the private offline repository. The
-[retained backfill guide](docs/user-guide-snapshot-backfill.md) identifies the
-migrated entry; its old public implementation is transitional until T15.
+Backfill and other write jobs run from the private offline repository.
 
 ## License
 

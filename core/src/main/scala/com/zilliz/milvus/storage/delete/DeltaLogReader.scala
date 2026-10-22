@@ -4,9 +4,6 @@ import java.nio.charset.StandardCharsets
 import scala.collection.mutable
 import scala.util.control.NonFatal
 
-import com.fasterxml.jackson.databind.ObjectMapper
-
-import com.zilliz.milvus.storage.codec.BinlogCodec
 import com.zilliz.milvus.storage.codec.BinlogCodec.{forEachRow, ParquetRow}
 import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.path.StoragePath
@@ -14,10 +11,6 @@ import com.zilliz.milvus.storage.snapshot.DeltaLogFile
 import io.milvus.grpc.schema.{DataType, FieldSchema}
 
 object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
-  private val DeleteEventType: Byte = 2
-  private val MultiFieldVersion = "MULTI_FIELD"
-
-  private val mapper = new ObjectMapper()
 
   /** Decodes a bare Parquet file containing primary-key and timestamp columns.
     * Input formats that wrap these bytes in another container must unwrap it
@@ -34,7 +27,7 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
         isParquet(bytes),
         s"delete payload in $path must be bare Parquet (PAR1)"
       )
-      Right(decodePayloadPlan(bytes, multiField = true, pkField, path))
+      Right(decodePayloadPlan(bytes, pkField, path))
     } catch {
       case NonFatal(e) => Left(e)
     }
@@ -49,34 +42,9 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
       validatePkType(pkField)
       val plans = deltaLogs.map { log =>
         val at = StoragePath.parse(log.logPath, bucket)
-        decodeDeletePlan(store.readAll(at), pkField, at.key)
+        decodeParquet(store.readAll(at), pkField, at.key)
       }
       sequence(plans).map(DeletePlan.union)
-    } catch {
-      case NonFatal(e) => Left(e)
-    }
-  }
-
-  /** Two encodings of a delete file are read, told apart by the first bytes
-    * (decision 13): a bare parquet file with a pk column and a ts column, which
-    * is what a V3 segment's `_delta/` holds, and the binlog event container of
-    * the V2 line, whose parquet payloads sit behind a descriptor event.
-    */
-  private def decodeDeletePlan(
-      bytes: Array[Byte],
-      pkField: FieldSchema,
-      path: String
-  ): Either[Throwable, DeletePlan] = {
-    try {
-      if (isParquet(bytes)) {
-        decodeParquet(bytes, pkField, path)
-      } else {
-        val container = parseContainer(bytes, path)
-        val plans = container.payloads.map { payload =>
-          decodePayloadPlan(payload, container.multiField, pkField, path)
-        }
-        Right(DeletePlan.union(plans))
-      }
     } catch {
       case NonFatal(e) => Left(e)
     }
@@ -92,24 +60,13 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
 
   private def decodePayloadPlan(
       payload: Array[Byte],
-      multiField: Boolean,
       pkField: FieldSchema,
       path: String
   ): DeletePlan = {
     val longs = mutable.HashMap.empty[Long, Long]
     val strings = mutable.HashMap.empty[String, Long]
     forEachRow(payload) { row =>
-      if (multiField) {
-        appendMultiFieldDelete(row, pkField, path, longs, strings)
-      } else {
-        appendLegacyDelete(
-          extractLegacyDelete(row, path),
-          pkField,
-          path,
-          longs,
-          strings
-        )
-      }
+      appendMultiFieldDelete(row, pkField, path, longs, strings)
     }
 
     pkField.dataType match {
@@ -164,116 +121,6 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
     }
   }
 
-  private def extractLegacyDelete(row: ParquetRow, path: String): String = {
-    val fieldCount = row.columnCount
-    if (fieldCount < 1) {
-      throw new IllegalStateException(
-        s"legacy delete log payload in $path is missing the delta column"
-      )
-    }
-    if (row.isNull(0)) {
-      throw new IllegalStateException(
-        s"legacy delete log payload in $path has an empty delta value"
-      )
-    }
-    row.getString(0)
-  }
-
-  private def appendLegacyDelete(
-      raw: String,
-      pkField: FieldSchema,
-      path: String,
-      longs: mutable.Map[Long, Long],
-      strings: mutable.Map[String, Long]
-  ): Unit = {
-    val trimmed = raw.trim
-    if (trimmed.startsWith("{")) {
-      val json = mapper.readTree(trimmed)
-      val pkType = json.path("pkType").asInt(Int.MinValue)
-      val pkNode = json.path("pk")
-      if (pkType == Int.MinValue || pkNode.isMissingNode) {
-        throw new IllegalStateException(
-          s"invalid legacy delete log JSON in $path: $trimmed"
-        )
-      }
-      val expectedPkType = pkField.dataType match {
-        case DataType.Int64   => DataType.Int64.value
-        case DataType.VarChar => DataType.VarChar.value
-        case other =>
-          throw new IllegalArgumentException(
-            s"unsupported primary key type $other for delete logs"
-          )
-      }
-      if (pkType != expectedPkType) {
-        throw new IllegalStateException(
-          s"delete log pkType $pkType in $path does not match collection PK type ${pkField.dataType.value}"
-        )
-      }
-      val tsNode = json.path("ts")
-      if (!tsNode.canConvertToLong) {
-        throw new IllegalStateException(
-          s"delete log ts in $path must be numeric: $trimmed"
-        )
-      }
-      val deleteTs = tsNode.longValue()
-      pkField.dataType match {
-        case DataType.Int64 =>
-          if (!pkNode.isNumber) {
-            throw new IllegalStateException(
-              s"delete log pk in $path must be numeric for Int64 PKs: $trimmed"
-            )
-          }
-          val pk = pkNode.longValue()
-          longs.update(
-            pk,
-            math.max(longs.getOrElse(pk, Long.MinValue), deleteTs)
-          )
-        case DataType.VarChar =>
-          if (!pkNode.isTextual) {
-            throw new IllegalStateException(
-              s"delete log pk in $path must be textual for VarChar PKs: $trimmed"
-            )
-          }
-          val pk = pkNode.textValue()
-          strings.update(
-            pk,
-            math.max(strings.getOrElse(pk, Long.MinValue), deleteTs)
-          )
-        case _ =>
-      }
-    } else {
-      val parts = trimmed.split(",", 2)
-      if (parts.length != 2) {
-        throw new IllegalStateException(
-          s"invalid legacy delete log payload in $path: $trimmed"
-        )
-      }
-      if (pkField.dataType != DataType.Int64) {
-        throw new IllegalStateException(
-          s"legacy 'pk,ts' delete log payload in $path only supports Int64 PKs"
-        )
-      }
-      val pk = parts(0).trim.toLong
-      val deleteTs = parts(1).trim.toLong
-      longs.update(pk, math.max(longs.getOrElse(pk, Long.MinValue), deleteTs))
-    }
-  }
-
-  private def parseContainer(
-      bytes: Array[Byte],
-      path: String
-  ): ParsedContainer = {
-    val container = BinlogCodec.parse(bytes, path)
-    ParsedContainer(
-      Option(container.extras.get("version"))
-        .exists(_.asText() == MultiFieldVersion),
-      container.events
-        .filter(_.kind == DeleteEventType)
-        .map(_.payload)
-        .filter(_.nonEmpty)
-    )
-  }
-
   private def validatePkType(pkField: FieldSchema): Unit = {
     pkField.dataType match {
       case DataType.Int64 | DataType.VarChar =>
@@ -294,10 +141,5 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
     }
     Right(out.toSeq)
   }
-
-  private final case class ParsedContainer(
-      multiField: Boolean,
-      payloads: Seq[Array[Byte]]
-  )
 
 }

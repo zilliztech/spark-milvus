@@ -6,7 +6,6 @@ import java.nio.file.{Files, Paths}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.snapshot.{DeltaLogFile, Segment, V2ColumnGroup}
 import io.milvus.grpc.schema.{
   CollectionSchema => ProtoCollectionSchema,
   DataType
@@ -685,57 +684,6 @@ class SnapshotJsonTest extends AnyFunSuite with Matchers {
     deserializedList should have size originalManifestList.size
     deserializedList.head.segmentID shouldBe originalManifestList.head.segmentID
     deserializedList.head.manifest shouldBe originalManifestList.head.manifest
-  }
-
-  test("serialize and deserialize V2 segments keeps delta logs") {
-    val segments = Seq(
-      Segment.v2(
-        id = 10L,
-        partitionId = 20L,
-        rows = 30L,
-        columnGroups = Seq(
-          V2ColumnGroup(
-            fieldIds = Seq(100L, 0L, 1L),
-            filePaths = Seq("files/insert_log/.../0/1"),
-            fileRowCounts = Seq(30L)
-          )
-        ),
-        deltaLogs = Seq(
-          DeltaLogFile(
-            logId = 9L,
-            logPath = "files/delete_log/.../9",
-            entriesNum = 2L
-          ),
-          DeltaLogFile(
-            logId = 11L,
-            logPath = "files/delete_log/.../11",
-            entriesNum = 1L
-          )
-        )
-      )
-    )
-
-    val json = SegmentListJson.encodeV2Segments(segments)
-    json should not be empty
-
-    val result = SegmentListJson.decodeV2Segments(json)
-    result shouldBe a[Right[_, _]]
-    val roundTripped = result.toOption.get
-
-    roundTripped should have size 1
-    roundTripped.head shouldBe segments.head
-  }
-
-  test(
-    "deserializeV2Segments defaults legacy column-group JSON to unknown slot"
-  ) {
-    // JSON that predates slot_field_id: the group must decode to -1 so
-    // slot-based dedup stays off rather than reading stale data.
-    val json =
-      """[{"segment_id":1,"partition_id":1,"num_of_rows":1,"storage_version":2,""" +
-        """"column_groups":[{"field_ids":[100],"file_paths":["p"],"file_row_counts":[1]}]}]"""
-    val segs = SegmentListJson.decodeV2Segments(json).toOption.get
-    segs.head.columnGroups.head.slotFieldId shouldBe -1L
   }
 
   test("Parse data_type as string format (e.g., 'Int64' instead of 5)") {

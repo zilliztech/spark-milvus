@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class NativePlatformMakeTest(unittest.TestCase):
-    def run_make(self, system, architecture, bundle="", target="package"):
+    def run_make(self, system, architecture, bundle="", target="package", spark="4.0", scala="2.13.16"):
         with tempfile.TemporaryDirectory(prefix="native-make-test-") as temporary:
             directory = Path(temporary)
             override = directory / "override.mk"
@@ -28,6 +28,7 @@ class NativePlatformMakeTest(unittest.TestCase):
                 ["make", "--no-print-directory", "-f", str(ROOT / "Makefile"),
                  "-f", str(override), target, "UNAME_S=" + system,
                  "UNAME_M=" + architecture, "NATIVE_BUNDLE=" + bundle,
+                 "SPARK_VERSION=" + spark, "SCALA_VERSION=" + scala,
                  "NATIVE_WORK_DIR=" + str(directory / "work"),
                  "SBT=" + str(sbt), "JAVA_HOME=" + os.environ.get("JAVA_HOME", "/unused/jdk")],
                 cwd=ROOT, text=True, capture_output=True, check=True,
@@ -44,7 +45,7 @@ class NativePlatformMakeTest(unittest.TestCase):
                 self.assertIn("selected:native-build", output)
                 self.assertIn("selected:native-bundle", output)
                 self.assertIn("sbt-arg:-Dmilvus.native.bundle=", output)
-                self.assertIn("sbt-arg:package", output)
+                self.assertIn("sbt-arg:spark/assembly", output)
 
     def test_every_platform_has_a_profile(self):
         # The selection rule is the profile directory, so a platform is added by
@@ -74,7 +75,14 @@ class NativePlatformMakeTest(unittest.TestCase):
                 output = self.run_make("Linux", "x86_64", bundle)
                 expected = bundle if bundle.startswith("/") else str(ROOT / bundle)
                 arguments = [line for line in output.splitlines() if line.startswith("sbt-arg:")]
-                self.assertEqual(["sbt-arg:-Dmilvus.native.bundle=" + expected, "sbt-arg:package"], arguments)
+                self.assertEqual(["sbt-arg:-DsparkVersion=4.0", "sbt-arg:-DscalaVersion=2.13.16",
+                                  "sbt-arg:-Dmilvus.native.bundle=" + expected, "sbt-arg:spark/assembly"], arguments)
+
+    def test_selected_line_and_scala_reach_sbt_without_changing_module_id(self):
+        output = self.run_make("Linux", "x86_64", "/chosen/bundle.jar", spark="3.5", scala="2.12.20")
+        self.assertIn("sbt-arg:-DsparkVersion=3.5", output)
+        self.assertIn("sbt-arg:-DscalaVersion=2.12.20", output)
+        self.assertIn("sbt-arg:spark/assembly", output)
 
 
 

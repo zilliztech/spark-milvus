@@ -3,14 +3,14 @@ package com.zilliz.milvus.storage.read.plan
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import com.zilliz.milvus.storage.read.exec.PhysicalColumnGroup
 import com.zilliz.milvus.storage.snapshot.{
   DeltaLogFile,
   Segment,
   SegmentLayout,
   Snapshot,
   SnapshotCatalog,
-  SnapshotOrigin,
-  V2ColumnGroup
+  SnapshotOrigin
 }
 import com.zilliz.milvus.storage.snapshot.json.ManifestItemJson
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
@@ -34,15 +34,10 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
   )
 
   private val v3Props = Map("fs.bucket_name" -> "raw")
-  private val v2Props = Map("fs.bucket_name" -> "canonical")
-  private val properties: Int => Map[String, String] = {
-    case 2 => v2Props
-    case _ => v3Props
-  }
+  private val properties: Int => Map[String, String] = _ => v3Props
 
   private def snapshotOf(
-      v3: Seq[ManifestItemJson] = Seq.empty,
-      v2: Seq[Segment] = Seq.empty
+      v3: Seq[ManifestItemJson] = Seq.empty
   ): Snapshot =
     SnapshotCatalog
       .fromLists(
@@ -52,7 +47,6 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
         partitionIds = Seq(20L),
         schemaBytes = schema.toByteArray,
         v3Items = v3,
-        v2Segments = v2,
         bucket = "canonical",
         origin = SnapshotOrigin.Options
       )
@@ -63,15 +57,6 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
       30L,
       """{"ver":7,"base_path":"files/insert_log/10/20/30"}"""
     )
-
-  private def v2Segment(id: Long, groups: Seq[V2ColumnGroup]): Segment =
-    Segment.v2(id = id, partitionId = 20L, rows = 1L, columnGroups = groups)
-
-  private val group = V2ColumnGroup(
-    fieldIds = Seq(100L),
-    filePaths = Seq("files/insert_log/10/20/31/100/1.parquet"),
-    fileRowCounts = Seq(1L)
-  )
 
   private def log(id: Long) = DeltaLogFile(id, s"files/delta/$id", 5L)
 
@@ -120,8 +105,7 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
     "a task names the delete files it applies: the collection's L0 files, its partition's, then its own"
   ) {
     val listing = DeleteFileListing(
-      v3BySegment = Map(30L -> Seq(log(3))),
-      v2BySegment = Map(31L -> Seq(log(4))),
+      v3BySegment = Map(30L -> Seq(log(3)), 31L -> Seq(log(4))),
       inheritedByPartition = Map(
         -1L -> Seq(log(1)),
         20L -> Seq(log(2)),
@@ -130,7 +114,15 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
       v3ReadVersions = Map.empty
     )
     val plan = ReadPlan.of(
-      snapshotOf(v3 = Seq(v3Item), v2 = Seq(v2Segment(31L, Seq(group)))),
+      snapshotOf(v3 =
+        Seq(
+          v3Item,
+          ManifestItemJson(
+            31L,
+            """{"ver":7,"base_path":"files/insert_log/10/20/31"}"""
+          )
+        )
+      ),
       properties,
       applyDeletes = true,
       deletes = listing
@@ -145,7 +137,6 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
   test("a segment with no delete file of any kind carries DeleteSource.None") {
     val listing = DeleteFileListing(
       v3BySegment = Map.empty,
-      v2BySegment = Map.empty,
       inheritedByPartition = Map(21L -> Seq(log(9))), // another partition
       v3ReadVersions = Map.empty
     )
@@ -160,13 +151,20 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
 
   test("applyDeletes=false ships no delete file") {
     val listing = DeleteFileListing(
-      v3BySegment = Map(30L -> Seq(log(3))),
-      v2BySegment = Map(31L -> Seq(log(4))),
+      v3BySegment = Map(30L -> Seq(log(3)), 31L -> Seq(log(4))),
       inheritedByPartition = Map(20L -> Seq(log(2))),
       v3ReadVersions = Map.empty
     )
     val plan = ReadPlan.of(
-      snapshotOf(v3 = Seq(v3Item), v2 = Seq(v2Segment(31L, Seq(group)))),
+      snapshotOf(v3 =
+        Seq(
+          v3Item,
+          ManifestItemJson(
+            31L,
+            """{"ver":7,"base_path":"files/insert_log/10/20/31"}"""
+          )
+        )
+      ),
       properties,
       applyDeletes = false,
       deletes = listing
@@ -175,23 +173,17 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
     plan.partitionsApplyingDeletes shouldBe 0
   }
 
-  test(
-    "a V2 segment becomes a column-group task with the canonical properties"
-  ) {
-    val plan = ReadPlan.of(
-      snapshotOf(v2 = Seq(v2Segment(31L, Seq(group)))),
-      properties,
-      applyDeletes = true
-    )
-    val task = plan.specs.head
-    task.layout shouldBe SegmentLayout.ColumnGroups(Seq(group))
-    task.properties shouldBe v2Props
-    plan.totalRows shouldBe Some(1L)
-  }
-
   test("requested field ids are carried by every storage-line task") {
     val plan = ReadPlan.of(
-      snapshotOf(v3 = Seq(v3Item), v2 = Seq(v2Segment(31L, Seq(group)))),
+      snapshotOf(v3 =
+        Seq(
+          v3Item,
+          ManifestItemJson(
+            31L,
+            """{"ver":7,"base_path":"files/insert_log/10/20/31"}"""
+          )
+        )
+      ),
       properties,
       applyDeletes = false,
       neededFieldIds = Seq(103L, 100L)
@@ -206,29 +198,21 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
   test("resource limits are carried by every storage-line task") {
     val limits = ReadLimits(1024, 8388608L, 67108864L)
     val plan = ReadPlan.of(
-      snapshotOf(v3 = Seq(v3Item), v2 = Seq(v2Segment(31L, Seq(group)))),
+      snapshotOf(v3 =
+        Seq(
+          v3Item,
+          ManifestItemJson(
+            31L,
+            """{"ver":7,"base_path":"files/insert_log/10/20/31"}"""
+          )
+        )
+      ),
       properties,
       applyDeletes = false,
       limits = limits
     )
 
     plan.specs.map(_.limits) shouldBe Seq(limits, limits)
-  }
-
-  test("a delete-only V2 segment is no task, and V3 tasks come first") {
-    val l0 = Segment.v2(
-      id = 32L,
-      partitionId = 20L,
-      rows = 0L,
-      columnGroups = Seq.empty,
-      deltaLogs = Seq(DeltaLogFile(1L, "files/delta_log/10/20/32/1", 5L))
-    )
-    val plan = ReadPlan.of(
-      snapshotOf(v3 = Seq(v3Item), v2 = Seq(l0, v2Segment(31L, Seq(group)))),
-      properties,
-      applyDeletes = true
-    )
-    plan.specs.map(_.segmentId) shouldBe Seq(30L, 31L)
   }
 
   test(
@@ -240,13 +224,19 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
       properties(v)
     }
     ReadPlan.of(
-      snapshotOf(v2 =
-        Seq(v2Segment(31L, Seq(group)), v2Segment(33L, Seq(group)))
+      snapshotOf(v3 =
+        Seq(
+          v3Item,
+          ManifestItemJson(
+            33L,
+            """{"ver":7,"base_path":"files/insert_log/10/20/33"}"""
+          )
+        )
       ),
       counting,
       applyDeletes = true
     )
-    asked shouldBe Seq(2)
+    asked shouldBe Seq(3)
   }
 
   test("a layout that contradicts the storage version is an error") {
@@ -255,7 +245,12 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
       partitionId = 20L,
       storageVersion = 3,
       rows = None,
-      layout = SegmentLayout.ColumnGroups(Seq(group)),
+      layout = SegmentLayout.PhysicalColumnGroups(
+        Seq(PhysicalColumnGroup(Seq("100"), Seq("data.parquet"), Seq(1L))),
+        "{\"fields\":[]}",
+        Map(100L -> "100"),
+        Map.empty
+      ),
       deletes = com.zilliz.milvus.storage.snapshot.DeleteFiles.Listed(Seq.empty)
     )
     val snapshot = snapshotOf().copy(segments = Seq(wrong))

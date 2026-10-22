@@ -1,7 +1,7 @@
 package com.zilliz.milvus.storage
 
 /** Milvus column-value encoding and decoding, and persisted-index file
-  * handling, shared by the read and write paths.
+  * handling, including neutral file-format contracts reused by consumers.
   *
   * Float16 and BFloat16 packing lives here, as does the (index, value) encoding
   * of sparse vectors and the protobuf `ScalarField` an Array value is stored
@@ -15,21 +15,18 @@ package com.zilliz.milvus.storage
   * vector library; both belong to the Milvus format side rather than to the
   * computation
   * (docs/design/projects/spark-milvus/architecture/vector-search.html section
-  * 2.5). `SegmentIndexObjects` names, slices, encodes and writes what a build
-  * produced into those files through `ObjectStore`. It shares the envelope and
-  * slice-metadata definitions in `IndexFileFormat` (W6); business encoders live
-  * in `core.write.codec`. FloatConverter also packs read-query vectors, so its
-  * encode methods remain part of this read-side package.
+  * 2.5). `IndexFileFormat` provides shared envelope and slice definitions.
+  * FloatConverter packs read-query vectors, so its encode methods remain part
+  * of this read-side package.
   *
   * `VectorIndexFamilies` is the one list of index types this connector reads
-  * and writes, with the byte markers each family's persisted stream starts
-  * with: the types that can be loaded and the markers that identify them are
-  * the same fact, and splitting them is how a family ends up declared but
-  * unreadable.
+  * loads, with the byte markers each family's persisted stream starts with: the
+  * types that can be loaded and the markers that identify them are the same
+  * fact, and splitting them is how a family ends up declared but unreadable.
   *
   * Main types: FloatConverter, SparseFloatVectorConverter, ArrayCodec,
   * BinlogCodec, BinlogFormat, MilvusIndexFileDecoder, IndexFileCodec,
-  * IndexFileFormat, SegmentIndexObjects, VectorIndexFamilies. Capabilities:
-  * R15, W3, V2, W6 (see docs/design/projects/spark-milvus/capabilities.md).
+  * IndexFileFormat, VectorIndexFamilies. Capabilities: R15, V2 (see
+  * docs/design/projects/spark-milvus/capabilities.md).
   */
 package object codec

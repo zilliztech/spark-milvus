@@ -32,14 +32,11 @@ object CapabilityIndex {
   private val IdPattern: Regex = raw"\b([RWCAVKOG]\d+)\b".r
 
   /** The design names used in the 实现位置 column, and the package they mean.
-    * `spark.X` exists once per Spark line, so it resolves to several paths and
-    * any one of them counts.
+    * `spark.X` resolves to shared sources and all supported shim roots; any
+    * source-bearing matching package counts.
     */
   private val Prefixes: Seq[(String, Seq[String])] = Seq(
     "core." -> Seq("core/src/main/scala/com/zilliz/milvus/storage"),
-    "compat." -> Seq("compat/src/main/scala/com/zilliz/milvus/storage/compat"),
-    "client." -> Seq("client/src/main/scala/com/zilliz/milvus/client"),
-    "apps." -> Seq("apps-4.0/src/main/scala/com/zilliz/spark/connector/apps"),
     "native-storage." -> Seq(
       "milvus-storage/java/src/main/scala/io/milvus/storage",
       "milvus-storage/java/src/main/java/io/milvus/storage"
@@ -48,11 +45,11 @@ object CapabilityIndex {
       "native-vector/src/main/java/com/zilliz/milvus/jni/vector"
     ),
     "spark." -> Seq(
-      "spark-base/src/main/scala/com/zilliz/spark/connector",
-      "spark-3.5/src/main/scala/com/zilliz/spark/connector",
-      "spark-4.0/src/main/scala/com/zilliz/spark/connector",
-      "spark-4.1/src/main/scala/com/zilliz/spark/connector",
-      "spark-4.2/src/main/scala/com/zilliz/spark/connector"
+      "spark/src/main/scala/com/zilliz/spark/connector",
+      "spark/src/main/scala-shims/spark-3.5/com/zilliz/spark/connector",
+      "spark/src/main/scala-shims/spark-3.5-4.1/com/zilliz/spark/connector",
+      "spark/src/main/scala-shims/spark-4.0-4.1/com/zilliz/spark/connector",
+      "spark/src/main/scala-shims/spark-4.2/com/zilliz/spark/connector"
     )
   )
 
@@ -128,7 +125,7 @@ object CapabilityIndex {
     */
   private def locationsIn(cell: String): Seq[String] = {
     val token =
-      raw"\b((?:core|compat|client|apps|spark|native-storage|native-vector)\.[a-zA-Z][a-zA-Z0-9.]*)".r
+      raw"(?<![A-Za-z0-9_.])((?:core|compat|client|apps|spark|native-storage|native-vector)\.[a-zA-Z][a-zA-Z0-9.]*)".r
     token.findAllMatchIn(cell).map(_.group(1).stripSuffix(".")).toSeq.distinct
   }
 

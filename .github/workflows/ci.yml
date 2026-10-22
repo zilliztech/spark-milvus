@@ -170,10 +170,8 @@ jobs:
       - name: Install template test dependency
         run: python3 -m pip install PyYAML==6.0.3
 
-      - name: Lint service, managed and offline read modes
+      - name: Lint the fixed V3 read Job
         run: |
-          helm lint --strict deploy/helm/spark-milvus-integration -f deploy/helm/spark-milvus-integration/ci-values.example.yaml
-          helm lint --strict deploy/helm/spark-milvus-integration -f deploy/helm/spark-milvus-integration/ci-values.managed.example.yaml
           helm lint --strict deploy/helm/spark-milvus-integration -f deploy/helm/spark-milvus-integration/ci-values.read.example.yaml
 
       - name: Test templates and release lifecycle
@@ -204,7 +202,7 @@ jobs:
         run: python3 -m unittest discover -s native-build -p 'test_git_safe_directory.py' -v
 
   build-and-test:
-    name: Legacy aggregate coverage and clean contracts
+    name: Aggregate coverage and clean contracts
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -233,12 +231,10 @@ jobs:
       # docs/design/projects/spark-milvus/capabilities.md from the private design submodule. It runs
       # before every commit instead (docs/contributing.md, Unit tests).
 
-      # `compile` aggregates over the eleven unit-tested modules, which covers all
-      # four Spark lines against the shared spark-base sources. integration-4.0
-      # is outside the aggregate because its suites need a live Milvus, so it is
-      # compiled explicitly here and never run.
+      # The selected default line is 4.0; the exported matrix covers all other
+      # combinations. Object-storage integration stays outside the aggregate.
       - name: Compile every module
-        run: sbt 'compile; Test/compile; integration40/Test/compile'
+        run: sbt 'compile; Test/compile; integration/Test/compile'
 
       # Suites that need the native library skip themselves, so no filter is
       # needed any more: they call it once and cancel when it is absent.

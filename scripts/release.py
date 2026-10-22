@@ -14,6 +14,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 import time
@@ -33,6 +34,105 @@ CENTRAL_REPOSITORY = "https://repo.maven.apache.org/maven2"
 SIGNING_FINGERPRINT = "F0004DED15D9C011F344D6A8526AB23093F3D44A"
 COMPATIBILITY = "META-INF/milvus-native/compatibility.properties"
 SDK_PACKAGES = ("io/milvus/client/", "io/milvus/v2/", "io/milvus/param/", "io/milvus/response/")
+# Native engine APIs may expose low-level write functions. This gate applies to
+# connector capabilities and service-generated stubs, not upstream bindings.
+RETIRED_PACKAGES = (
+    "com/zilliz/milvus/client/", "com/zilliz/milvus/storage/write/",
+    "com/zilliz/milvus/storage/compat/", "com/zilliz/spark/connector/write/",
+    "com/zilliz/spark/connector/catalog/", "com/zilliz/spark/connector/procedure/",
+    "com/zilliz/spark/connector/apps/", "com/zilliz/spark/connector/extensions/parser/",
+    "com/zilliz/spark/connector/extensions/Call", "io/milvus/grpc/milvus/",
+    "io/milvus/grpc/feder/", "io/milvus/grpc/msg/", "io/milvus/grpc/rg/",
+    "milvus/proto/feder/", "milvus/proto/msg/", "milvus/proto/tokenizer/",
+    "com/zilliz/spark/connector/extensions/MilvusSparkSessionExtensions",
+)
+RETIRED_CLASSES = (
+    "com/zilliz/milvus/storage/vector/IndexBuilder",
+    "com/zilliz/milvus/jni/vector/NativeVectorIndexBuilder",
+    "com/zilliz/milvus/storage/manifest/SnapshotSegmentWriter",
+    "com/zilliz/milvus/storage/codec/SegmentIndexObjects",
+    "com/zilliz/milvus/storage/codec/IndexObjectTarget",
+    "com/zilliz/milvus/storage/codec/WrittenIndexObject",
+    "com/zilliz/milvus/storage/snapshot/V2ColumnGroup",
+    "com/zilliz/milvus/storage/snapshot/V2SegmentResolver",
+    "com/zilliz/milvus/storage/snapshot/SnapshotOrigin$Backup",
+    "com/zilliz/milvus/storage/snapshot/SegmentLayout$ColumnGroups",
+    "com/zilliz/spark/connector/read/V2ColumnBinding",
+    "com/zilliz/spark/connector/metrics/WriteMetricsReport",
+)
+
+RETIRED_OPTION_MEMBERS = {
+    "MilvusUri", "MilvusToken", "MilvusServerPemPath", "MilvusClientKeyPath",
+    "MilvusClientPemPath", "MilvusCaPemPath", "MilvusDatabaseName", "MilvusCollectionName",
+    "MilvusPartitionName", "MilvusCollectionPKType", "MilvusCollectionID", "MilvusPartitionID",
+    "MilvusSegmentID", "MilvusFieldID", "MilvusInsertMaxBatchSize", "MilvusRetryCount",
+    "MilvusRetryInterval", "WriteFileRollingBytes", "DefaultWriteFileRollingBytes",
+    "BackfillMode", "BackfillModeReplace", "BackfillModeCoalesce", "BackfillModeOverwrite",
+    "BackupDir", "SnapshotV2Segments", "connectionParams", "backupDir", "isBackupMode",
+    "validateBackupModeOptions", "writerProperties", "uri", "token", "serverPemPath",
+    "clientKeyPath", "clientPemPath", "caPemPath", "databaseName", "collectionName",
+    "partitionName", "collectionPKType", "insertMaxBatchSize", "retryCount", "retryInterval",
+    "collectionID", "partitionID", "segmentID", "fieldID", "writeFileRollingBytes",
+}
+
+
+def class_utf8_constants(data):
+    """Read exact JVM identifiers, distinguishing an accessor from a rejected key literal."""
+    require(len(data) >= 10 and data[:4] == b"\xca\xfe\xba\xbe", "Invalid JVM class file")
+    count = struct.unpack_from(">H", data, 8)[0]
+    offset, index, names = 10, 1, set()
+    sizes = {3: 4, 4: 4, 5: 8, 6: 8, 7: 2, 8: 2, 9: 4, 10: 4,
+             11: 4, 12: 4, 15: 3, 16: 2, 17: 4, 18: 4, 19: 2, 20: 2}
+    while index < count:
+        require(offset < len(data), "Truncated JVM constant pool")
+        tag = data[offset]
+        offset += 1
+        if tag == 1:
+            require(offset + 2 <= len(data), "Truncated JVM UTF8 length")
+            size = struct.unpack_from(">H", data, offset)[0]
+            offset += 2
+            require(offset + size <= len(data), "Truncated JVM UTF8 constant")
+            # Retired identifiers are ASCII; non-ASCII modified UTF8 does not match.
+            value = data[offset:offset + size]
+            if value.isascii():
+                names.add(value.decode("ascii"))
+            offset += size
+        else:
+            require(tag in sizes, "Unsupported JVM constant pool tag: " + str(tag))
+            offset += sizes[tag]
+            require(offset <= len(data), "Truncated JVM constant pool entry")
+            if tag in (5, 6):
+                index += 1
+        index += 1
+    return names
+
+
+def verify_read_only(archive, names):
+    forbidden = [name for name in names if name.startswith(RETIRED_PACKAGES)
+                 or any(name in (base + ".scala", base + ".java", base + ".class")
+                        or name.startswith(base + "$") for base in RETIRED_CLASSES)]
+    require(not forbidden, "Public artifact contains retired write/control/compatibility API: " + ", ".join(sorted(forbidden)))
+    for name in names:
+        if not name.endswith((".class", ".scala", ".java")) or not name.startswith("com/zilliz/"):
+            continue
+        contents = archive.read(name)
+        if "/implicits/" in name:
+            require(not any(method in contents for method in (b"buildIndex", b"writeSnapshot")),
+                    "Public DataFrame API contains a retired write method: " + name)
+        if name.startswith("com/zilliz/spark/connector/options/MilvusOption"):
+            if name.endswith(".class"):
+                members = class_utf8_constants(contents)
+            else:
+                source = re.sub(r"/\*.*?\*/|//[^\n]*", "", contents.decode(), flags=re.S)
+                # Ignore string literals: the rejection set deliberately names
+                # unsupported old keys so old callers fail before storage I/O.
+                source = re.sub(r'"(?:\\.|[^"\\])*"', '""', source)
+                members = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", source))
+            retired = members & RETIRED_OPTION_MEMBERS
+            require(not retired, "Public options contain retired backup/service members: " +
+                    name + ": " + ", ".join(sorted(retired)))
+
+
 VERSION = re.compile(r"2\.\d+\.\d+(?:-[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*)?")
 SHA = re.compile(r"[0-9a-f]{40}")
 THIN_MODULES = {
@@ -40,10 +140,7 @@ THIN_MODULES = {
     "spark-milvus-native-storage_2.13": ("native-storage", ("spark-milvus-native-runtime",)),
     "spark-milvus-native-vector": ("native-vector", ("spark-milvus-native-runtime",)),
     "spark-milvus-core_2.13": ("core", ("spark-milvus-native-storage_2.13", "spark-milvus-native-vector")),
-    "spark-milvus-compat_2.13": ("compat", ("spark-milvus-core_2.13",)),
-    "spark-milvus-client_2.13": ("client", ("spark-milvus-core_2.13",)),
-    "spark-milvus-4.0-thin_2.13": ("spark40", ("spark-milvus-core_2.13", "spark-milvus-compat_2.13",
-                                                 "spark-milvus-client_2.13")),
+    "spark-milvus-4.0-thin_2.13": ("spark", ("spark-milvus-core_2.13",)),
 }
 MAVEN_FILES = {(classifier, extension) for classifier, extension in
                (("", "jar"), ("sources", "jar"), ("javadoc", "jar"), ("", "pom"))}
@@ -53,9 +150,7 @@ THIN_SOURCES = {
                        "milvus-storage/scala/io/milvus/storage/MilvusStorageReader.scala"},
     "native-vector": {"com/zilliz/milvus/jni/vector/NativeVectorLibrary.java", "io/knowhere/Knowhere.java"},
     "core": {"com/zilliz/milvus/storage/snapshot/Snapshot.scala"},
-    "compat": {"com/zilliz/milvus/storage/compat/v2/FooterV2SegmentResolver.scala"},
-    "client": {"com/zilliz/milvus/client/api/MilvusClient.scala"},
-    "spark40": {"com/zilliz/spark/connector/sources/MilvusDataSource.scala",
+    "spark": {"com/zilliz/spark/connector/sources/MilvusDataSource.scala",
                 "com/zilliz/spark/connector/extensions/MilvusReadSparkSessionExtensions.scala",
                 "com/zilliz/spark/connector/extensions/NearestByExtensions.scala"},
 }
@@ -208,6 +303,7 @@ def verify_native(path, plan, platform):
 def verify_jvm(path, plan):
     with zipfile.ZipFile(path) as archive:
         names = archive_names(archive)
+        verify_read_only(archive, names)
         require(not any(name.startswith("native/") for name in names), "JVM JAR embeds a platform bundle")
         require(not any(name.startswith(SDK_PACKAGES) for name in names),
                 "JVM JAR embeds the official Milvus SDK")
@@ -225,13 +321,15 @@ def verify_sources(path, kind, artifact):
     """Validate real sources for the APIs consumers compile against, not a placeholder JAR."""
     with zipfile.ZipFile(path) as archive:
         names = archive_names(archive)
+        if kind in {"thin", "jvm"}:
+            verify_read_only(archive, names)
         require(not any(name.endswith((".class", ".so", ".dll", ".dylib")) or name.startswith("native/")
                         for name in names), "Source JAR contains binary implementation")
         if kind == "thin":
             required = THIN_SOURCES[THIN_MODULES[artifact][0]]
         elif kind == "jvm":
             required = set().union(*(THIN_SOURCES[name] for name in
-                                   ("native-runtime", "native-storage", "native-vector", "core", "spark40")))
+                                   ("native-runtime", "native-storage", "native-vector", "core", "spark")))
         else:
             return  # Entry/native artifacts document resources; they have no JVM implementation.
         require(required <= set(names), "Source JAR is missing API sources: " + ", ".join(sorted(required - set(names))))
@@ -333,9 +431,7 @@ def thin_metadata(data, plan):
     require(all(re.fullmatch(r"4\.0\.(?:0|[1-9][0-9]*)", version) for version in versions)
             and tuple(map(int, versions[0].split("."))) <= tuple(map(int, versions[1].split("."))),
             "Thin Spark build version must match the line and not exceed the consumer version")
-    # The current closure still contains the old client and writes until their
-    # migration. This export must not claim to be the final read-only artifact.
-    require(data.get("migrationState") == "transition", "Thin migration state must be transition")
+    require(data.get("migrationState") == "read-only", "Thin migration state must be read-only")
     modules = data.get("modules", [])
     require(len(modules) == len(THIN_MODULES)
             and {module["artifactId"] for module in modules} == set(THIN_MODULES),
@@ -370,6 +466,9 @@ def pom_dependencies(path):
                 and dep["version"] not in {"LATEST", "RELEASE"}, "Non-release POM dependency")
         require(not (dep["groupId"] == "io.milvus" and "sdk" in dep["artifactId"].lower()),
                 "Public artifact depends on the official Milvus SDK")
+        require(not (dep["groupId"] == "com.zilliz" and any(value in dep["artifactId"]
+                    for value in ("-compat", "-client", "offline", "-apps"))),
+                "Public artifact depends on a retired private module")
     return project, dependencies
 
 
@@ -398,6 +497,7 @@ def verify_thin_pom(artifact, dependencies, module, plan, spark_build_version):
 def verify_thin_jar(path, artifact, plan, classes):
     with zipfile.ZipFile(path) as archive:
         names = archive_names(archive)
+        verify_read_only(archive, names)
         require(not any(name.startswith("native/") or name.endswith((".so", ".dylib", ".dll")) or ".so." in name
                         or name == "META-INF/milvus-native/provenance.json"
                         for name in names), "Thin JAR embeds a platform bundle")

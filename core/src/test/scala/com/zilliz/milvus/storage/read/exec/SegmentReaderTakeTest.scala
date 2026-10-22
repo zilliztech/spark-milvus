@@ -18,7 +18,7 @@ import org.scalatest.matchers.should.Matchers
 import com.zilliz.milvus.jni.storage.NativeStorageLibrary
 import com.zilliz.milvus.storage.io.ReadFixtures
 import com.zilliz.milvus.storage.read.plan.{ReadLimits, SegmentReadTask}
-import com.zilliz.milvus.storage.snapshot.{SegmentLayout, V2ColumnGroup}
+import com.zilliz.milvus.storage.snapshot.SegmentLayout
 import io.milvus.storage.{
   MilvusStorageColumnGroups,
   MilvusStorageException,
@@ -82,7 +82,7 @@ class SegmentReaderTakeTest extends AnyFunSuite with Matchers {
       name: String,
       properties: Map[String, String],
       base: String = "segment"
-  ): (SegmentReadTask, Seq[V2ColumnGroup]) = {
+  ): (SegmentReadTask, Seq[PhysicalColumnGroup]) = {
     ReadFixtures.copyTo(s"segments/$name", directory)
     val nativeProperties = new MilvusStorageProperties()
     try {
@@ -92,10 +92,9 @@ class SegmentReaderTakeTest extends AnyFunSuite with Matchers {
         val groups = manifest.columnGroupsPtr
         val descriptors =
           (0 until MilvusStorageColumnGroups.count(groups)).map { index =>
-            V2ColumnGroup(
+            PhysicalColumnGroup(
               MilvusStorageColumnGroups
                 .columns(groups, index)
-                .map(_.toLong)
                 .toSeq,
               MilvusStorageColumnGroups.files(groups, index).toSeq,
               MilvusStorageColumnGroups.fileRowCounts(groups, index).toSeq
@@ -114,6 +113,14 @@ class SegmentReaderTakeTest extends AnyFunSuite with Matchers {
       } finally manifest.close()
     } finally nativeProperties.free()
   }
+
+  private def physicalLayout(groups: Seq[PhysicalColumnGroup]) =
+    SegmentLayout.PhysicalColumnGroups(
+      groups,
+      schema.toJson,
+      Map(100L -> "100", 101L -> "101", 102L -> "102"),
+      Map.empty
+    )
 
   private def open(
       task: SegmentReadTask,
@@ -149,7 +156,7 @@ class SegmentReaderTakeTest extends AnyFunSuite with Matchers {
     withFixture { (directory, allocator, properties) =>
       val (task, groups) =
         fixture(directory, "take-split", properties)
-      val vectors = groups.find(_.fieldIds == Seq(102L)).get
+      val vectors = groups.find(_.columnNames == Seq("102")).get
       vectors.filePaths.foreach(path => Files.delete(directory.resolve(path)))
       val reader = open(task, allocator)
       try {
@@ -197,10 +204,10 @@ class SegmentReaderTakeTest extends AnyFunSuite with Matchers {
       val task = SegmentReadTask(
         1L,
         1L,
-        SegmentLayout.ColumnGroups(
+        physicalLayout(
           Seq(
-            V2ColumnGroup(
-              files.head.fieldIds,
+            PhysicalColumnGroup(
+              files.head.columnNames,
               files.flatMap(_.filePaths),
               files.flatMap(_.fileRowCounts)
             )
@@ -230,7 +237,7 @@ class SegmentReaderTakeTest extends AnyFunSuite with Matchers {
     withFixture { (directory, allocator, properties) =>
       val (manifestTask, groups) =
         fixture(directory, "take-10", properties)
-      val task = manifestTask.copy(layout = SegmentLayout.ColumnGroups(groups))
+      val task = manifestTask.copy(layout = physicalLayout(groups))
       val reader = open(task, allocator)
       try {
         val empty = reader.take(Array.emptyLongArray, Seq("100"))
@@ -271,7 +278,7 @@ class SegmentReaderTakeTest extends AnyFunSuite with Matchers {
       val reader = SegmentReader.openColumnGroups(
         groups.map { group =>
           PhysicalColumnGroup(
-            group.fieldIds.map(_.toString),
+            group.columnNames,
             group.filePaths,
             group.fileRowCounts
           )

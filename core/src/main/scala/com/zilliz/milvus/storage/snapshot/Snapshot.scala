@@ -49,7 +49,6 @@ final case class Snapshot(
     segments.filter(s => !s.hasData && s.deletes != DeleteFiles.Empty)
 
   def v3Segments: Seq[Segment] = segments.filter(_.storageVersion == 3)
-  def v2Segments: Seq[Segment] = segments.filter(_.storageVersion == 2)
 
   /** Retains only the named data segments after an optimization such as R9.
     * Delete-only segments are not candidates for data pruning: partition L0
@@ -118,9 +117,6 @@ object SnapshotOrigin {
   /** Read from a snapshot JSON at `location` in the snapshot directory. */
   final case class Catalog(location: String) extends SnapshotOrigin
 
-  /** Translated from a milvus-backup export at `dir`. */
-  final case class Backup(dir: String) extends SnapshotOrigin
-
-  /** Deserialized from the 1.x option strings. Goes with capability K2. */
+  /** Constructed from explicit snapshot file metadata. */
   case object Options extends SnapshotOrigin
 }

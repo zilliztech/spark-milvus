@@ -7,7 +7,7 @@ import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.codec.BinlogFixture
 import com.zilliz.milvus.storage.io.LocalObjectStore
-import com.zilliz.milvus.storage.snapshot.{DeltaLogFile, Segment, V2ColumnGroup}
+import com.zilliz.milvus.storage.snapshot.DeltaLogFile
 import io.milvus.grpc.schema.{DataType, FieldSchema}
 
 class DeltaLogReaderTest extends AnyFunSuite with Matchers {
@@ -65,7 +65,7 @@ class DeltaLogReaderTest extends AnyFunSuite with Matchers {
   }
 
   test(
-    "a V2 delete event reuses the common binlog envelope and Parquet decoder"
+    "delete file loading rejects legacy envelopes instead of returning deleted rows"
   ) {
     val payload = Files.readAllBytes(
       Paths.get("core/src/test/data/v3-delta-469093182140298464.parquet")
@@ -82,7 +82,7 @@ class DeltaLogReaderTest extends AnyFunSuite with Matchers {
           eventType = 2
         )
       )
-      val plan = DeltaLogReader
+      val rejected = DeltaLogReader
         .loadDeletePlan(
           Seq(DeltaLogFile(1L, path.toString, 10L)),
           FieldSchema(
@@ -94,34 +94,11 @@ class DeltaLogReaderTest extends AnyFunSuite with Matchers {
           "",
           store
         )
-        .fold(throw _, identity)
-      val deleteTs = 469093213902995459L
-      (0L until 10L).foreach { id =>
-        plan.containsLongPk(id, deleteTs - 1) shouldBe true
-        plan.containsLongPk(id, deleteTs + 1) shouldBe false
-      }
-      plan.containsLongPk(10L, deleteTs - 1) shouldBe false
-      Files.write(
-        path,
-        BinlogFixture.encode(
-          payload,
-          dataType = 5,
-          extras = """{"version":"MULTI_FIELD","edek":"encrypted"}""",
-          eventType = 2
-        )
-      )
-      val rejected = DeltaLogReader.loadDeletePlan(
-        Seq(DeltaLogFile(1L, path.toString, 10L)),
-        FieldSchema(
-          fieldID = 100L,
-          name = "id",
-          dataType = DataType.Int64,
-          isPrimaryKey = true
-        ),
-        "",
-        store
-      )
-      rejected.left.toOption.get shouldBe a[UnsupportedOperationException]
+        .left
+        .toOption
+        .get
+      rejected shouldBe a[IllegalArgumentException]
+      rejected.getMessage should include("bare Parquet")
     } finally {
       store.close()
       Files.deleteIfExists(path)
