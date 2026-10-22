@@ -588,10 +588,10 @@ real object store. Additional Scala
 cross-version checks, integration tests, native
 builds and publication follow the task's scope and authorization.
 
-Run `sbt checkCapabilityIndex` before every commit that touches
-`projects/spark-milvus/capabilities.md` in the knowledge repository or a
-`package.scala`; it reads that repository from `VECTOR_BATCH_KNOWLEDGE_DIR` or a
-local `docs/design/` checkout, and CI does not run it. CI does run
+Run `sbt checkCapabilityIndex` before every commit that touches the capability
+index in the maintainers' design documents or a `package.scala`; it reads those
+documents from `SPARK_MILVUS_DESIGN_DIR` or a local `docs/design/` checkout, and
+CI does not run it. CI does run
 `python3 -m unittest discover -s native-build -p 'test_*.py'` plus the same
 discovery over `scripts/tests`; run them when touching `native-build/`.
 
@@ -625,31 +625,22 @@ guide, [reference-en.md](reference-en.md), and the
 [release guide](releasing.md). They describe the connector, its use, build and
 release process. Public contributions may include design proposals, decisions
 and the rationale needed to review a change in the same pull request. External
-contributors do not need private knowledge-repository access to propose or
-document a change.
+contributors do not need access to the maintainers' design documents to propose
+or document a change.
 
-The design documents live under `projects/spark-milvus` in the private repository
-[zilliztech/vector-batch-knowledge](https://github.com/zilliztech/vector-batch-knowledge).
-This repository does not mount it; the private `milvus-offline-compute`
-repository carries it as the submodule `docs/design`. The build and CI do not
-read it. Paths written as `docs/design/...` in source comments, package docs and
-skills name files inside that repository; maintainers with access can clone or
-symlink it to `docs/design/` here, which `.gitignore` covers, so those paths
-resolve locally. Its `projects/spark-milvus/AGENTS.md` is the full orientation
-for maintainers with access. Maintainers reconcile accepted public proposals
-with the private design records and capability index, and run
+The maintainers keep the design documents, decision log and capability index
+outside this repository; this repository does not mount them, and the build and
+CI do not read them. Paths written as `docs/design/...` in source comments,
+package docs and skills name files inside that document set; maintainers place
+a checkout or symlink of it at `docs/design/` here, which `.gitignore` covers,
+so those paths resolve locally. Its `projects/spark-milvus/AGENTS.md` is the
+full orientation for maintainers. Maintainers reconcile accepted public
+proposals with the design records and capability index, and run
 `sbt checkCapabilityIndex` when that index or a `package.scala` changes, with
-`VECTOR_BATCH_KNOWLEDGE_DIR` pointing at a checkout when it is not at
-`docs/design/`. Public CI does not fetch that repository or claim to perform the
-private index check. A document change there is committed and pushed in that
-repository alone; this repository records no gitlink for it:
-
-```bash
-cd docs/design                             # a local checkout of vector-batch-knowledge
-git checkout master && git pull --ff-only
-git add <files> && git commit
-git push origin master
-```
+`SPARK_MILVUS_DESIGN_DIR` pointing at the documents when they are not at
+`docs/design/`. Public CI does not fetch those documents or claim to perform the
+index check. A document change is committed where the documents live; this
+repository records no gitlink for them.
 
 ### Repository-local document references
 

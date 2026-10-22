@@ -3,7 +3,7 @@
 GitHub Actions builds the JVM and native artifacts independently, tests the exact
 Maven candidate that developers resolve, and publishes those files to Maven
 Central. The public workflows need the three public source submodules; they do
-not fetch the private knowledge repository or depend on Jenkins.
+not fetch the maintainers' design documents or depend on Jenkins.
 
 ## Supported release matrix
 

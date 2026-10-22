@@ -6,7 +6,7 @@ description: Use when opening, reading, listing or writing a file in object stor
 # Storage access
 
 Read [AGENTS.md](../../../AGENTS.md), then
-[the design](https://github.com/zilliztech/vector-batch-knowledge/blob/master/projects/spark-milvus/architecture/storage-access.html). That
+the design (`docs/design/projects/spark-milvus/architecture/storage-access.html`). That
 document owns the decision and the evidence; this skill applies it. Credentials
 under Hadoop are in
 [spark-milvus-storage-auth](../spark-milvus-storage-auth/SKILL.md).

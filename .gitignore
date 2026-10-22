@@ -18,5 +18,5 @@ __pycache__/
 
 examples/
 
-# Local checkout or symlink of zilliztech/vector-batch-knowledge; no longer a submodule.
+# Local checkout or symlink of the maintainers' design documents; not a submodule.
 /docs/design/

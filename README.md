@@ -58,10 +58,9 @@ official commit `5694520`, including PR #714's Tencent OIDC role chain while
 retaining eager Parquet pre-buffering and the IO pool API from PR #703.
 `knowhere` tracks upstream `zilliztech/knowhere` on `main`, including merged
 PR #1829, and supplies the C API, JNI and Java sources used by
-`native-vector` and the unified native build. The connector's design documents
-live under `projects/spark-milvus` in the private knowledge repository
-`zilliztech/vector-batch-knowledge`, which is not a submodule here; the build
-and CI do not read it.
+`native-vector` and the unified native build. The maintainers' design documents
+are kept outside this repository and are not a submodule; the build and CI do
+not read them.
 
 Initialize the three native source submodules at their recorded gitlinks before
 compiling:
@@ -81,10 +80,9 @@ git submodule update --init milvus-proto milvus-storage knowhere
 
 [AGENTS.md](AGENTS.md) is the entry point for agents and people working on the
 code: what the project is, how it is layered, and the rules any change has to
-satisfy. `CLAUDE.md` is a symlink to it. The design documents are kept in
-`projects/spark-milvus` in the private repository
-`zilliztech/vector-batch-knowledge`; paths written as `docs/design/...` in
-source comments refer to files there. Nothing in this repository's build needs it.
+satisfy. `CLAUDE.md` is a symlink to it. The maintainers' design documents are
+kept outside this repository; paths written as `docs/design/...` in source
+comments refer to files there. Nothing in this repository's build needs them.
 
 ## Environment
 

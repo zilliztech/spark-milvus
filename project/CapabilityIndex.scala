@@ -4,12 +4,11 @@ import sbt._
 import sbt.Keys._
 
 /** Checks that the capability index in
-  * projects/spark-milvus/capabilities.md of the private knowledge repository
-  * zilliztech/vector-batch-knowledge and the capability ids declared in
-  * package docs still agree. The knowledge repository is no longer a
-  * submodule here: it is read from the checkout named by
-  * VECTOR_BATCH_KNOWLEDGE_DIR, or from a local, git-ignored docs/design
-  * checkout or symlink.
+  * projects/spark-milvus/capabilities.md of the maintainers' design documents
+  * and the capability ids declared in package docs still agree. The design
+  * documents are not a submodule: they are read from the directory named by
+  * SPARK_MILVUS_DESIGN_DIR, or from a local, git-ignored docs/design checkout
+  * or symlink.
   *
   * The index is the only thing tying a feature to the code that implements it,
   * and nothing else notices when it drifts: renaming a package, moving code or
@@ -21,27 +20,27 @@ object CapabilityIndex {
   val checkCapabilityIndex =
     taskKey[Unit]("Verify capabilities.md and the package docs still agree")
 
-  /** Path of the capability index inside the knowledge repository. */
+  /** Path of the capability index inside the design documents. */
   private val CapabilitiesDoc =
     "projects/spark-milvus/capabilities.md"
 
-  /** Names a checkout of zilliztech/vector-batch-knowledge. */
-  private val KnowledgeDirVariable = "VECTOR_BATCH_KNOWLEDGE_DIR"
+  /** Names the directory holding the maintainers' design documents. */
+  private val DesignDirVariable = "SPARK_MILVUS_DESIGN_DIR"
 
-  /** Where a local checkout or symlink of the knowledge repository may sit;
+  /** Where a local checkout or symlink of the design documents may sit;
     * `.gitignore` covers it.
     */
-  private val LocalKnowledgeDir = "docs/design"
+  private val LocalDesignDir = "docs/design"
 
-  /** The knowledge repository checkout: the variable when set, otherwise the
-    * ignored local directory.
+  /** The design documents: the variable when set, otherwise the ignored local
+    * directory.
     */
-  private def knowledgeDir(root: File): File =
+  private def designDir(root: File): File =
     sys.env
-      .get(KnowledgeDirVariable)
+      .get(DesignDirVariable)
       .filter(_.nonEmpty)
       .map(file)
-      .getOrElse(root / LocalKnowledgeDir)
+      .getOrElse(root / LocalDesignDir)
 
   /** A row in one of the capability tables: `| R1 | ... | ... | location | ...`
     */
@@ -156,12 +155,11 @@ object CapabilityIndex {
     checkCapabilityIndex := {
       val log = streams.value.log
       val root = (ThisBuild / baseDirectory).value
-      val doc = knowledgeDir(root) / CapabilitiesDoc
+      val doc = designDir(root) / CapabilitiesDoc
       if (!doc.isFile)
         sys.error(
-          s"$doc not found: set $KnowledgeDirVariable to a checkout of " +
-            "zilliztech/vector-batch-knowledge (for example the docs/design " +
-            s"submodule of milvus-offline-compute), or clone it to $LocalKnowledgeDir"
+          s"$doc not found: set $DesignDirVariable to the directory holding " +
+            s"the design documents, or place them at $LocalDesignDir"
         )
 
       val (body, section11) = sections(IO.read(doc))
