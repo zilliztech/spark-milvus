@@ -1,7 +1,6 @@
 package com.zilliz.spark.connector
 
-/** Public read/search options and driver-side storage configuration. Retired
-  * service, write, backup and unsupported legacy options fail before I/O.
+/** Public read/search options and driver-side storage configuration.
   * `StorageOptions` and `HadoopStorageKeys` translate effective storage aliases
   * and per-bucket identity into the canonical native fs.* properties.
   * `MilvusOption` parses typed read limits, filters and fixed snapshot input;

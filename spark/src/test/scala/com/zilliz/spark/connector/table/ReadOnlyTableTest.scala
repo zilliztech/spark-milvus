@@ -8,7 +8,6 @@ import org.apache.spark.sql.connector.catalog.{
   SupportsWrite,
   TableCapability
 }
-import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -48,33 +47,6 @@ class ReadOnlyTableTest extends AnyFunSuite {
       table.capabilities().asScala.toSet == Set(TableCapability.BATCH_READ)
     )
     assert(table.schema().fieldNames.toSeq == Seq("id"))
-  }
-
-  test(
-    "service names, backup and V2 metadata fail before native or online access"
-  ) {
-    Seq(
-      Map(
-        "milvus.database.name" -> "db",
-        "milvus.collection.name" -> "collection"
-      ),
-      Map("milvus.backup.dir" -> "s3://bucket/backup"),
-      Map("milvus.snapshot.v2.segments" -> "[]"),
-      Map("milvus.writer.customPath" -> "staging")
-    ).foreach { retired =>
-      val failure = intercept[IllegalArgumentException] {
-        MilvusDataSource().getTable(
-          StructType(Nil),
-          Array.empty,
-          (options ++ retired).asJava
-        )
-      }
-      assert(
-        retired.keys.exists(key =>
-          failure.getMessage.toLowerCase.contains(key.toLowerCase)
-        )
-      )
-    }
   }
 
   test("empty options cannot fall back to an online collection source") {

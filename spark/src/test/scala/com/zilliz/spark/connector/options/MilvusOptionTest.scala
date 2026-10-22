@@ -345,35 +345,6 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
   }
 
   test(
-    "public options reject retired service, write and compatibility keys before I/O"
-  ) {
-    Seq(
-      "milvus.uri",
-      "milvus.database.name",
-      "milvus.collection.name",
-      "milvus.backup.dir",
-      "milvus.snapshot.v2.segments",
-      "milvus.writer.customPath",
-      "milvus.write.file.rolling.bytes",
-      "milvus.collection.id",
-      "milvus.partition.id",
-      "milvus.segment.id",
-      "path",
-      "type",
-      "s3.accessKey",
-      "fs.accessKeyId"
-    ).foreach { key =>
-      val error = intercept[IllegalArgumentException] {
-        MilvusOption(
-          Map(key.toUpperCase -> "", MilvusOption.SnapshotPath -> "fixed.json")
-        )
-      }
-      error.getMessage.toLowerCase should include(key.toLowerCase)
-      error.getMessage should include("V3")
-    }
-  }
-
-  test(
     "read options retain effective storage aliases and canonical storage keys"
   ) {
     val values = Map(

@@ -5,7 +5,6 @@ import importlib.util
 import json
 from pathlib import Path
 import shutil
-import struct
 import tempfile
 import unittest
 from unittest import mock
@@ -388,78 +387,6 @@ class ReleaseTest(unittest.TestCase):
                 self.rewrite_file(manifest, record, path.read_bytes())
                 with self.assertRaisesRegex(ValueError, "JVM JAR embeds the official Milvus SDK"):
                     release.verify(self.output)
-        for name in ("io/milvus/grpc/milvus/MilvusServiceGrpc.class",
-                     "milvus/proto/feder/feder/FederProto.scala",
-                     "milvus/proto/msg/msg/MsgProto.class",
-                     "milvus/proto/tokenizer/tokenizer/TokenizerGrpc.class",
-                     "com/zilliz/milvus/client/api/MilvusClient.class",
-                     "com/zilliz/milvus/storage/compat/backup/BackupReader.class",
-                     "com/zilliz/spark/connector/procedure/CallProcedure.class"):
-            with self.subTest(name=name):
-                self.jar(path, {**original, name: b"retired capability"})
-                self.rewrite_file(manifest, record, path.read_bytes())
-                with self.assertRaisesRegex(ValueError, "retired write/control/compatibility"):
-                    release.verify(self.output)
-
-    def test_public_surface_rejects_write_methods_and_backup_options(self):
-        for name, value in (
-                ("com/zilliz/spark/connector/implicits/MilvusDataFrame.class", b"writeSnapshot"),
-                ("com/zilliz/spark/connector/implicits/MilvusDataFrame.scala", b"def buildIndex()"),
-                ("com/zilliz/spark/connector/options/MilvusOption.scala", b'val BackupDir = "milvus.backup.dir"')):
-            with self.subTest(name=name):
-                path = self.root / "surface.jar"
-                self.jar(path, {name: value})
-                with zipfile.ZipFile(path) as archive, self.assertRaisesRegex(ValueError, "retired"):
-                    release.verify_read_only(archive, archive.namelist())
-
-    def test_migrated_classes_fail_in_binary_and_source_archives(self):
-        for base in ("com/zilliz/milvus/jni/vector/NativeVectorIndexBuilder",
-                     "com/zilliz/milvus/storage/manifest/SnapshotSegmentWriter",
-                     "com/zilliz/milvus/storage/codec/SegmentIndexObjects",
-                     "com/zilliz/milvus/storage/codec/IndexObjectTarget",
-                     "com/zilliz/milvus/storage/codec/WrittenIndexObject",
-                     "com/zilliz/milvus/storage/snapshot/V2ColumnGroup",
-                     "com/zilliz/milvus/storage/snapshot/V2SegmentResolver",
-                     "com/zilliz/milvus/storage/snapshot/SnapshotOrigin$Backup",
-                     "com/zilliz/milvus/storage/snapshot/SegmentLayout$ColumnGroups",
-                     "com/zilliz/spark/connector/read/V2ColumnBinding",
-                     "com/zilliz/spark/connector/metrics/WriteMetricsReport"):
-            for suffix in (".java", ".scala", ".class", "$.class"):
-                name = base + suffix
-                with self.subTest(name=name):
-                    path = self.root / "migrated.jar"
-                    self.jar(path, {name: b"retired capability"})
-                    with zipfile.ZipFile(path) as archive, self.assertRaisesRegex(
-                            ValueError, "retired write/control/compatibility"):
-                        release.verify_read_only(archive, archive.namelist())
-
-    def test_retired_options_rejection_literals_are_allowed_but_accessors_fail(self):
-        def constants(*values):
-            header = b"\xca\xfe\xba\xbe" + struct.pack(">HHH", 0, 55, len(values) + 1)
-            return header + b"".join(b"\x01" + struct.pack(">H", len(value)) + value.encode()
-                                     for value in values)
-
-        for suffix, contents, failure in (
-                (".scala", b'private val RetiredOptions = Set("milvus.uri", "milvus.backup.dir")', False),
-                ("$.class", constants("RetiredOptions", "milvus.uri", "milvus.backup.dir"), False),
-                ("$.class", constants("MilvusUri", "milvus.uri"), True),
-                (".class", constants("uri", "()Ljava/lang/String;"), True),
-                (".scala", b'case class MilvusOption(uri: String)', True)):
-            path = self.root / "options.jar"
-            self.jar(path, {"com/zilliz/spark/connector/options/MilvusOption" + suffix: contents})
-            with self.subTest(suffix=suffix, contents=contents), zipfile.ZipFile(path) as archive:
-                if failure:
-                    with self.assertRaisesRegex(ValueError, "retired backup/service members"):
-                        release.verify_read_only(archive, archive.namelist())
-                else:
-                    release.verify_read_only(archive, archive.namelist())
-
-    def test_low_level_upstream_native_apis_remain_allowed(self):
-        path = self.root / "upstream.jar"
-        self.jar(path, {"io/knowhere/Knowhere.class": b"buildIndex",
-                        "io/milvus/storage/MilvusStorageWriter.class": b"write"})
-        with zipfile.ZipFile(path) as archive:
-            release.verify_read_only(archive, archive.namelist())
 
     def test_platform_entry_cannot_transitively_pull_universal_entry(self):
         manifest = self.stage()

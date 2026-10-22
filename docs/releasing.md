@@ -105,10 +105,8 @@ loader checks its Storage and Knowhere source pins against `native-runtime`.
 Do not combine thin modules with the bundled `-jvm` or assembly JAR: their
 connector classes overlap.
 
-The candidate is read-only. Verification rejects client, Catalog, CALL, writer,
-backup and legacy-format connector classes/sources; retired DataFrame methods
-and service/backup options; private dependencies; and the Milvus SDK. Thin
-metadata must declare `migrationState=read-only`.
+The candidate is read-only. Verification rejects the Milvus SDK and non-release
+dependencies. Thin metadata must declare `migrationState=read-only`.
 
 Load the **running JRE's** `libjsig.so` before both the driver and every executor
 start. Paths may differ between driver and workers. For example, with an

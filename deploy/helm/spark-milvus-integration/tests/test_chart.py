@@ -59,14 +59,6 @@ class ChartTest(unittest.TestCase):
             with self.subTest(values=values):
                 self.assertNotEqual(render(overrides=values).returncode, 0)
 
-    def test_retired_service_setup_and_write_settings_are_rejected(self):
-        for values in ({"milvus": {"uri": "http://service:19530"}},
-                       {"milvus": {"deployment": {"enabled": True}}},
-                       {"runner": {"setup": {"command": ["/private/prepare"]}}},
-                       {"objectStorage": {"writePrefix": "output"}}):
-            with self.subTest(values=values):
-                self.assertNotEqual(render(overrides=values).returncode, 0)
-
     def test_input_identity_and_immutable_image_are_required(self):
         for values in ({"readOptions": {"existingSecret": ""}},
                        {"readOptions": {"existingSecret": "../invalid"}},

@@ -6,9 +6,7 @@ inputs. It opens storage files directly and does not call the Milvus service.
 Snapshot preparation, selection and retention belong to the caller.
 
 The public table advertises only `BATCH_READ`. A DataFrame write is rejected by
-Spark before it writes segment or snapshot files. Catalog and management CALL
-are retired. Client, backup and Storage V2 compatibility belong to the private
-offline repository and are not included in this artifact. Database and collection names
+Spark before it writes segment or snapshot files. Database and collection names
 alone are not a public read input.
 
 ## Version compatibility
@@ -135,13 +133,9 @@ information supplied by the caller; use the full snapshot input when you need
 its delete/index metadata. Supplying Spark `.schema()` does not replace the
 Milvus schema: field names, types and selection must match the fixed input.
 
-Old service, backup and write options fail instead of being ignored, including
-`milvus.uri`, `milvus.token`, `milvus.database.name`, `milvus.collection.name`,
-`milvus.client.snapshot.name`, `milvus.backup.dir`, `milvus.snapshot.v2.segments`
-and `milvus.writer.commitType` / `milvus.writer.customPath`. The generic `path`
-option is retired: use
-`milvus.snapshot.path`. Use canonical `fs.*` keys below instead of old camel-case
-credential options.
+Options not listed in this reference are not read. The generic Spark `path`
+argument is not an input: provide `milvus.snapshot.path`. Use the canonical
+`fs.*` keys below for storage location and credentials.
 
 ### 2.2 Storage location and credentials
 

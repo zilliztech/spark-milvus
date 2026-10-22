@@ -178,8 +178,7 @@ The eight independent release consumer jobs cover Spark 4.0/4.2 on the two Linux
 architectures and two supported OS versions.
 
 Public code has no client, Catalog, CALL parser, backup or writer surface.
-Candidate validation rejects those classes and sources, retired DataFrame
-methods, service/backup options, private dependencies and the Milvus SDK.
+Candidate validation rejects the Milvus SDK and non-release dependencies.
 Native engine bindings retain upstream APIs needed by downstream libraries;
 the final boundary applies to connector capabilities. Source matrix coverage
 does not expand the published release matrix.

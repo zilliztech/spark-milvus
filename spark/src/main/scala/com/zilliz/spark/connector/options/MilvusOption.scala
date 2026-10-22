@@ -96,74 +96,6 @@ object MilvusOption {
   val ReadVectorRaw = "milvus.read.vector.raw"
   val ReadColumnar = "milvus.read.columnar"
 
-  private val RetiredOptions: Set[String] = Set(
-    "fs.accesskeyid",
-    "fs.accesskeyvalue",
-    "fs.cloudprovider",
-    "fs.gcpcredentialjson",
-    "fs.gcpnativewithoutauth",
-    "fs.iamendpoint",
-    "fs.loglevel",
-    "fs.requesttimeoutms",
-    "fs.rootpath",
-    "fs.sslcacert",
-    "fs.storagetype",
-    "fs.usecustompartupload",
-    "fs.useiam",
-    "fs.usessl",
-    "fs.usevirtualhost",
-    "milvus.backfill.mode",
-    "milvus.backup.dir",
-    "milvus.ca.pem",
-    "milvus.client.key",
-    "milvus.client.pem",
-    "milvus.client.snapshot.name",
-    "milvus.collection.id",
-    "milvus.collection.name",
-    "milvus.collection.pktype",
-    "milvus.database.name",
-    "milvus.field.id",
-    "milvus.insertmaxbatchsize",
-    "milvus.partition.id",
-    "milvus.partition.name",
-    "milvus.retry.count",
-    "milvus.retry.interval",
-    "milvus.segment.id",
-    "milvus.server.pem",
-    "milvus.snapshot.v2.segments",
-    "milvus.token",
-    "milvus.uri",
-    "milvus.write.file.rolling.bytes",
-    "milvus.writer.committype",
-    "milvus.writer.custompath",
-    "milvus.writer.variablewidthbytespervalue",
-    "path",
-    "s3.accesskey",
-    "s3.fs",
-    "s3.maxconnections",
-    "s3.preloadpoolsize",
-    "s3.rootpath",
-    "s3.secretkey",
-    "s3.usessl",
-    "type"
-  )
-
-  def validatePublicOptions(options: CaseInsensitiveStringMap): Unit = {
-    import scala.jdk.CollectionConverters._
-    val retired = options
-      .keySet()
-      .asScala
-      .toSeq
-      .filter(key => RetiredOptions(key.toLowerCase(java.util.Locale.ROOT)))
-      .sorted
-    require(
-      retired.isEmpty,
-      s"Unsupported public read option(s): ${retired.mkString(", ")}. " +
-        s"Provide '${SnapshotPath}' or V3 manifest metadata; online service, legacy format, backup and write options belong to the private offline tools. " +
-        s"Use '${MilvusPartitions}' and '${MilvusSegments}' for numeric read selectors, and canonical fs.* storage keys."
-    )
-  }
-
   private def nonEmptyOption(
       getOption: String => Option[String],
       key: String
@@ -359,9 +291,8 @@ object MilvusOption {
     readColumnarFrom(key => Option(options.get(key)))
   }
 
-  /** Parse public read options and reject retired entry points before I/O. */
+  /** Parse public read options. */
   def apply(options: CaseInsensitiveStringMap): MilvusOption = {
-    validatePublicOptions(options)
     import scala.jdk.CollectionConverters._
     MilvusOption(
       fieldIDs = options.getOrDefault(ReaderFieldIDs, ""),

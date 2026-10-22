@@ -29,7 +29,6 @@ object SnapshotSources {
       milvusOption: MilvusOption,
       withSegments: Boolean
   ): SnapshotSource = {
-    MilvusOption.validatePublicOptions(caseInsensitive(milvusOption.options))
     MilvusOption.validateSnapshotModeOptions(milvusOption.options)
     val selectedPartitions =
       MilvusOption.selectedPartitionIds(milvusOption.options)
