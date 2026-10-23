@@ -265,7 +265,10 @@ compile unpatched against the macOS SDK's libc++.
 
 The JVM's signal-chaining library is preloaded with `DYLD_INSERT_LIBRARIES`
 (`libjsig.dylib`) where Linux uses `LD_PRELOAD` (`libjsig.so`); both the
-Makefile and the forked test settings pick the right one.
+Makefile and the forked test settings pick the right one. Set that variable for
+the JVM alone: the system shell refuses an inserted library of another
+architecture, so an `sbt` or `spark-submit` started with it terminates at once.
+The forked test JVMs receive it from the build's test settings.
 
 If Conan Center or crates.io are slow from your network, `[platform_tool_requires]
 cmake/3.31.12` in the Conan profile (with Homebrew's CMake on the PATH and

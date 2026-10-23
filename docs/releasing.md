@@ -134,6 +134,14 @@ export LD_PRELOAD="$JAVA_HOME/lib/libjsig.so"
   your_application.py
 ```
 
+On macOS the variable is `DYLD_INSERT_LIBRARIES` with the JDK's
+`lib/libjsig.dylib`, and it has to reach only the JVM: the system shell that
+runs `spark-submit` and `spark-class` refuses an inserted library of another
+architecture and terminates. Point `JAVA_HOME` at a directory whose `bin/java`
+sets the variable and then starts the JDK's `java`; the macOS consumer smoke
+(`scripts/ci/consumer_smoke.py`) does exactly that, with an interpreter that is
+not a system shell, since the driver's children inherit the variable.
+
 Use the matching Spark-line coordinate and configure object storage as described
 in [the reference](reference-en.md). In cluster deploy mode, configure the driver
 container or launcher environment too: exporting a variable only on the submit

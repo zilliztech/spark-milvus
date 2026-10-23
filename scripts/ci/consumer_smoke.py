@@ -303,6 +303,27 @@ def compile_fixture(work, repository, version, row, entry_id, env):
     return jar
 
 
+def jvm_launcher(root, java_home, signal):
+    """A JAVA_HOME whose bin/java preloads libjsig into the JVM alone.
+
+    On macOS the system shell running spark-submit and spark-class refuses an
+    inserted library of another architecture, so DYLD_INSERT_LIBRARIES is set
+    by this launcher right before the JVM. The driver's children inherit the
+    variable, and executors are launched through this same path, so its
+    interpreter is this Python rather than a system shell.
+    """
+    home = root / "jvm-launcher"
+    (home / "bin").mkdir(parents=True)
+    java = java_home / "bin/java"
+    launcher = home / "bin/java"
+    launcher.write_text("#!" + sys.executable + "\n"
+                        "import os, sys\n"
+                        f"os.environ['DYLD_INSERT_LIBRARIES'] = {str(signal)!r}\n"
+                        f"os.execv({str(java)!r}, [{str(java)!r}, *sys.argv[1:]])\n")
+    launcher.chmod(0o755)
+    return home
+
+
 def smoke(candidate, line, platform, output, *, central=False, entry=None, native_bundle=None):
     manifest = json.loads((candidate / "release-manifest.json").read_text())
     version = manifest["version"]
@@ -342,6 +363,10 @@ def smoke(candidate, line, platform, output, *, central=False, entry=None, nativ
     env.update(SPARK_LOCAL_IP="127.0.0.1", OMP_NUM_THREADS="2", OPENBLAS_NUM_THREADS="2")
     with tempfile.TemporaryDirectory(prefix="milvus-consumer-") as directory:
         root = Path(directory)
+        # Linux preloads libjsig into spark-submit and everything below it; macOS
+        # only into the JVMs, through a launcher spark-submit selects as JAVA_HOME.
+        launch = ({"JAVA_HOME": str(jvm_launcher(root, java_home, signal))} if darwin
+                  else {preload: str(signal)})
         # pip's PySpark distribution contains the real bin/spark-submit and Spark jars.
         python_env = root / "python"
         run([sys.executable, "-m", "venv", str(python_env)], cwd=root, env=env)
@@ -394,7 +419,7 @@ def smoke(candidate, line, platform, output, *, central=False, entry=None, nativ
                 command += ["--jars", str(native)]
             command += ["--class", MAIN, str(fixture)]
             try:
-                run(command, cwd=work, env={**env, preload: str(signal)}, log=log)
+                run(command, cwd=work, env={**env, **launch}, log=log)
             finally:
                 collect_diagnostics(spark_home, work, diagnostics, previous_apps)
             text = log.read_text()

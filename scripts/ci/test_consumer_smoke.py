@@ -50,6 +50,18 @@ class ConsumerTest(unittest.TestCase):
             if not any(path.name == f"com.zilliz_{name}-2.0.0.jar" for name in expected):
                 path.unlink()
 
+    def test_jvm_launcher_preloads_libjsig_into_the_jvm_alone(self):
+        java_home = self.root / "jdk"
+        (java_home / "bin").mkdir(parents=True)
+        signal = java_home / "lib/libjsig.dylib"
+        launcher = consumer.jvm_launcher(self.root, java_home, signal) / "bin/java"
+        self.assertTrue(os.access(launcher, os.X_OK))
+        text = launcher.read_text()
+        # Not a system shell: the driver's children inherit the inserted library.
+        self.assertTrue(text.startswith("#!" + consumer.sys.executable + "\n"))
+        self.assertIn("os.environ['DYLD_INSERT_LIBRARIES'] = " + repr(str(signal)), text)
+        self.assertIn("os.execv(" + repr(str(java_home / "bin/java")), text)
+
     def test_universal_and_platform_have_distinct_native_closures(self):
         manifest = self.manifest()
         _, universal = consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "universal")

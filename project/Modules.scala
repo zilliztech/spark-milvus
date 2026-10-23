@@ -171,16 +171,22 @@ object Modules {
       )
     },
     // LD_LIBRARY_PATH is read by the Linux loader, DYLD_LIBRARY_PATH by dyld;
-    // setting both is harmless on either platform.
-    envVars := (if (NativeBundle.selected.nonEmpty)
-                  Map("LD_LIBRARY_PATH" -> "", "LD_BIND_NOW" -> "1")
-                else {
-                  val nativeDir =
-                    ((ThisBuild / baseDirectory).value / "native" / "storage" / "src" / "main" / "resources" / "native").getAbsolutePath
-                  Map(
-                    "LD_LIBRARY_PATH" -> nativeDir,
-                    "DYLD_LIBRARY_PATH" -> nativeDir
-                  )
-                })
+    // setting both is harmless on either platform. Each forked test JVM
+    // preloads its own JDK's signal-chaining library: the sbt process cannot
+    // carry that variable on macOS, where the system shell launching sbt
+    // refuses an inserted library of another architecture.
+    envVars := {
+      val jdk = javaHome.value.getOrElse(file(sys.props("java.home")))
+      val (preload, signalLibrary) = signalChaining(jdk)
+      val libraryPaths =
+        if (NativeBundle.selected.nonEmpty)
+          Map("LD_LIBRARY_PATH" -> "", "LD_BIND_NOW" -> "1")
+        else {
+          val nativeDir =
+            ((ThisBuild / baseDirectory).value / "native" / "storage" / "src" / "main" / "resources" / "native").getAbsolutePath
+          Map("LD_LIBRARY_PATH" -> nativeDir, "DYLD_LIBRARY_PATH" -> nativeDir)
+        }
+      libraryPaths + (preload -> signalLibrary.getAbsolutePath)
+    }
   )
 }

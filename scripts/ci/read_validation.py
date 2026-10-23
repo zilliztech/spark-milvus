@@ -157,13 +157,18 @@ def xml_evidence(reports):
 
 
 def signal_environment():
-    """The running JDK's signal-chaining library, preloaded the way the platform
-    does it: LD_PRELOAD on Linux, DYLD_INSERT_LIBRARIES on macOS."""
+    """What the sbt process is given for signal chaining.
+
+    Linux preloads the running JDK's libjsig into sbt and every JVM below it.
+    macOS gives sbt nothing: the system shell that launches sbt refuses an
+    inserted library of another architecture, and the forked test JVMs preload
+    libjsig.dylib through the build's own test settings (Modules.nativeTest).
+    """
     darwin = sys.platform == "darwin"
     signal = Path(os.environ["JAVA_HOME"]) / ("lib/libjsig.dylib" if darwin else "lib/libjsig.so")
     if not signal.is_file():
         raise ValueError("JDK is missing libjsig")
-    return {"DYLD_INSERT_LIBRARIES" if darwin else "LD_PRELOAD": str(signal)}
+    return {} if darwin else {"LD_PRELOAD": str(signal)}
 
 
 def run_sbt(name, commands, *, bundle=None, environment=None, line="4.0", scala="2.13.16"):

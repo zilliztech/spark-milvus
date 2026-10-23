@@ -682,4 +682,5 @@ libraries are used. Cluster executors run in their own JVMs.
 
 Preload the **running JRE's** `libjsig.so` in both the driver and every executor,
 using `LD_PRELOAD` and `spark.executorEnv.LD_PRELOAD` with the paths appropriate
-to each machine. See the [runtime launch example](releasing.md#thin-modules-for-downstream-libraries).
+to each machine. See the [runtime launch example](releasing.md#thin-modules-for-downstream-libraries),
+including how macOS sets `DYLD_INSERT_LIBRARIES` for the JVM alone.

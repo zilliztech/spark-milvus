@@ -176,6 +176,12 @@ class ExecutionSummaryTest(unittest.TestCase):
             library.parent.mkdir()
             library.touch()
             self.assertEqual(validation.signal_environment(), {"LD_PRELOAD": str(library)})
+            # macOS: the shell launching sbt refuses the insertion; the forked JVMs preload it themselves.
+            with mock.patch.object(validation.sys, "platform", "darwin"):
+                with self.assertRaisesRegex(ValueError, "libjsig"):
+                    validation.signal_environment()
+                (self.root / "lib/libjsig.dylib").touch()
+                self.assertEqual(validation.signal_environment(), {})
 
 
 class MatrixTest(unittest.TestCase):

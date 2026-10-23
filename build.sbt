@@ -222,12 +222,6 @@ lazy val spark = Project("spark", file("spark"))
     Test / javaHome := (if (Versions.selected.id == "3.5")
                           sys.env.get("SPARK35_TEST_JAVA_HOME").map(file)
                         else None),
-    Test / envVars += {
-      val jdk =
-        (Test / javaHome).value.getOrElse(file(sys.props("java.home")))
-      val (variable, library) = Modules.signalChaining(jdk)
-      variable -> library.getAbsolutePath
-    },
     // Spill changes process-wide thresholds; retry requires its own master.
     // Give each suite a separate JVM with this line's Java and environment.
     Test / testGrouping := {
