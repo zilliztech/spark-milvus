@@ -329,6 +329,17 @@ class WorkflowGateTest(unittest.TestCase):
         self.assertEqual(downloads, ["native-darwin-aarch64"])
         suites = [step["run"] for step in darwin["steps"] if "read_validation.py" in step.get("run", "")]
         self.assertEqual(len(suites), 2)
+        # The runner's platform binaries honor DYLD_INSERT_LIBRARIES (SIP is off);
+        # a JVM's children need tools that can load the inserted libjsig.
+        runs = [step.get("run", "") for step in darwin["steps"]]
+        children = next(index for index, run in enumerate(runs) if "prepare_macos_jvm_children.sh" in run)
+        self.assertLess(children, min(index for index, run in enumerate(runs) if "read_validation.py" in run))
+        self.assertTrue((ROOT / "scripts/ci/prepare_macos_jvm_children.sh").is_file())
+        consumer = workflow("integration.yml")["jobs"]["consumer"]["steps"]
+        prepare = next(step for step in consumer if "prepare_macos_jvm_children.sh" in step.get("run", ""))
+        self.assertEqual(prepare["if"], "runner.os == 'macOS'")
+        record = next(step for step in consumer if step.get("name", "").startswith("Record the consumer"))
+        self.assertIn("sw_vers", record["run"])
         self.assertTrue(all("--native-bundle native-input/milvus-native-darwin-aarch64.jar" in run for run in suites))
         self.assertTrue(any(" shared " in run for run in suites) and any(" spark " in run for run in suites))
         candidate_inputs = [step["with"]["pattern"] for step in build["jobs"]["candidate"]["steps"]

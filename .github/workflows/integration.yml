@@ -53,9 +53,17 @@ jobs:
       - name: Record the consumer CPU, OS and JDK
         run: |
           mkdir -p consumer-results
-          lscpu > consumer-results/runner-cpu.txt
-          cat /etc/os-release > consumer-results/runner-os.txt
+          if [[ "$(uname -s)" == Darwin ]]; then
+            sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize > consumer-results/runner-cpu.txt
+            sw_vers > consumer-results/runner-os.txt
+          else
+            lscpu > consumer-results/runner-cpu.txt
+            cat /etc/os-release > consumer-results/runner-os.txt
+          fi
           "$JAVA_HOME/bin/java" -version 2> consumer-results/runner-java.txt
+      - name: Let the children of a JVM preloading libjsig run
+        if: runner.os == 'macOS'
+        run: scripts/ci/prepare_macos_jvm_children.sh
       - uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.candidate_artifact }}

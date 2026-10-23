@@ -339,6 +339,8 @@ jobs:
         with:
           name: native-darwin-aarch64
           path: native-input
+      - name: Let the children of a JVM preloading libjsig run
+        run: scripts/ci/prepare_macos_jvm_children.sh
       - name: Export the JVM matrix the read suites select from
         run: sbt 'exportBuildMatrix build-matrix.json'
       - name: Require the shared native read suites on macOS

@@ -140,7 +140,12 @@ runs `spark-submit` and `spark-class` refuses an inserted library of another
 architecture and terminates. Point `JAVA_HOME` at a directory whose `bin/java`
 sets the variable and then starts the JDK's `java`; the macOS consumer smoke
 (`scripts/ci/consumer_smoke.py`) does exactly that, with an interpreter that is
-not a system shell, since the driver's children inherit the variable.
+not a system shell, since the driver's children inherit the variable. With
+System Integrity Protection enabled, macOS platform binaries ignore the
+inherited variable; GitHub's macOS runners have it disabled, so there the CI
+jobs put Homebrew's coreutils and bash ahead of the system tools
+(`scripts/ci/prepare_macos_jvm_children.sh`) for the commands Hadoop and Spark
+spawn from a JVM.
 
 Use the matching Spark-line coordinate and configure object storage as described
 in [the reference](reference-en.md). In cluster deploy mode, configure the driver
