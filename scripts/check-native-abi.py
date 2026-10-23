@@ -36,6 +36,10 @@ PLATFORMS = {"linux-x86_64": ("linux", 62), "linux-aarch64": ("linux", 183),
 MACHINES = {platform: machine for platform, (family, machine) in PLATFORMS.items() if family == "linux"}
 MACHO_MAGICS = (b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xca\xfe\xba\xbe")
 MH_DYLIB = 6
+# OpenSSL links its provider modules with `-bundle`: they are loaded by path
+# through dlopen, never by a load command, and carry no install name.
+MH_BUNDLE = 8
+PROVIDER_MODULE_PREFIX = "ossl-modules/"
 # Where macOS keeps what it supplies; a dependency there is resolved by dyld's
 # shared cache and is never bundled.
 MACHO_SYSTEM_PREFIXES = ("/usr/lib/", "/System/Library/")
@@ -234,14 +238,16 @@ def macos_requirements(record, baseline=None):
     return {"MACOS": record["minos"]}, violations
 
 
-def inspect_macho(path, platform):
+def inspect_macho(path, platform, module=False):
+    """Inspect one Mach-O library; a provider ``module`` may also be a bundle."""
     with path.open("rb") as source:
         header = source.read(32)
     if len(header) < 32 or header[:4] != b"\xcf\xfa\xed\xfe":
         raise ValueError("Native resource is not a 64-bit little endian Mach-O file")
     cputype, _, filetype = struct.unpack_from("<IIi", header, 4)
-    if filetype != MH_DYLIB:
-        raise ValueError("Native resource must be a Mach-O dynamic library")
+    if filetype != MH_DYLIB and not (module and filetype == MH_BUNDLE):
+        raise ValueError("Native resource must be a Mach-O dynamic library"
+                         + (" or loadable bundle" if module else ""))
     if cputype != PLATFORMS[platform][1]:
         raise ValueError(f"Mach-O cputype {cputype:#x} does not match {platform}")
     environment = os.environ.copy()
@@ -255,8 +261,9 @@ def inspect_macho(path, platform):
         raise ValueError("otool could not inspect Mach-O: " + process.stderr.strip())
     record = parse_otool(process.stdout)
     record["machoCpuType"] = cputype
+    # A bundle states no install name, as an ELF object may state no SONAME.
     install_name = record["installName"]
-    record["soname"] = PurePosixPath(install_name).name if install_name else path.name
+    record["soname"] = PurePosixPath(install_name).name if install_name else None
     record["needed"] = [PurePosixPath(name).name for name in record["needPaths"]
                         if not name.startswith(MACHO_SYSTEM_PREFIXES)]
     record["systemPaths"] = [name for name in record["needPaths"] if name.startswith(MACHO_SYSTEM_PREFIXES)]
@@ -324,7 +331,8 @@ def audit_bundle(bundle, platform):
             if manifest.get("sha256." + library) != checksum.hexdigest():
                 raise ValueError("Native library checksum mismatch: " + library)
             try:
-                record = inspect_elf(path, platform) if family == "linux" else inspect_macho(path, platform)
+                record = (inspect_elf(path, platform) if family == "linux" else
+                          inspect_macho(path, platform, module=library.startswith(PROVIDER_MODULE_PREFIX)))
             except ValueError as error:
                 raise ValueError(library + ": " + str(error)) from error
             record["sha256"] = checksum.hexdigest()

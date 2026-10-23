@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import warnings
 import zipfile
 
@@ -183,6 +184,33 @@ Load command 6
                 self.OUTPUT[:self.OUTPUT.index("Load command 2")]):
             with self.subTest(text=text[-120:]), self.assertRaises(ValueError):
                 ABI.parse_otool(text)
+
+    @staticmethod
+    def macho_header(filetype):
+        return b"\xcf\xfa\xed\xfe" + struct.pack("<IIi", 0x0100000C, 0, filetype) + b"\0" * 16
+
+    def test_only_a_provider_module_may_be_a_loadable_bundle(self):
+        # OpenSSL links ossl-modules/*.dylib with -bundle; nothing else in the
+        # bundle is allowed to be anything but a dynamic library.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "library.bin"
+            path.write_bytes(self.macho_header(ABI.MH_BUNDLE))
+            with self.assertRaises(ValueError) as failure, mock.patch.object(ABI.subprocess, "run") as run:
+                ABI.inspect_macho(path, "darwin-aarch64")
+            self.assertIn("dynamic library", str(failure.exception))
+            run.assert_not_called()
+            module_output = self.OUTPUT[:self.OUTPUT.index("Load command 1")] + self.OUTPUT[self.OUTPUT.index("Load command 2"):]
+            completed = subprocess.CompletedProcess(["otool"], 0, stdout=module_output, stderr="")
+            with mock.patch.object(ABI.subprocess, "run", return_value=completed):
+                record = ABI.inspect_macho(path, "darwin-aarch64", module=True)
+            self.assertIsNone(record["installName"])
+            self.assertIsNone(record["soname"])
+            self.assertEqual(["libknowhere.dylib"], record["needed"])
+            self.assertEqual([], record["violations"])
+            path.write_bytes(self.macho_header(2))
+            with self.assertRaises(ValueError), mock.patch.object(ABI.subprocess, "run") as run:
+                ABI.inspect_macho(path, "darwin-aarch64", module=True)
+            run.assert_not_called()
 
     def test_platform_table_names_both_families(self):
         self.assertEqual("linux", ABI.PLATFORMS["linux-x86_64"][0])
