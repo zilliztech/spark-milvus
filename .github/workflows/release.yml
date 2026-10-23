@@ -93,7 +93,8 @@ jobs:
               raise SystemExit('Native source run has too many artifacts to verify in one response')
           run_id = int(os.environ['SOURCE_RUN_ID'])
           sha = os.environ['RELEASE_SHA']
-          for name in ('native-linux-x86_64', 'native-linux-aarch64'):
+          matrix = json.load(open('scripts/release-matrix.json', encoding='utf-8'))
+          for name in ['native-' + row['platform'] for row in matrix['native']]:
               matches = [artifact for artifact in artifacts if
                          artifact.get('name') == name and
                          artifact.get('expired') is False and

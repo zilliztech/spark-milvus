@@ -221,6 +221,45 @@ class NativeCacheKeyTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "environment overrides"):
                 cache.toolchain_identity("linux-aarch64")
 
+    def test_macos_fingerprint_holds_the_deployment_target_and_its_own_baseline(self):
+        self.plan["native"].append({"platform": "darwin-aarch64", "runner": "macos-15", "build_jobs": 3,
+                                    "libc": "libc++", "macos": "14.0"})
+        (self.root / "native/build/profiles/darwin-aarch64").write_text("profile\n")
+        self.commit(self.root)
+        identity = {"os": {"id": "macos", "versionId": "15.7.9"}, "libcxx": "system",
+                    "tools": {"clang": "Apple clang version 17.0.0 (clang-1700.6.4.2)",
+                              "developerDir": "/Applications/Xcode_16.4.app/Contents/Developer",
+                              "sdk": "15.5", "cmake": "cmake version 3.31.10", "conan": "Conan version 2.25.1",
+                              "libomp": "libomp 21.1.2", "deploymentTarget": "14.0"}}
+        result = cache.fingerprint(self.root, self.plan, "darwin-aarch64", identity)
+        self.assertTrue(result["key"].startswith("native-bundle-v2-darwin-aarch64-"))
+        self.assertEqual(result["inputs"]["baseline"], {"libc": "libc++", "macos": "14.0"})
+        self.assertNotEqual(result["key"], self.fingerprint()["key"])
+        # Another Xcode or deployment target is another bundle.
+        other = copy.deepcopy(identity)
+        other["tools"]["clang"] = "Apple clang version 16.0.0 (clang-1600.0.26.3)"
+        self.assertNotEqual(result["key"], cache.fingerprint(self.root, self.plan, "darwin-aarch64", other)["key"])
+        wrong = copy.deepcopy(identity)
+        wrong["tools"]["deploymentTarget"] = "15.0"
+        with self.assertRaisesRegex(ValueError, "macOS 14.0 build baseline"):
+            cache.fingerprint(self.root, self.plan, "darwin-aarch64", wrong)
+        # A Linux identity cannot fingerprint the macOS row, and the macOS row
+        # cannot claim the Linux platform.
+        with self.assertRaisesRegex(ValueError, "macOS 14.0 build baseline"):
+            cache.fingerprint(self.root, self.plan, "darwin-aarch64", self.identity)
+        self.assertEqual(cache.PLATFORMS["darwin-aarch64"], ("Darwin", "arm64"))
+
+    def test_macos_toolchain_identity_requires_the_release_deployment_target(self):
+        with mock.patch.object(cache.host_platform, "system", return_value="Darwin"), \
+                mock.patch.object(cache.host_platform, "machine", return_value="arm64"), \
+                mock.patch.dict(os.environ, {"JAVA_HOME": str(self.root), "MACOSX_DEPLOYMENT_TARGET": "15.0"},
+                                clear=True), \
+                mock.patch.object(cache, "command", side_effect=AssertionError("no probe before the target check")):
+            (self.root / "bin").mkdir(exist_ok=True)
+            (self.root / "bin/java").write_text("")
+            with self.assertRaisesRegex(ValueError, "MACOSX_DEPLOYMENT_TARGET must be 14.0"):
+                cache.toolchain_identity("darwin-aarch64")
+
     def test_cli_emits_fingerprint_and_github_outputs(self):
         plan = self.root / "plan.json"
         plan.write_text(json.dumps(self.plan))

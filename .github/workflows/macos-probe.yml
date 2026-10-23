@@ -5,9 +5,6 @@ name: macOS runner probe
 # what Conan detects, Homebrew, disk and CPU. It builds nothing.
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - .github/workflows/macos-probe.yml
 
 permissions:
   contents: read

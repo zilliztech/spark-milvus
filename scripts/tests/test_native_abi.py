@@ -80,6 +80,120 @@ Version needs section '.gnu.version_r' contains 2 entries:
         self.assertEqual([], record["needed"])
 
 
+class OtoolParsingTest(unittest.TestCase):
+    """Mach-O load commands as `otool -l` prints them; no macOS host is needed."""
+
+    OUTPUT = """
+/tmp/libfixture.dylib:
+Load command 0
+      cmd LC_SEGMENT_64
+  cmdsize 72
+  segname __TEXT
+Load command 1
+          cmd LC_ID_DYLIB
+      cmdsize 48
+         name @rpath/libfixture.dylib (offset 24)
+   time stamp 1 Thu Jan  1 00:00:01 1970
+      current version 0.0.0
+compatibility version 0.0.0
+Load command 2
+      cmd LC_BUILD_VERSION
+  cmdsize 32
+  platform 1
+    minos 14.0
+      sdk 15.5
+   ntools 1
+     tool 3
+  version 1167.5
+Load command 3
+          cmd LC_LOAD_DYLIB
+      cmdsize 56
+         name @rpath/libknowhere.dylib (offset 24)
+   time stamp 2 Thu Jan  1 00:00:02 1970
+      current version 0.0.0
+compatibility version 0.0.0
+Load command 4
+          cmd LC_LOAD_DYLIB
+      cmdsize 56
+         name /usr/lib/libc++.1.dylib (offset 24)
+   time stamp 2 Thu Jan  1 00:00:02 1970
+      current version 1800.105.0
+compatibility version 1.0.0
+Load command 5
+          cmd LC_LOAD_DYLIB
+      cmdsize 56
+         name /usr/lib/libSystem.B.dylib (offset 24)
+   time stamp 2 Thu Jan  1 00:00:02 1970
+      current version 1351.0.0
+compatibility version 1.0.0
+Load command 6
+          cmd LC_RPATH
+      cmdsize 32
+         path @loader_path (offset 12)
+"""
+
+    def test_install_name_target_and_dependencies_are_read(self):
+        record = ABI.parse_otool(self.OUTPUT)
+        self.assertEqual("@rpath/libfixture.dylib", record["installName"])
+        self.assertEqual("14.0", record["minos"])
+        self.assertEqual("15.5", record["sdk"])
+        self.assertEqual(["@rpath/libknowhere.dylib", "/usr/lib/libc++.1.dylib", "/usr/lib/libSystem.B.dylib"],
+                         record["needPaths"])
+        self.assertEqual(["@loader_path"], record["rpaths"])
+        maximum, violations = ABI.macos_requirements(record)
+        self.assertEqual({"MACOS": "14.0"}, maximum)
+        self.assertEqual([], violations)
+
+    def test_legacy_version_min_command_is_a_deployment_target(self):
+        text = self.OUTPUT.replace("""      cmd LC_BUILD_VERSION
+  cmdsize 32
+  platform 1
+    minos 14.0
+      sdk 15.5
+   ntools 1
+     tool 3
+  version 1167.5
+""", """      cmd LC_VERSION_MIN_MACOSX
+  cmdsize 16
+  version 13.0
+      sdk 14.5
+""")
+        self.assertEqual("13.0", ABI.parse_otool(text)["minos"])
+
+    def test_deployment_target_above_the_baseline_is_a_violation(self):
+        record = ABI.parse_otool(self.OUTPUT.replace("minos 14.0", "minos 15.0"))
+        maximum, violations = ABI.macos_requirements(record)
+        self.assertEqual({"MACOS": "15.0"}, maximum)
+        self.assertEqual(1, len(violations))
+        self.assertIn("exceeds macOS 14.0", violations[0])
+
+    def test_dependency_outside_system_and_bundle_is_a_violation(self):
+        record = ABI.parse_otool(self.OUTPUT.replace("@rpath/libknowhere.dylib", "/opt/homebrew/lib/libomp.dylib"))
+        _, violations = ABI.macos_requirements(record)
+        self.assertEqual(1, len(violations))
+        self.assertIn("/opt/homebrew/lib/libomp.dylib", violations[0])
+
+    def test_missing_duplicate_or_foreign_platform_targets_fail(self):
+        for text in (
+                self.OUTPUT.replace("platform 1", "platform 2"),
+                self.OUTPUT.replace("    minos 14.0\n", ""),
+                self.OUTPUT + self.OUTPUT[self.OUTPUT.index("Load command 2"):self.OUTPUT.index("Load command 3")],
+                self.OUTPUT.replace("Load command 4", "Load command 7").replace(
+                    "/usr/lib/libc++.1.dylib", "@rpath/libknowhere.dylib"),
+                self.OUTPUT[:self.OUTPUT.index("Load command 2")]):
+            with self.subTest(text=text[-120:]), self.assertRaises(ValueError):
+                ABI.parse_otool(text)
+
+    def test_platform_table_names_both_families(self):
+        self.assertEqual("linux", ABI.PLATFORMS["linux-x86_64"][0])
+        self.assertEqual(("darwin", 0x0100000C), ABI.PLATFORMS["darwin-aarch64"])
+        self.assertEqual({"linux-x86_64": 62, "linux-aarch64": 183}, ABI.MACHINES)
+        self.assertEqual("14.0", ABI.BASELINES["darwin"]["MACOS"])
+        self.assertTrue(ABI.is_native_binary(b"\xcf\xfa\xed\xfe" + b"\0" * 28))
+        self.assertTrue(ABI.is_native_binary(b"\x7fELF" + b"\0" * 28))
+        self.assertFalse(ABI.is_native_binary(b"PK\x03\x04" + b"\0" * 28))
+
+
 @unittest.skipUnless(sys.platform.startswith("linux"), "ELF fixture compilation requires Linux")
 class NativeAbiTest(unittest.TestCase):
     @classmethod

@@ -145,8 +145,9 @@ jobs:
             --expected-cache-inputs "$RUNNER_TEMP/native-cache-inputs.json" \
             --platform "$NATIVE_PLATFORM"
       - name: Restore compatible native dependencies
+        id: dependency-cache
         if: steps.bundle-cache.outputs.cache-hit != 'true' && steps.branch_bundle_verify.outcome != 'success'
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           # Conan auth lives outside p/. Cargo credentials live outside these
           # download directories. Neither is part of this cache.
@@ -178,7 +179,11 @@ jobs:
             --output "target/native-$NATIVE_PLATFORM/abi.json"
           cp "$RUNNER_TEMP/native-cache-inputs.json" "target/native-$NATIVE_PLATFORM/cache-inputs.json"
       - name: Trim dependency caches before saving
-        if: steps.native_build.outcome == 'success'
+        # A build that failed or timed out still leaves finished dependency
+        # packages and compiler cache behind; saving them lets the next attempt
+        # continue instead of starting over, which matters most for the macOS
+        # runner's first build of the whole dependency graph.
+        if: always() && steps.native_build.outcome != 'skipped'
         run: |
           conan cache clean '*' --build --source --download --temp
           ccache --cleanup
@@ -189,6 +194,16 @@ jobs:
               printf 'Cache directory absent: %s\n' "$cache_dir"
             fi
           done
+      - name: Save native dependencies
+        if: always() && steps.native_build.outcome != 'skipped' && steps.dependency-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.CONAN_HOME }}/p
+            ${{ env.CCACHE_DIR }}
+            ${{ env.CARGO_HOME }}/registry
+            ${{ env.CARGO_HOME }}/git
+          key: ${{ steps.fingerprint.outputs.dependency_key_prefix }}${{ steps.fingerprint.outputs.key_digest }}
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.platform }}
@@ -296,8 +311,49 @@ jobs:
           compression-level: 0
           retention-days: 14
 
+  darwin-reads:
+    name: Native reads and search (darwin-aarch64)
+    needs: native
+    if: inputs.build_native
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: false
+      - run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: sbt
+      - uses: sbt/setup-sbt@v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-darwin-aarch64
+          path: native-input
+      - name: Export the JVM matrix the read suites select from
+        run: sbt 'exportBuildMatrix build-matrix.json'
+      - name: Require the shared native read suites on macOS
+        run: python3 scripts/ci/read_validation.py shared --matrix build-matrix.json --scala 2.13.16 --native-bundle native-input/milvus-native-darwin-aarch64.jar
+      - name: Require every Spark 4.0 read/search suite on macOS
+        run: python3 scripts/ci/read_validation.py spark --matrix build-matrix.json --line 4.0 --scala 2.13.16 --native-bundle native-input/milvus-native-darwin-aarch64.jar
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: darwin-reads-4.0-2.13.16
+          path: |
+            target/read-ci/
+            **/target/test-reports/
+          if-no-files-found: error
+          retention-days: 7
+
   candidate:
-    needs: [native, native-cpu, jvm]
+    needs: [native, native-cpu, darwin-reads, jvm]
     if: inputs.build_native
     runs-on: ubuntu-22.04
     timeout-minutes: 20
@@ -325,6 +381,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           pattern: native-linux-*
+          path: release-inputs
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-darwin-*
           path: release-inputs
       - name: Assemble and verify the Maven candidate
         run: |

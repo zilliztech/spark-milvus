@@ -253,8 +253,12 @@ make native-bundle NATIVE_JOBS=6 && make package   # storage and Knowhere
 `NATIVE_JOBS` is the parallel compile width; the whole dependency graph is
 built from source here, because the Conan remote has no macOS binary packages.
 `settings_user.yml` is the only Conan configuration the build needs: the
-profile names the Apple clang version it was validated with, and Conan's stock
-`settings.yml` stops a few releases behind Xcode. The pinned recipes are used
+profiles name Apple clang 17, which Xcode 16.4 and the Xcode 26 releases report
+and which the `macos-15` release runner uses, and Conan's stock `settings.yml`
+stops a few releases behind Xcode, so the file matters once a newer Xcode
+reports a later version. The release build (`scripts/ci/prepare_native.sh`)
+also exports `MACOSX_DEPLOYMENT_TARGET=14.0`; a local build takes the host's
+default target unless that variable is set. The pinned recipes are used
 unmodified, and the build's provenance records that: the boost and avro recipes
 each list a working mirror after their dead first URL, and thrift 0.17 and arrow
 compile unpatched against the macOS SDK's libc++.

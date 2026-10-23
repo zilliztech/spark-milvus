@@ -10,9 +10,9 @@ not depend on Jenkins.
 | Component | Initial release configuration |
 |---|---|
 | Spark / Scala / Java | Spark 4.0.1 and 4.2.0, Scala 2.13.16, JDK 21 |
-| Native platforms | `linux-x86_64`, `linux-aarch64` |
-| Native build hosts | Ubuntu 22.04 on each architecture, GCC 12 including gfortran |
-| Consumer hosts | Ubuntu 22.04 and 24.04 on each architecture |
+| Native platforms | `linux-x86_64`, `linux-aarch64`, `darwin-aarch64` |
+| Native build hosts | Ubuntu 22.04 on each Linux architecture, GCC 12 including gfortran; macOS 15 on Apple silicon, Apple clang 17 |
+| Consumer hosts | Ubuntu 22.04 and 24.04 on each Linux architecture; macOS 14 and 15 on Apple silicon |
 | Entry points | Universal and platform-specific coordinates; Spark 4.0 also has a thin module coordinate |
 
 The eight consumer jobs cover both Spark lines, both architectures and both OS
@@ -26,15 +26,26 @@ the 4.2 connector compiles and runs against 4.2.0. Export metadata records the
 actual compile version. Thin POMs must match that version exactly, while the
 consumer version must be an equal or newer patch release of the same Spark line.
 
-This release targets glibc. musl/Alpine is outside the matrix. macOS profiles
-remain available for local builds; they are not published by this workflow.
-All five source combinations receive compile/source/POM checks; full-validation
-CI also runs native read/search suites on Linux x86_64. These checks do not add
-3.5 or 4.1 release coordinates. Open-source release bundles disable Cardinal.
+The Linux bundles target glibc; musl/Alpine is outside the matrix. The macOS
+bundle, `darwin-aarch64`, is built on the GitHub-hosted `macos-15` runner with
+its default Xcode (Apple clang 17) for a macOS 14.0 deployment target, so Macs
+on macOS 14 or later with Apple silicon resolve it from Maven Central like any
+other platform. Intel Macs are not published: that build tunes for the host CPU
+(`-march=native`), the Intel runner's CPU generation is not fixed, and macOS has
+no counterpart of the QEMU portability gate below; the `darwin-x86_64` profile
+remains available for local builds. All five source combinations receive
+compile/source/POM checks; full-validation CI also runs native read/search
+suites on Linux x86_64, and the artifact workflow runs the shared and Spark 4.0
+read/search suites on macOS 15 against the darwin bundle before a candidate is
+assembled. These checks do not add 3.5 or 4.1 release coordinates. Open-source
+release bundles disable Cardinal.
 
 The ELF audit rejects imported symbol requirements above GLIBC 2.35, GLIBCXX
-3.4.30 and CXXABI 1.3.13. Its report records the actual requirements and native
-JAR digest. These bounds and consumer tests establish the tested OS baseline;
+3.4.30 and CXXABI 1.3.13. The Mach-O audit of the macOS bundle rejects a
+library whose deployment target is above macOS 14.0, a dependency that is
+neither under `/usr/lib` or `/System/Library` nor carried by the bundle, and a
+bundled dependency the bundle does not contain. Each report records the actual
+requirements and native JAR digest. These bounds and consumer tests establish the tested OS baseline;
 they do not establish compatibility with every Linux distribution or CPU of
 the same architecture. CPU instructions are a separate constraint: inspect the
 native provenance and validate on deployment CPUs, especially when using custom
@@ -59,7 +70,7 @@ required.
 ## Maven coordinates and runtime requirements
 
 All artifacts use group `com.zilliz` and the same final version. `<line>` is
-`4.0` or `4.2`; `<platform>` is one of the two Linux platforms above.
+`4.0` or `4.2`; `<platform>` is one of the native platforms above.
 
 | Artifact ID | Contents and dependencies |
 |---|---|

@@ -184,7 +184,10 @@ The fat jar only loads Milvus segments when it carries the native
 them into the unified Storage/Knowhere bundle from the platform's profile under
 `native/build/profiles/`, on Linux and macOS, x86_64 and aarch64 alike. The macOS
 toolchain and its Conan configuration are in
-[contributing.md](docs/contributing.md#macos).
+[contributing.md](docs/contributing.md#macos). Released bundles cover Linux
+x86_64 and aarch64 and macOS on Apple silicon (`darwin-aarch64`, macOS 14 or
+later), so a Mac developer resolves the connector from Maven Central without
+building anything native; see [releasing.md](docs/releasing.md).
 
 `sbt compile` builds the five production modules for the selected combination.
 Use project IDs such as `core/test`, `spark/compile` and `integration/Test/compile`

@@ -1,5 +1,6 @@
 """Exercise the consumer-visible Maven graph and immutable release boundary."""
 
+import copy
 import hashlib
 import importlib.util
 import json
@@ -70,9 +71,11 @@ class ReleaseTest(unittest.TestCase):
                         "META-INF/milvus-native/provenance.json": provenance,
                         "META-INF/milvus-native/licenses/LICENSE": "fixture license"})
         Path(str(path) + ".properties").write_text(f"platform={platform}\njar.sha256={release.digest(path)}\n")
+        row = next(item for item in self.plan["native"] if item["platform"] == platform)
+        baseline = {key: row[field] for key, field in release.ABI_BASELINE_KEYS[release.platform_family(platform)]}
         release.write_json(path.parent / "abi.json", {
             "platform": platform, "jar.sha256": release.digest(path), "passed": True,
-            "baseline": {"GLIBC": "2.35", "GLIBCXX": "3.4.30", "CXXABI": "1.3.13"}, "violations": []})
+            "baseline": baseline, "violations": []})
         return path
 
     def jvm(self, line, omit_api=False):
@@ -174,10 +177,15 @@ class ReleaseTest(unittest.TestCase):
 
     def test_both_entries_share_exact_bottom_level_artifacts(self):
         manifest = self.stage()
-        self.assertEqual(len(manifest["artifacts"]), 60)
+        # Per native platform: four native files plus four entry files for each
+        # of the two lines; three platforms, plus the JVM, universal entry and
+        # thin artifacts the platforms share.
+        self.assertEqual(len(manifest["artifacts"]), 72)
         entries = [item for item in manifest["artifacts"] if item["kind"] == "entry" and item["extension"] == "pom"]
-        self.assertEqual(len(entries), 6)
-        self.assertEqual(len(release.entry_dependencies(self.plan, "4.0", None)), 3)
+        # Per line: one universal entry and one entry per native platform.
+        self.assertEqual(len(entries), 2 * (1 + 3))
+        # The universal entry pulls the JVM artifact and every native platform.
+        self.assertEqual(len(release.entry_dependencies(self.plan, "4.0", None)), 4)
         self.assertEqual(len(release.entry_dependencies(self.plan, "4.0", "linux-x86_64")), 2)
         with self.assertRaisesRegex(ValueError, "never overwrite"):
             self.stage()
@@ -355,6 +363,35 @@ class ReleaseTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different baseline"):
             self.stage()
 
+    def test_macos_abi_report_must_use_the_deployment_target_baseline(self):
+        path = self.inputs / "darwin-aarch64" / "abi.json"
+        report = json.loads(path.read_text())
+        self.assertEqual(report["baseline"], {"MACOS": "14.0"})
+        report["baseline"]["MACOS"] = "15.0"
+        release.write_json(path, report)
+        with self.assertRaisesRegex(ValueError, "different baseline"):
+            self.stage()
+
+    def test_release_matrix_names_every_family_baseline(self):
+        platforms = {item["platform"] for item in self.plan["native"]}
+        self.assertEqual(platforms, {"linux-x86_64", "linux-aarch64", "darwin-aarch64"})
+        release.validate_plan(self.plan)
+        for platform in platforms:
+            item = next(row for row in self.plan["native"] if row["platform"] == platform)
+            self.assertTrue(all(item[field] == value
+                                for field, value in release.system_baseline(platform).items()))
+        darwin = next(row for row in self.plan["native"] if row["platform"] == "darwin-aarch64")
+        self.assertEqual(darwin["runner"], "macos-15")
+        self.assertEqual([host["runner"] for host in darwin["consumers"]], ["macos-14", "macos-15"])
+        broken = copy.deepcopy(self.plan)
+        next(row for row in broken["native"] if row["platform"] == "darwin-aarch64")["macos"] = "13.0"
+        with self.assertRaisesRegex(ValueError, "system ABI baseline"):
+            release.validate_plan(broken)
+        broken = copy.deepcopy(self.plan)
+        broken["native"].append({**darwin, "platform": "windows-x86_64"})
+        with self.assertRaisesRegex(ValueError, "Unsupported native release platform"):
+            release.validate_plan(broken)
+
     def test_changed_candidate_bytes_are_rejected(self):
         manifest = self.stage()
         path = self.output / "repository" / manifest["artifacts"][0]["path"]
@@ -458,7 +495,8 @@ class ReleaseTest(unittest.TestCase):
             manifest = release.download_deployment(
                 self.output, downloaded, self.DEPLOYMENT, "token")
 
-        self.assertEqual(len(paths), 300)
+        # Every artifact with its four checksum files.
+        self.assertEqual(len(paths), 72 * 5)
         self.assertEqual(manifest, release.verify(downloaded))
 
     def test_upload_is_user_managed_and_keeps_the_token_off_argv(self):
@@ -616,8 +654,11 @@ class ReleaseTest(unittest.TestCase):
         output = self.root / "actual-plan.json"
         release.create_plan("2.0.0-rc.1", output, self.build_matrix)
         plan = json.loads(output.read_text())
-        self.assertEqual(len(plan["consumer"]), 8)
-        self.assertEqual({row["os_version"] for row in plan["consumer"]}, {"ubuntu-22.04", "ubuntu-24.04"})
+        # Two Linux platforms with two OS versions and one macOS platform with two,
+        # each across both Spark lines.
+        self.assertEqual(len(plan["consumer"]), 12)
+        self.assertEqual({row["os_version"] for row in plan["consumer"]},
+                         {"ubuntu-22.04", "ubuntu-24.04", "macos-14", "macos-15"})
         self.assertEqual(set(plan["pins"]), {"milvus-proto", "milvus-storage", "knowhere"})
 
     def test_release_plan_takes_versions_from_the_exported_matrix(self):

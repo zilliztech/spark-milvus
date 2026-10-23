@@ -27,6 +27,17 @@
         {"os_version": "ubuntu-22.04", "runner": "ubuntu-22.04-arm"},
         {"os_version": "ubuntu-24.04", "runner": "ubuntu-24.04-arm"}
       ]
+    },
+    {
+      "platform": "darwin-aarch64",
+      "runner": "macos-15",
+      "build_jobs": 3,
+      "libc": "libc++",
+      "macos": "14.0",
+      "consumers": [
+        {"os_version": "macos-14", "runner": "macos-14"},
+        {"os_version": "macos-15", "runner": "macos-15"}
+      ]
     }
   ]
 }

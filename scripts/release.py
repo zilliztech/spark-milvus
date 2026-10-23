@@ -59,9 +59,36 @@ THIN_SOURCES = {
 ET.register_namespace("", "http://maven.apache.org/POM/4.0.0")
 
 
+# Each released native platform belongs to a binary family with one system ABI
+# baseline: the Linux bundles are built on Ubuntu 22.04 against glibc 2.35 and
+# GCC 12's libstdc++; the macOS bundle is built with Apple clang against the
+# system libc++ for a macOS 14.0 deployment target. The matrix rows carry these
+# values, the ABI audit records what the bundle requires, and staging compares
+# the two through ABI_BASELINE_KEYS (audit key, matrix field).
+NATIVE_PLATFORMS = {"linux-x86_64": "linux", "linux-aarch64": "linux", "darwin-aarch64": "darwin",
+                    "darwin-x86_64": "darwin"}
+SYSTEM_BASELINES = {
+    "linux": {"libc": "glibc", "glibc": "2.35", "glibcxx": "3.4.30", "cxxabi": "1.3.13"},
+    "darwin": {"libc": "libc++", "macos": "14.0"},
+}
+ABI_BASELINE_KEYS = {
+    "linux": (("GLIBC", "glibc"), ("GLIBCXX", "glibcxx"), ("CXXABI", "cxxabi")),
+    "darwin": (("MACOS", "macos"),),
+}
+
+
 def require(condition, message):
     if not condition:
         raise ValueError(message)
+
+
+def platform_family(platform):
+    require(platform in NATIVE_PLATFORMS, "Unsupported native release platform")
+    return NATIVE_PLATFORMS[platform]
+
+
+def system_baseline(platform):
+    return SYSTEM_BASELINES[platform_family(platform)]
 
 
 def digest(path, algorithm="sha256"):
@@ -117,15 +144,15 @@ def validate_plan(plan):
     require(distribution in {"full", "thin"}, "Unsupported release distribution")
     require(len(set(native)) == len(native) and (native or distribution == "thin"),
             "Empty or duplicate native matrix")
-    require(set(native) <= {"linux-x86_64", "linux-aarch64"}, "Unsupported native release platform")
+    require(set(native) <= set(NATIVE_PLATFORMS), "Unsupported native release platform")
     require(lines and len(set(lines)) == len(lines), "Empty or duplicate JVM matrix")
     require(set(lines) <= {"4.0", "4.2"}, "Unsupported JVM release line")
     if distribution == "thin":
         require(not native and lines == ["4.0"] and not plan.get("consumer"),
                 "Thin-only plan must contain Spark 4.0 and no native consumer matrix")
     for item in plan["native"]:
-        require(item["libc"] == "glibc" and item["glibc"] == "2.35"
-                and item["glibcxx"] == "3.4.30" and item["cxxabi"] == "1.3.13",
+        baseline = system_baseline(item["platform"])
+        require(all(item.get(field) == value for field, value in baseline.items()),
                 "Unsupported system ABI baseline")
     for item in plan["jvm"]:
         require(item["scala"] == "2.13.16", "Unsupported Scala release version")
@@ -458,7 +485,7 @@ def stage(plan_path, inputs, output):
                     "Native ABI evidence does not identify this bundle")
             require(abi.get("passed") is True and not abi.get("violations"), "Native ABI audit did not pass")
             require(all(abi.get("baseline", {}).get(key) == item[field]
-                        for key, field in (("GLIBC", "glibc"), ("GLIBCXX", "glibcxx"), ("CXXABI", "cxxabi"))),
+                        for key, field in ABI_BASELINE_KEYS[platform_family(platform)]),
                     "Native ABI evidence uses a different baseline")
             manifest["nativeAbi"][platform] = abi
             artifact = f"spark-milvus-native-{platform}"
@@ -590,7 +617,7 @@ def verify(candidate):
                         and abi.get("platform") == file["platform"], "ABI evidence mismatch")
                 native = next(item for item in plan["native"] if item["platform"] == file["platform"])
                 require(all(abi.get("baseline", {}).get(key) == native[field]
-                            for key, field in (("GLIBC", "glibc"), ("GLIBCXX", "glibcxx"), ("CXXABI", "cxxabi"))),
+                            for key, field in ABI_BASELINE_KEYS[platform_family(file["platform"])]),
                         "ABI evidence baseline mismatch")
             else:
                 with zipfile.ZipFile(path) as archive:

@@ -318,19 +318,25 @@ def smoke(candidate, line, platform, output, *, central=False, entry=None, nativ
             entries += ("thin",)
     if native_bundle is not None and entries != ("thin",):
         raise ValueError("--native-bundle requires --entry thin or a thin-only candidate")
-    expected_machine = "x86_64" if platform == "linux-x86_64" else "aarch64"
-    if sys.platform != "linux" or os.uname().machine != expected_machine:
+    # Platform -> (sys.platform, uname machine) of a matching consumer host.
+    hosts = {"linux-x86_64": ("linux", "x86_64"), "linux-aarch64": ("linux", "aarch64"),
+             "darwin-aarch64": ("darwin", "arm64"), "darwin-x86_64": ("darwin", "x86_64")}
+    if platform not in hosts or (sys.platform, os.uname().machine) != hosts[platform]:
         raise ValueError("Consumer runner does not match " + platform)
+    darwin = sys.platform == "darwin"
     output.mkdir(parents=True, exist_ok=True)
     resources = fixture_resources()
     env = os.environ.copy()
     # The native package must work without engine libraries installed on the host.
     for name in ("CLASSPATH", "SPARK_CLASSPATH", "SPARK_DIST_CLASSPATH", "SPARK_SUBMIT_OPTS",
                  "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "LD_LIBRARY_PATH",
-                 "LD_PRELOAD", "PYSPARK_SUBMIT_ARGS"):
+                 "LD_PRELOAD", "DYLD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_FALLBACK_LIBRARY_PATH",
+                 "PYSPARK_SUBMIT_ARGS"):
         env.pop(name, None)
     java_home = Path(env["JAVA_HOME"])
-    signal = java_home / "lib/libjsig.so"
+    # The running JDK's signal-chaining library, preloaded the platform's way.
+    preload = "DYLD_INSERT_LIBRARIES" if darwin else "LD_PRELOAD"
+    signal = java_home / ("lib/libjsig.dylib" if darwin else "lib/libjsig.so")
     if not signal.is_file():
         raise ValueError("JDK is missing libjsig: " + str(signal))
     env.update(SPARK_LOCAL_IP="127.0.0.1", OMP_NUM_THREADS="2", OPENBLAS_NUM_THREADS="2")
@@ -377,7 +383,7 @@ def smoke(candidate, line, platform, output, *, central=False, entry=None, nativ
                 "--conf", "spark.driver.bindAddress=127.0.0.1",
                 "--conf", f"spark.jars.ivy={ivy}",
                 "--conf", f"spark.jars.ivySettings={settings}",
-                "--conf", f"spark.executorEnv.LD_PRELOAD={signal}",
+                "--conf", f"spark.executorEnv.{preload}={signal}",
                 "--conf", "spark.executorEnv.MALLOC_ARENA_MAX=2",
                 "--conf", "spark.executorEnv.MALLOC_MMAP_THRESHOLD_=1048576",
                 "--conf", "spark.executorEnv.MALLOC_TRIM_THRESHOLD_=134217728",
@@ -388,7 +394,7 @@ def smoke(candidate, line, platform, output, *, central=False, entry=None, nativ
                 command += ["--jars", str(native)]
             command += ["--class", MAIN, str(fixture)]
             try:
-                run(command, cwd=work, env={**env, "LD_PRELOAD": str(signal)}, log=log)
+                run(command, cwd=work, env={**env, preload: str(signal)}, log=log)
             finally:
                 collect_diagnostics(spark_home, work, diagnostics, previous_apps)
             text = log.read_text()

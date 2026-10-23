@@ -9,7 +9,7 @@ import re
 import sys
 
 
-PLATFORMS = ("linux-aarch64", "linux-x86_64")
+PLATFORMS = ("linux-aarch64", "linux-x86_64", "darwin-aarch64")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 
 

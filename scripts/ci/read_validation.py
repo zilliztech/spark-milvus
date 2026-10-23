@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import xml.etree.ElementTree as ET
 
 
@@ -156,10 +157,13 @@ def xml_evidence(reports):
 
 
 def signal_environment():
-    signal = Path(os.environ["JAVA_HOME"]) / "lib/libjsig.so"
+    """The running JDK's signal-chaining library, preloaded the way the platform
+    does it: LD_PRELOAD on Linux, DYLD_INSERT_LIBRARIES on macOS."""
+    darwin = sys.platform == "darwin"
+    signal = Path(os.environ["JAVA_HOME"]) / ("lib/libjsig.dylib" if darwin else "lib/libjsig.so")
     if not signal.is_file():
         raise ValueError("JDK is missing libjsig")
-    return {"LD_PRELOAD": str(signal)}
+    return {"DYLD_INSERT_LIBRARIES" if darwin else "LD_PRELOAD": str(signal)}
 
 
 def run_sbt(name, commands, *, bundle=None, environment=None, line="4.0", scala="2.13.16"):
