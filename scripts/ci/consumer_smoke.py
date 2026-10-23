@@ -303,6 +303,11 @@ def compile_fixture(work, repository, version, row, entry_id, env):
     return jar
 
 
+# Native platform -> the (sys.platform, uname machine) of the host that consumes it.
+HOSTS = {"linux-x86_64": ("linux", "x86_64"), "linux-aarch64": ("linux", "aarch64"),
+         "darwin-aarch64": ("darwin", "arm64"), "darwin-x86_64": ("darwin", "x86_64")}
+
+
 def jvm_launcher(root, java_home, signal):
     """A JAVA_HOME whose bin/java preloads libjsig into the JVM alone.
 
@@ -340,9 +345,7 @@ def smoke(candidate, line, platform, output, *, central=False, entry=None, nativ
     if native_bundle is not None and entries != ("thin",):
         raise ValueError("--native-bundle requires --entry thin or a thin-only candidate")
     # Platform -> (sys.platform, uname machine) of a matching consumer host.
-    hosts = {"linux-x86_64": ("linux", "x86_64"), "linux-aarch64": ("linux", "aarch64"),
-             "darwin-aarch64": ("darwin", "arm64"), "darwin-x86_64": ("darwin", "x86_64")}
-    if platform not in hosts or (sys.platform, os.uname().machine) != hosts[platform]:
+    if platform not in HOSTS or (sys.platform, os.uname().machine) != HOSTS[platform]:
         raise ValueError("Consumer runner does not match " + platform)
     darwin = sys.platform == "darwin"
     output.mkdir(parents=True, exist_ok=True)
@@ -442,7 +445,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate", type=Path, required=True)
     parser.add_argument("--line", choices=("4.0", "4.2"), required=True)
-    parser.add_argument("--platform", choices=("linux-x86_64", "linux-aarch64"), required=True)
+    parser.add_argument("--platform", choices=sorted(HOSTS), required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--central", action="store_true", help="Resolve from public Maven Central")
     parser.add_argument("--entry", choices=("universal", "platform", "thin"), help="Consume one delivery form")

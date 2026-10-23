@@ -50,6 +50,12 @@ class ConsumerTest(unittest.TestCase):
             if not any(path.name == f"com.zilliz_{name}-2.0.0.jar" for name in expected):
                 path.unlink()
 
+    def test_every_release_native_platform_has_a_consumer_host(self):
+        spec = importlib.util.spec_from_file_location("release", Path(__file__).resolve().parents[1] / "release.py")
+        release = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(release)
+        self.assertTrue(set(release.NATIVE_PLATFORMS) <= set(consumer.HOSTS))
+
     def test_jvm_launcher_preloads_libjsig_into_the_jvm_alone(self):
         java_home = self.root / "jdk"
         (java_home / "bin").mkdir(parents=True)
