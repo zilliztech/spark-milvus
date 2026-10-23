@@ -106,6 +106,22 @@ class LibraryGlobTest(unittest.TestCase):
             self.assertEqual(sorted(names[:8]), sorted(p.name for p in root.glob(elf.library_glob())))
 
 
+    def test_macho_stem_matches_every_library_of_the_family(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            names = ["libknowhere.dylib", "libknowhere_c.1.dylib", "libknowhere_jni.dylib",
+                     "libmilvus-storage.dylib", "libmilvus-storage-jni.dylib", "libomp.dylib", "notes.txt"]
+            for name in names:
+                (root / name).write_bytes(b"")
+            macho = platforms.MachO()
+            # pathlib before 3.13 rejects "**.dylib"; the default stem must not produce it.
+            self.assertEqual("*.dylib", macho.library_glob())
+            self.assertEqual(sorted(names[:3]), sorted(p.name for p in root.glob(macho.library_glob("libknowhere"))))
+            self.assertEqual(sorted(names[3:5]),
+                             sorted(p.name for p in root.glob(macho.library_glob("libmilvus-storage"))))
+            self.assertEqual(sorted(names[:6]), sorted(p.name for p in root.glob(macho.library_glob())))
+
+
 class BinaryArchitectureTest(unittest.TestCase):
     """The architecture comes from the file header, with no platform tool."""
 

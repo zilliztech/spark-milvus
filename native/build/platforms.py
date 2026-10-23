@@ -317,7 +317,9 @@ class MachO(Format):
         return "libz.1.dylib"
 
     def library_glob(self, stem="*"):
-        return stem + "*.dylib"
+        # The default stem would otherwise produce "**.dylib", which pathlib
+        # rejects before Python 3.13: "**" has to be a whole path component.
+        return ("" if stem == "*" else stem) + "*.dylib"
 
     def jsig_library(self):
         return "lib/libjsig.dylib"
