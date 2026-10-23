@@ -216,6 +216,26 @@ def replace_requires_section(references):
     return "\n".join(lines) + "\n"
 
 
+def macos_openmp_redirect(references, generators):
+    """Conan host options that answer milvus-common's find_package(OpenMP) with
+    the graph's llvm-openmp on macOS.
+
+    milvus-common's CMakeLists presets Homebrew libomp paths for CMake's
+    FindOpenMP module and its recipe names Homebrew libomp as a system
+    requirement, so a Homebrew bottle built for the runner's own macOS release
+    would end up in the bundle. Conan's toolchain prefers config mode, so the
+    OpenMP config Conan generates for llvm-openmp (``generators``) answers that
+    call instead, and the Homebrew check only reports. Nothing to redirect on a
+    platform whose graph has no llvm-openmp.
+    """
+    if "llvm-openmp" not in references:
+        return []
+    variables = {"OpenMP_DIR": {"value": str(generators), "cache": True, "type": "PATH"},
+                 "CMAKE_FIND_PACKAGE_PREFER_CONFIG": "ON"}
+    return ["-c:h", "milvus-common/*:tools.cmake.cmaketoolchain:extra_variables=" + json.dumps(variables),
+            "-c:h", "milvus-common/*:tools.system.package_manager:mode=report"]
+
+
 def validate_conan_lock(path, references, platform_tools=()):
     """Require concrete recipe revisions; Conan checks the complete graph next."""
     lock = json.loads(path.read_text())
@@ -506,9 +526,11 @@ def build(args, repository, java_home, work, target, profile):
         build_profile = work / "build-profile"
         build_profile.write_text(profile.read_text().split("[options]")[0].rstrip("\n") + "\n\n" + replacements)
         dependencies = work / "dependencies"
-        options = ["-pr:h", host_profile, "-pr:b", build_profile,
-                   "-o:h", "with_cardinal=" + str(args.with_cardinal),
-                   "-c:h", "tools.build:jobs=" + str(args.jobs), "-c:b", "tools.build:jobs=" + str(args.jobs)]
+        profiles = ["-pr:h", host_profile, "-pr:b", build_profile,
+                    "-c:h", "tools.build:jobs=" + str(args.jobs), "-c:b", "tools.build:jobs=" + str(args.jobs)]
+        openmp_generators = work / "openmp-config"
+        options = [*profiles, "-o:h", "with_cardinal=" + str(args.with_cardinal),
+                   *macos_openmp_redirect(references, openmp_generators)]
         inputs = {"references": references, "hostProfile": host_profile.read_text(),
                   "consumerSha256": digest(consumer / "conanfile.py"),
                   "dependencySelectionSha256": digest(consumer / "dependencies.json"),
@@ -528,6 +550,12 @@ def build(args, repository, java_home, work, target, profile):
         prepare_conan_lock(None, lockfile, lock_identity, references, platform_tools)
         metadata["conanLockSha256"] = digest(lockfile)
         phase("build-unified-dependencies")
+        if "llvm-openmp" in references:
+            # The OpenMP config milvus-common is pointed at has to exist before
+            # Conan configures milvus-common, which does not depend on llvm-openmp.
+            run(["conan", "install", "--requires=" + references["llvm-openmp"], "-of", openmp_generators,
+                 "-g", "CMakeDeps", *profiles, "--lockfile", lockfile, "--build=missing",
+                 *(["--no-remote"] if args.no_remote else [])], env=env)
         run(["conan", "install", consumer, "-of", dependencies, *options,
              "--lockfile", lockfile, "--build=missing", "--format=json",
              *(["--no-remote"] if args.no_remote else [])],

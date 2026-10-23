@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 import jvm_load
 import platforms
-from build import (knowhere_c_api_tests, cardinal_versions, digest, platform_tool_requirements, prepare_conan_lock,
-                   promote_bundle, replace_requires_section, snapshot_corrosion, validate_conan_lock,
+from build import (knowhere_c_api_tests, cardinal_versions, digest, macos_openmp_redirect, platform_tool_requirements,
+                   prepare_conan_lock, promote_bundle, replace_requires_section, snapshot_corrosion, validate_conan_lock,
                    validate_locked_graph)
 
 
@@ -47,6 +47,17 @@ class BuildContextPinTest(unittest.TestCase):
         references = {"zlib": "zlib/1.3.1#8045", "grpc": "grpc/1.67.1@milvus/dev#efea"}
         section = replace_requires_section(references)
         self.assertEqual(section, "[replace_requires]\ngrpc/*: grpc/1.67.1@milvus/dev#efea\nzlib/*: zlib/1.3.1#8045\n")
+
+    def test_milvus_common_takes_openmp_from_the_graph_only_where_llvm_openmp_is_selected(self):
+        self.assertEqual([], macos_openmp_redirect({"zlib": "zlib/1.3.1#8045"}, Path("/work/openmp-config")))
+        options = macos_openmp_redirect({"llvm-openmp": "llvm-openmp/20.1.6#bbaf"}, Path("/work/openmp-config"))
+        self.assertEqual(["-c:h", "-c:h"], options[::2])
+        variables, mode = options[1::2]
+        prefix = "milvus-common/*:tools.cmake.cmaketoolchain:extra_variables="
+        self.assertTrue(variables.startswith(prefix))
+        self.assertEqual({"OpenMP_DIR": {"value": "/work/openmp-config", "cache": True, "type": "PATH"},
+                          "CMAKE_FIND_PACKAGE_PREFER_CONFIG": "ON"}, json.loads(variables[len(prefix):]))
+        self.assertEqual("milvus-common/*:tools.system.package_manager:mode=report", mode)
 
     def test_replacements_keep_the_exact_recipe_revision(self):
         section = replace_requires_section({"openssl": "openssl/3.3.2#9f9f"})
