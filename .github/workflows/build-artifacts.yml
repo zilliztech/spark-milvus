@@ -183,7 +183,7 @@ jobs:
         # packages and compiler cache behind; saving them lets the next attempt
         # continue instead of starting over, which matters most for the macOS
         # runner's first build of the whole dependency graph.
-        if: always() && steps.native_build.outcome != 'skipped'
+        if: ${{ !cancelled() && steps.native_build.outcome != 'skipped' }}
         run: |
           conan cache clean '*' --build --source --download --temp
           ccache --cleanup
@@ -194,8 +194,11 @@ jobs:
               printf 'Cache directory absent: %s\n' "$cache_dir"
             fi
           done
+      # A failed build still saves what it built on top of what it restored. A
+      # cancelled one does not: actions/cache restores the newest key with the
+      # prefix, so a cache cut short early would shadow a complete one.
       - name: Save native dependencies
-        if: always() && steps.native_build.outcome != 'skipped' && steps.dependency-cache.outputs.cache-hit != 'true'
+        if: ${{ !cancelled() && steps.native_build.outcome != 'skipped' && steps.dependency-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
         with:
           path: |

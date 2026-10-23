@@ -424,11 +424,12 @@ class WorkflowGateTest(unittest.TestCase):
         # after a failed or timed-out build so the next attempt continues.
         self.assertEqual(dependencies["uses"], "actions/cache/restore@v4")
         self.assertEqual(dependencies["id"], "dependency-cache")
-        self.assertEqual(trim["if"], "always() && steps.native_build.outcome != 'skipped'")
+        self.assertEqual(trim["if"], "${{ !cancelled() && steps.native_build.outcome != 'skipped' }}")
         save = by_name["Save native dependencies"]
         self.assertEqual(save["uses"], "actions/cache/save@v4")
-        self.assertEqual(save["if"], "always() && steps.native_build.outcome != 'skipped' "
-                                     "&& steps.dependency-cache.outputs.cache-hit != 'true'")
+        # Not always(): a cache saved by a cancelled run would shadow a complete one.
+        self.assertEqual(save["if"], "${{ !cancelled() && steps.native_build.outcome != 'skipped' "
+                                     "&& steps.dependency-cache.outputs.cache-hit != 'true' }}")
         self.assertEqual(save["with"]["key"], dependencies["with"]["key"])
         self.assertEqual(save["with"]["path"], dependencies["with"]["path"])
         self.assertLess(steps.index(trim), steps.index(save))
