@@ -40,7 +40,7 @@ lazy val root = project
 
 // Layer 1: upstream native bindings. Storage's Scala API is cross-built;
 // Knowhere's API is plain Java.
-lazy val nativeRuntime = Project("native-runtime", file("native-runtime"))
+lazy val nativeRuntime = Project("native-runtime", file("native/runtime"))
   .settings(
     name := "native-runtime",
     moduleName := "spark-milvus-native-runtime",
@@ -56,7 +56,7 @@ lazy val nativeRuntime = Project("native-runtime", file("native-runtime"))
     publish / skip := true
   )
 
-lazy val nativeStorage = Project("native-storage", file("native-storage"))
+lazy val nativeStorage = Project("native-storage", file("native/storage"))
   .dependsOn(nativeRuntime % compileAndRuntime)
   .settings(
     name := "native-storage",
@@ -112,7 +112,7 @@ lazy val nativeStorage = Project("native-storage", file("native-storage"))
     publish / skip := true
   )
 
-lazy val nativeVector = Project("native-vector", file("native-vector"))
+lazy val nativeVector = Project("native-vector", file("native/vector"))
   .dependsOn(nativeRuntime % compileAndRuntime)
   .settings(
     name := "native-vector",

@@ -31,6 +31,11 @@ Five production modules, with dependencies only pointing downward.
 | 2 | `core` | V3 snapshot formats, read/search computation and storage access; no Spark dependencies. |
 | 3 | `spark` | Read-only DataSource V2 and vector search, with shared sources and selected Spark shims. |
 
+The layer-1 modules live in `native/runtime`, `native/storage` and
+`native/vector`, and the unified native build that produces the platform bundle
+is `native/build/`; the project IDs keep their `native-` names. The three
+submodules stay at the repository root.
+
 The root aggregates those modules and publishes no artifact. `integration`
 is outside the aggregate and tests fixed V3 inputs in a real object store;
 it needs no Milvus service. Use `spark/assembly` for the selected local bundle.

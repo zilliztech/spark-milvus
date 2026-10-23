@@ -53,7 +53,7 @@ class DockerGitTrustTest(unittest.TestCase):
             self.assertIn("dubious ownership", rejected.stderr)
             self.assertIn(str(workspace / ".git/modules/knowhere"), rejected.stderr)
 
-            dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text()
+            dockerfile = (Path(__file__).resolve().parents[2] / "Dockerfile").read_text()
             trusted_paths = re.findall(r"git config --global --add safe\.directory (\S+)", dockerfile)
             self.assertTrue(trusted_paths)
             for path in trusted_paths:

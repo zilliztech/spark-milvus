@@ -24,15 +24,17 @@ explicitly recorded by the [release workflow](docs/releasing.md).
 
 The public build has five production modules in three layers. Dependencies
 point downward; `core` and `native-storage` reject Spark imports at compile time.
+Everything native lives under `native/`: the three layer-1 modules and the
+unified native build in `native/build/`.
 
-| Layer | Module | What it holds |
-|---|---|---|
-| 1 | `native-runtime` | Verification and extraction of the unified native bundle |
-| 1 | `native-storage` | The pinned milvus-storage JNI and Java/Scala API |
-| 1 | `native-vector` | The upstream Knowhere Java API and persisted-index search adapter |
-| 2 | `core` | V3 snapshots, manifests, deletes, schema, codecs, read planning and search; no Spark |
-| 3 | `spark` | Read-only DataSource, DataFrame and NEAREST BY interfaces |
-| — | `integration` | V3 reads from a real object store, outside root's aggregate |
+| Layer | Module | Directory | What it holds |
+|---|---|---|---|
+| 1 | `native-runtime` | `native/runtime` | Verification and extraction of the unified native bundle |
+| 1 | `native-storage` | `native/storage` | The pinned milvus-storage JNI and Java/Scala API |
+| 1 | `native-vector` | `native/vector` | The upstream Knowhere Java API and persisted-index search adapter |
+| 2 | `core` | `core` | V3 snapshots, manifests, deletes, schema, codecs, read planning and search; no Spark |
+| 3 | `spark` | `spark` | Read-only DataSource, DataFrame and NEAREST BY interfaces |
+| — | `integration` | `integration` | V3 reads from a real object store, outside root's aggregate |
 
 The root only aggregates modules. It has no mixed assembly or publication.
 Select a Spark line and Scala version when starting sbt; the `spark` module
@@ -74,7 +76,7 @@ git submodule update --init milvus-proto milvus-storage knowhere
 | [docs/reference-en.md](docs/reference-en.md) | V3 read options, vector search, data types and supported entry points |
 | [docs/contributing.md](docs/contributing.md) | Building, formatting, testing and the native bundle, beyond this README |
 | [docs/releasing.md](docs/releasing.md) | Maven coordinates, the supported release matrix, candidate validation and Central publication |
-| [native-build/README.md](native-build/README.md) | How the per-platform native bundle is built and published |
+| [native/build/README.md](native/build/README.md) | How the per-platform native bundle is built and published |
 
 [AGENTS.md](AGENTS.md) is the entry point for agents and people working on the
 code: what the project is, how it is layered, and the rules any change has to
@@ -152,7 +154,7 @@ alias spark-submit-wrapper="/xxx/spark-submit-wrapper.sh"
 ## Building
 
 The native libraries, the toolchain versions and the two ways to build the
-native bundle are described in [native-build/README.md](native-build/README.md).
+native bundle are described in [native/build/README.md](native/build/README.md).
 
 Knowhere library loading uses the Java API and JNI from pinned upstream `main`,
 which includes merged PR #1829.
@@ -179,7 +181,7 @@ build, consumer and publication commands.
 The fat jar only loads Milvus segments when it carries the native
 `milvus-storage` libraries for the platform it runs on. `make package` builds
 them into the unified Storage/Knowhere bundle from the platform's profile under
-`native-build/profiles/`, on Linux and macOS, x86_64 and aarch64 alike. The macOS
+`native/build/profiles/`, on Linux and macOS, x86_64 and aarch64 alike. The macOS
 toolchain and its Conan configuration are in
 [contributing.md](docs/contributing.md#macos).
 

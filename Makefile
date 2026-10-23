@@ -34,8 +34,8 @@ else
 endif
 
 # The native libraries come from one unified bundle. Building it needs this
-# platform's Conan profile under native-build/profiles/ and its adapter in
-# native-build/platforms.py; build.py names the one that is missing.
+# platform's Conan profile under native/build/profiles/ and its adapter in
+# native/build/platforms.py; build.py names the one that is missing.
 # NATIVE_BUNDLE selects a prebuilt platform JAR instead, and sbt's
 # verifyNativeBundle checks that it matches this platform.
 # NATIVE_BUNDLE_OUTPUT names the locally built JAR.
@@ -94,8 +94,8 @@ help:
 	@echo "  NATIVE_BUILD_OPTIONS=$(NATIVE_BUILD_OPTIONS) (optional native driver arguments; public builds use OSS)"
 	@echo "  NATIVE_BUNDLE=$(NATIVE_BUNDLE) (prebuilt platform JAR plus .properties)"
 	@echo "  NATIVE_BUNDLE_OUTPUT=$(NATIVE_BUNDLE_OUTPUT)"
-	@echo "  Without NATIVE_BUNDLE, the platform's profile under native-build/profiles/ builds both engines."
-	@echo "  Profiles present: $(notdir $(wildcard native-build/profiles/*))"
+	@echo "  Without NATIVE_BUNDLE, the platform's profile under native/build/profiles/ builds both engines."
+	@echo "  Profiles present: $(notdir $(wildcard native/build/profiles/*))"
 	@echo "  NATIVE_PLATFORM=$(NATIVE_PLATFORM)"
 
 # Initialize Git submodules

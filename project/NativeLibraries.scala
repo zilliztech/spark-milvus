@@ -17,7 +17,7 @@ object NativeLibraries {
       val library = new File(directory, name)
       require(library.isFile, s"Missing native entry library: $library")
     }
-    val checker = new File(repository, "native-build/jvm_load.py")
+    val checker = new File(repository, "native/build/jvm_load.py")
     require(checker.isFile, s"Missing JVM native load checker: $checker")
     val (exit, output) = nativeCheck(
       Seq(

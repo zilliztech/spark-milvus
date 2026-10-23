@@ -12,7 +12,7 @@ import unittest
 
 class StorageSourceGraphTest(unittest.TestCase):
     def test_upstream_talon_and_credentials_are_in_the_native_graph(self):
-        repository = Path(__file__).resolve().parent.parent
+        repository = Path(__file__).resolve().parents[2]
         storage = repository / "milvus-storage"
         if not (storage / "cpp/src/format/bridge/rust/Cargo.lock").is_file():
             self.skipTest("Initialize milvus-storage to configure the pinned source graph")
@@ -76,7 +76,7 @@ file(WRITE "${CMAKE_BINARY_DIR}/bridges" "${bridges}")
             build = source / "build"
             result = subprocess.run([
                 "cmake", "-S", str(source), "-B", str(build),
-                "-DSTORAGE_ADAPTER=" + str(repository / "native-build/cmake/Storage.cmake"),
+                "-DSTORAGE_ADAPTER=" + str(repository / "native/build/cmake/Storage.cmake"),
                 "-DMILVUS_STORAGE_SOURCE_DIR=" + str(storage),
                 "-DFETCHCONTENT_SOURCE_DIR_CORROSION=" + str(corrosion),
             ], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)

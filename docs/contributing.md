@@ -31,9 +31,10 @@ bundle built elsewhere.
 
 ## Project ids and version selection
 
-The five production project IDs match their directories: `native-runtime`,
-`native-storage`, `native-vector`, `core` and `spark`. The root only aggregates
-these projects. `integration` is separate because it needs a real object store.
+The five production project IDs are `native-runtime`, `native-storage`,
+`native-vector`, `core` and `spark`. The layer-1 projects live under `native/`
+as `native/runtime`, `native/storage` and `native/vector`; `core` and `spark`
+match their directories. The root only aggregates these projects. `integration` is separate because it needs a real object store.
 
 `-DsparkVersion` selects a supported line or its pinned compile version;
 `-DscalaVersion` selects the full Scala version. Defaults are 4.0 / 2.13.16;
@@ -281,9 +282,9 @@ than assuming fully static linkage.
 
 The unified platform JAR contains both upstream JNI entry libraries and
 one dynamically linked dependency set. The implementation and acceptance status
-are documented in [native-build/README.md](../native-build/README.md).
+are documented in [native/build/README.md](../native/build/README.md).
 The native build is explicit; ordinary sbt compilation does not start Conan or
-CMake. The independent project in `native-build/` defines both engines, their
+CMake. The independent project in `native/build/` defines both engines, their
 upstream JNI implementations and the optional Cardinal plugins without executing
 their upstream CMake files. One Conan host graph supplies shared dependencies
 to one CMake/Ninja build tree.
@@ -295,8 +296,8 @@ make native-bundle NATIVE_JOBS=50
 make package NATIVE_BUNDLE="$PWD/target/native-build/$platform/milvus-native-$platform.jar"
 ```
 
-A platform is built from source when `native-build/profiles/` holds its Conan
-profile and `native-build/platforms.py` holds its adapter; all four platforms
+A platform is built from source when `native/build/profiles/` holds its Conan
+profile and `native/build/platforms.py` holds its adapter; all four platforms
 have both. The build needs Conan 2, the CMake version the
 profile's `[platform_tool_requires]` names, Ninja, ccache, the profile's
 compilers, Rust, libclang, a JDK, and access to the pinned source repositories
@@ -309,9 +310,9 @@ ships no OpenMP runtime.
 `--with-cardinal` also needs access to both pinned Cardinal
 revisions. `dependencies.json` selects the newer version when the two source
 recipes conflict. Every dependency uses the exact upstream recipe revision in
-`native-build/dependencies.json`; the repository does not export replacement
+`native/build/dependencies.json`; the repository does not export replacement
 recipes or rewrite cached recipes. Integration-specific link relationships live
-in `native-build/cmake/Storage.cmake`, `Knowhere.cmake` and `Cardinal.cmake`.
+in `native/build/cmake/Storage.cmake`, `Knowhere.cmake` and `Cardinal.cmake`.
 Conan can reuse a cached package only when the recipe revision, configuration
 and package ID match.
 
@@ -324,7 +325,7 @@ parallel build at once. Engine and JNI targets are installed under
 
 Native acceptance requires both JNI libraries to load in two fresh JVMs, using
 storage-first and Knowhere-first order. Staging, packaging and sbt use the same
-checker in `native-build/jvm_load.py`; a matching JDK with `libjsig` is required.
+checker in `native/build/jvm_load.py`; a matching JDK with `libjsig` is required.
 Per-library ELF and relocation checks remain diagnostic and do not block this
 acceptance. JNI functional tests and real Spark queries must still run against
 the resulting assembly; successful `System.load` alone does not prove them.
@@ -342,7 +343,7 @@ builds validate a new candidate before replacing
 `bundle/`; previous successful bundles and failed candidates remain available
 for diagnosis. Pass `--conan-lock` through `NATIVE_BUILD_OPTIONS` to reuse a
 reviewed complete dependency lock in another build directory. See
-[native-build/README.md](../native-build/README.md) for the directory layout and
+[native/build/README.md](../native/build/README.md) for the directory layout and
 cache options.
 
 `make all`, `package` and `quick-build` build the unified bundle and select it;
@@ -406,7 +407,7 @@ Those diagnostic results do not replace the JVM loading and functional tests.
 
 The unified bundle is the only source of native libraries in the build. A
 malformed bundle fails the build. A `native/` directory under
-`native-storage/src/main/resources`, left by the storage-only build this
+`native/storage/src/main/resources`, left by the storage-only build this
 repository no longer has, fails the build until it is deleted, so no second copy
 of the storage libraries reaches the classpath. An explicit
 `knowhere.native.path` pointing elsewhere is rejected at runtime. The connector
@@ -465,7 +466,7 @@ a change of the submodule URL, run `git submodule sync knowhere` before
 `git submodule update`. `native-vector`
 compiles `knowhere/java/src/main/java` with `javac --release 11`; it does not
 implement another C API or JNI bridge. The API JAR is cached under
-`native-vector/target/knowhere`. An ordinary compile or unit-test run needs a
+`native/vector/target/knowhere`. An ordinary compile or unit-test run needs a
 JDK and an initialized submodule, but does not download source or compile or
 load the native engine.
 
@@ -503,7 +504,7 @@ cannot establish signal chaining after startup. Do not package another JDK's
 uses only packaged adapter/API/native JARs plus its test entry point, clears
 build-library paths, and checks `-Xcheck:jni` diagnostics. Missing libraries or
 failed native calls fail the smoke; it never cancels itself. Its log is
-`native-vector/target/knowhere-smoke/jni.log`.
+`native/vector/target/knowhere-smoke/jni.log`.
 
 `stage.py` fails staging when a required source license document is missing;
 collected licenses land in `bundle/licenses/` and
@@ -585,8 +586,8 @@ real object store. Additional Scala
 cross-version checks, integration tests, native
 builds and publication follow the task's scope and authorization.
 
-CI runs `python3 -m unittest discover -s native-build -p 'test_*.py'` plus the
-same discovery over `scripts/tests`; run them when touching `native-build/`.
+CI runs `python3 -m unittest discover -s native/build -p 'test_*.py'` plus the
+same discovery over `scripts/tests`; run them when touching `native/build/`.
 
 ## Storage protobufs
 

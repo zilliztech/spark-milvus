@@ -34,8 +34,8 @@ class NativePlatformMakeTest(unittest.TestCase):
                 cwd=ROOT, text=True, capture_output=True, check=True,
             ).stdout
 
-    #: A platform builds both engines when native-build carries its profile.
-    PROFILED = sorted(path.name for path in (ROOT / "native-build" / "profiles").iterdir())
+    #: A platform builds both engines when native/build carries its profile.
+    PROFILED = sorted(path.name for path in (ROOT / "native" / "build" / "profiles").iterdir())
 
     def test_a_profiled_platform_builds_unified_resources_and_passes_the_bundle_to_sbt(self):
         for platform in self.PROFILED:

@@ -137,7 +137,7 @@ if not self.options.with_light:
 
         native_build = Path(__file__).parent
         self.assertIs(True, defaults(native_build / "conanfile.py")["metis/*:with_64bit_types"])
-        upstream = native_build.parent / "knowhere/conanfile.py"
+        upstream = native_build.parents[1] / "knowhere/conanfile.py"
         if upstream.is_file():
             self.assertIs(True, defaults(upstream)["metis/*:with_64bit_types"])
 
@@ -164,7 +164,7 @@ if not self.options.with_light:
                     self.assertEqual(expected, observed)
 
     def test_initialized_engine_recipes_fit_the_unified_graph(self):
-        repository = Path(__file__).resolve().parent.parent
+        repository = Path(__file__).resolve().parents[2]
         storage = repository / "milvus-storage/cpp/conanfile.py"
         knowhere = repository / "knowhere/conanfile.py"
         if not storage.is_file() or not knowhere.is_file():

@@ -264,8 +264,8 @@ object NativeBundle {
       )
       val directory = target / "native-bundle" / jarHash
       val stamp = directory / "validated"
-      val checker = root / "native-build" / "jvm_load.py"
-      val javaChecker = root / "native-build" / "NativeLoadCheck.java"
+      val checker = root / "native" / "build" / "jvm_load.py"
+      val javaChecker = root / "native" / "build" / "NativeLoadCheck.java"
       val stampValue =
         s"jvm-load-v1\n$jarHash\n${auditDlopenEntries.mkString(",")}\n" +
           s"${digest(checker)}\n${digest(javaChecker)}\n" +

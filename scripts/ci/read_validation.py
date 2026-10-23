@@ -31,6 +31,9 @@ INTEGRATION_SUITE = "com.zilliz.spark.connector.sources.MilvusDataSourceTest"
 
 MODULE_CLEAN = [project + "/clean" for project in
                 ("native-runtime", "native-storage", "native-vector", "core", "spark", "integration")]
+# The layer-1 project IDs keep their published names; their directories sit under native/.
+PROJECT_DIRECTORIES = {"native-runtime": "native/runtime", "native-storage": "native/storage",
+                       "native-vector": "native/vector"}
 
 
 def read_matrix(path):
@@ -180,7 +183,7 @@ def run_sbt(name, commands, *, bundle=None, environment=None, line="4.0", scala=
 
 
 def report_directory(project):
-    return ROOT / project / "target/test-reports"
+    return ROOT / PROJECT_DIRECTORIES.get(project, project) / "target/test-reports"
 
 
 def reset_reports(projects):

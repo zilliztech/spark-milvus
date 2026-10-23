@@ -36,8 +36,8 @@ class NativeCacheKeyTest(unittest.TestCase):
             self.commit(directory)
             self.plan["pins"][engine] = self.git(directory, "rev-parse", "HEAD")
         paths = set(cache.EXPLICIT_INPUTS) | {
-            "native-build/build.py", "native-build/CMakeLists.txt", "native-build/dependencies.json",
-            "native-build/profiles/linux-x86_64", "build.sbt", "core/src/main/scala/Example.scala",
+            "native/build/build.py", "native/build/CMakeLists.txt", "native/build/dependencies.json",
+            "native/build/profiles/linux-x86_64", "build.sbt", "core/src/main/scala/Example.scala",
         }
         for name in paths:
             path = self.root / name
@@ -88,10 +88,10 @@ class NativeCacheKeyTest(unittest.TestCase):
 
     def test_new_tracked_native_input_invalidates_but_build_noise_does_not(self):
         before = self.fingerprint()
-        generated = self.root / "native-build/untracked.o"
+        generated = self.root / "native/build/untracked.o"
         generated.write_bytes(b"compiler output")
         self.assertEqual(before, self.fingerprint())
-        added = self.root / "native-build/new-build-input.cmake"
+        added = self.root / "native/build/new-build-input.cmake"
         added.write_text("new build logic")
         self.git(self.root, "add", str(added))
         self.assertNotEqual(before["key"], self.fingerprint()["key"])
@@ -170,7 +170,7 @@ class NativeCacheKeyTest(unittest.TestCase):
                 self.assertNotIn("compilerNativeTarget", identities[0]["inputs"]["toolchain"]["tools"])
 
     def test_declared_profile_changes_rebuild_bundle_and_reuse_package_id_aware_dependencies(self):
-        profile = self.root / "native-build/profiles/linux-x86_64"
+        profile = self.root / "native/build/profiles/linux-x86_64"
         profile.write_text("openblas/*:target=NEHALEM\nopenblas/*:NUM_THREADS=64\n")
         before = self.fingerprint()
         profile.write_text("openblas/*:target=HASWELL\nopenblas/*:NUM_THREADS=32\n")

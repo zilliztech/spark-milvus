@@ -317,7 +317,7 @@ def promote_bundle(candidate, work):
 
 
 def main():
-    repository = Path(__file__).resolve().parents[1]
+    repository = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--storage-source", type=Path, default=repository / "milvus-storage")
@@ -346,9 +346,9 @@ def main():
         target = platforms.host_platform()
     except ValueError as error:
         parser.error(str(error))
-    profile = repository / "native-build/profiles" / target
+    profile = repository / "native/build/profiles" / target
     if not profile.is_file():
-        parser.error("No build profile for " + target + "; add native-build/profiles/" + target)
+        parser.error("No build profile for " + target + "; add native/build/profiles/" + target)
     if not platforms.host().available():
         parser.error("This platform's binary tools are missing: "
                      + ", ".join(platforms.host().tools))
@@ -386,7 +386,7 @@ def build(args, repository, java_home, work, target, profile):
 
     try:
         phase("snapshot-sources")
-        constraints = json.loads((repository / "native-build/dependencies.json").read_text())
+        constraints = json.loads((repository / "native/build/dependencies.json").read_text())
         knowhere_pin, knowhere_object_source = knowhere_source(repository, args.knowhere_source)
         storage_pin = storage_revision(repository, args.storage_source, args.storage_revision)
         storage = sources / "milvus-storage"
@@ -464,14 +464,14 @@ def build(args, repository, java_home, work, target, profile):
         metadata["cpu.portability"] = ("CPU requirements depend on dependency targets and compiler flags; "
                                       + target + " alone does not specify an ISA baseline")
         phase("validate-upstream-dependencies")
-        build_source_files = tree_hashes(repository / "native-build")
+        build_source_files = tree_hashes(repository / "native/build")
         build_source_manifest = provenance / "build-source-files.json"
         if build_source_manifest.exists() and json.loads(build_source_manifest.read_text()) != build_source_files:
             raise RuntimeError("Native build implementation changed; use a new work directory")
         build_source_manifest.write_text(json.dumps(build_source_files, indent=2) + "\n")
         build_inputs = provenance / "build-input"
         if not build_inputs.exists():
-            shutil.copytree(repository / "native-build", build_inputs / "native-build",
+            shutil.copytree(repository / "native/build", build_inputs / "native/build",
                             ignore=shutil.ignore_patterns("__pycache__"))
             shutil.copy2(repository / "scripts/build-native.sh", build_inputs / "build-native.sh")
         from dependency_versions import selected_references, validate_upstream_versions
@@ -494,8 +494,8 @@ def build(args, repository, java_home, work, target, profile):
             constraints, conan_os=conan_os, with_cardinal=args.with_cardinal)
         consumer = work / "dependency-input"
         consumer.mkdir(exist_ok=True)
-        shutil.copy2(repository / "native-build/conanfile.py", consumer / "conanfile.py")
-        shutil.copy2(repository / "native-build/dependencies.json", consumer / "dependencies.json")
+        shutil.copy2(repository / "native/build/conanfile.py", consumer / "conanfile.py")
+        shutil.copy2(repository / "native/build/dependencies.json", consumer / "dependencies.json")
         (provenance / "direct-references.json").write_text(json.dumps(references, indent=2) + "\n")
         platform_tools = platform_tool_requirements(profile)
         replacements = replace_requires_section(references)
@@ -635,7 +635,7 @@ def build(args, repository, java_home, work, target, profile):
         phase("configure-independent-cmake")
         common.append("-DFETCHCONTENT_SOURCE_DIR_CORROSION=" + str(corrosion))
         trace = provenance / "cmake-trace.jsonl"
-        run(["cmake", "-S", repository / "native-build", "-B", native_build, *common,
+        run(["cmake", "-S", repository / "native/build", "-B", native_build, *common,
              "--trace-expand", "--trace-format=json-v1", "--trace-redirect=" + str(trace)], env=build_env)
         metadata["cmakeTraceCommands"] = check_cmake_trace(trace, [storage, knowhere])
         metadata["cmakeTraceSha256"] = digest(trace)
@@ -672,13 +672,13 @@ def build(args, repository, java_home, work, target, profile):
             raise RuntimeError("Native build modified its upstream source inputs")
         (provenance / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
         phase("stage-unified-libraries")
-        if tree_hashes(repository / "native-build") != build_source_files:
+        if tree_hashes(repository / "native/build") != build_source_files:
             raise RuntimeError("Native build implementation changed while compiling; preserve this build for diagnosis")
         candidates = work / "bundle-candidates"
         candidates.mkdir(exist_ok=True)
         candidate = candidates / (time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:8])
         status["candidate"] = str(candidate)
-        run([sys.executable, repository / "native-build/stage.py", "--graph", provenance / "conan-graph.json",
+        run([sys.executable, repository / "native/build/stage.py", "--graph", provenance / "conan-graph.json",
              "--storage-build", install / "lib", "--knowhere-build", install / "lib",
              "--output", candidate, "--metadata", provenance / "metadata.json"], env=env)
         if test_result.returncode:

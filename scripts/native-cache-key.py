@@ -74,9 +74,9 @@ def validate_pins(root, plan):
 def source_inputs(root):
     # ls-files excludes local build outputs and includes newly staged build
     # inputs. Explicit entry scripts also work before their first commit.
-    names = command(["git", "ls-files", "-z", "--", "native-build"], cwd=root).split("\0")
+    names = command(["git", "ls-files", "-z", "--", "native/build"], cwd=root).split("\0")
     names = {name for name in names if name} | set(EXPLICIT_INPUTS)
-    require(any(name.startswith("native-build/") for name in names), "No tracked native build inputs")
+    require(any(name.startswith("native/build/") for name in names), "No tracked native build inputs")
     result = {}
     for name in sorted(names):
         path = root / name

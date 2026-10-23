@@ -78,7 +78,7 @@ endforeach()
 class KnowhereSourceGraphTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.repository = Path(__file__).resolve().parent.parent
+        cls.repository = Path(__file__).resolve().parents[2]
         cls.knowhere = cls.repository / "knowhere"
         if not (cls.knowhere / "cmake/libs/libfaiss.cmake").is_file():
             raise unittest.SkipTest("Initialize Knowhere to configure its pinned source graph")
@@ -91,7 +91,7 @@ class KnowhereSourceGraphTest(unittest.TestCase):
         source = Path(directory.name)
         (source / "CMakeLists.txt").write_text(FIXTURE)
         build = source / "build"
-        adapter = self.repository / "native-build/cmake/Knowhere.cmake"
+        adapter = self.repository / "native/build/cmake/Knowhere.cmake"
         command = [
             "cmake", "-S", str(source), "-B", str(build),
             "-DKNOWHERE_ADAPTER=" + str(adapter),

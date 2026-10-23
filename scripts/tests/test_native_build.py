@@ -21,7 +21,7 @@ import unittest
 from unittest import mock
 
 
-SCRIPT = Path(__file__).resolve().parents[2] / "native-build" / "build.py"
+SCRIPT = Path(__file__).resolve().parents[2] / "native" / "build" / "build.py"
 # build.py imports its siblings, so its own directory has to be importable.
 sys.path.insert(0, str(SCRIPT.parent))
 import platforms
@@ -170,14 +170,14 @@ class NativeBuildSourceTest(unittest.TestCase):
         self.repository = self.root / "connector"
         self.repository.mkdir()
         self.git(self.repository, "init", "--quiet")
-        (self.repository / "native-build" / "profiles").mkdir(parents=True)
-        shutil.copy2(HOST_PROFILE, self.repository / "native-build" / "profiles" / HOST_PROFILE.name)
+        (self.repository / "native" / "build" / "profiles").mkdir(parents=True)
+        shutil.copy2(HOST_PROFILE, self.repository / "native" / "build" / "profiles" / HOST_PROFILE.name)
         self.storage = self.repository / "milvus-storage"
         self.knowhere = self.repository / "knowhere"
         self.storage_revision = self.create_repository(self.storage, "cpp/source.cc", "int storage = 1;\n")
         self.knowhere_revision = self.create_repository(self.knowhere, "source.cc", "int knowhere = 2;\n")
         self.git(self.repository, "add", "milvus-storage", "knowhere")
-        (self.repository / "native-build" / "dependencies.json").write_text(
+        (self.repository / "native" / "build" / "dependencies.json").write_text(
             json.dumps({"references": {}, "cardinal": {}}), encoding="ascii",
         )
         # The historical bug discarded every source whenever an ancestor of
@@ -225,7 +225,7 @@ class NativeBuildSourceTest(unittest.TestCase):
             return SUBPROCESS_RUN(command, *args, **kwargs)
 
         with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(
-            NATIVE_BUILD, "__file__", str(self.repository / "native-build" / "build.py"),
+            NATIVE_BUILD, "__file__", str(self.repository / "native" / "build" / "build.py"),
         ), mock.patch.object(sys, "argv", arguments), mock.patch.dict(
             os.environ, {"JAVA_HOME": str(self.java)},
         ), mock.patch.object(NATIVE_BUILD.subprocess, "run", side_effect=guard):

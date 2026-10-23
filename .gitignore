@@ -11,7 +11,7 @@ project/project
 project/target
 .DS_Store
 note.md
-build/
+/build/
 __pycache__/
 *.pyc
 .sbt/

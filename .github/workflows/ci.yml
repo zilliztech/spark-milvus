@@ -199,7 +199,7 @@ jobs:
           persist-credentials: false
 
       - name: Test local submodule fetch ownership
-        run: python3 -m unittest discover -s native-build -p 'test_git_safe_directory.py' -v
+        run: python3 -m unittest discover -s native/build -p 'test_git_safe_directory.py' -v
 
   build-and-test:
     name: Aggregate coverage and clean contracts
@@ -386,7 +386,7 @@ jobs:
           sudo apt-get install -y -qq patchelf
 
       - name: native-build tests
-        run: python3 -m unittest discover -s native-build -p 'test_*.py'
+        run: python3 -m unittest discover -s native/build -p 'test_*.py'
 
       - name: Packaging and Makefile tests
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'

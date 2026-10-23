@@ -133,7 +133,7 @@ host does not configure a remote driver.
 Use the same clean source commit and public submodule pins on every build host.
 Choose an unused final version before building; staging and publication never
 rewrite it. Python 3.12, JDK 21 and sbt are required. Native hosts also need the
-[platform toolchain](../native-build/README.md).
+[platform toolchain](../native/build/README.md).
 
 ```bash
 git submodule update --init --recursive milvus-proto milvus-storage knowhere

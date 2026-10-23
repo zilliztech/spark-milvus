@@ -146,7 +146,7 @@ object Modules {
       val nativeDir = (if (NativeBundle.selected.nonEmpty)
                          root / "target" / "empty-native-path"
                        else
-                         root / "native-storage" / "src" / "main" / "resources" / "native").getAbsolutePath
+                         root / "native" / "storage" / "src" / "main" / "resources" / "native").getAbsolutePath
       Seq(
         "-Xss2m",
         "-Xmx4g",
@@ -176,7 +176,7 @@ object Modules {
                   Map("LD_LIBRARY_PATH" -> "", "LD_BIND_NOW" -> "1")
                 else {
                   val nativeDir =
-                    ((ThisBuild / baseDirectory).value / "native-storage" / "src" / "main" / "resources" / "native").getAbsolutePath
+                    ((ThisBuild / baseDirectory).value / "native" / "storage" / "src" / "main" / "resources" / "native").getAbsolutePath
                   Map(
                     "LD_LIBRARY_PATH" -> nativeDir,
                     "DYLD_LIBRARY_PATH" -> nativeDir

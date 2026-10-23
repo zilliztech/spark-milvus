@@ -222,6 +222,10 @@ class MatrixTest(unittest.TestCase):
         for project in ("spark", "integration", "core"):
             self.assertEqual(validation.report_directory(project),
                              validation.ROOT / project / "target/test-reports")
+        for project, directory in (("native-runtime", "native/runtime"), ("native-storage", "native/storage"),
+                                   ("native-vector", "native/vector")):
+            self.assertEqual(validation.report_directory(project),
+                             validation.ROOT / directory / "target/test-reports")
 
     def test_clean_build_reloads_selectors_and_removes_all_products(self):
         root = Path(self.temporary.name)

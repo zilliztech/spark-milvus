@@ -38,7 +38,7 @@ so caches cannot reuse a package with different capacity. Runtime thread
 settings still control concurrency. Header-only dependencies and the internal
 Rust bridge do not expose a shared-library option.
 
-A platform is built when `native-build/profiles/` holds its Conan profile and
+A platform is built when `native/build/profiles/` holds its Conan profile and
 `platforms.py` holds its adapter. `build.py` names the missing one rather than
 refusing an operating system.
 
@@ -261,5 +261,5 @@ does not install resources into the connector or modify compatibility records.
 Run its focused regression tests with:
 
 ```bash
-python3 -m unittest discover -s native-build -p 'test_*.py' -v
+python3 -m unittest discover -s native/build -p 'test_*.py' -v
 ```

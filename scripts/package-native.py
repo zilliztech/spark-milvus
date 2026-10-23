@@ -14,7 +14,7 @@ import tempfile
 from urllib.parse import urlsplit
 import zipfile
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "native-build"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "native" / "build"))
 import platforms  # noqa: E402  -- the path above makes this importable
 
 FORMAT = platforms.host()
@@ -210,7 +210,7 @@ def validate_jvm_load_tests(tests, source, exact_fields=False):
 
 def check_jvm_loads(directory, output=None):
     """Load the shared JVM probe lazily so this script remains directly executable."""
-    helper_path = Path(__file__).resolve().parents[1] / "native-build" / "jvm_load.py"
+    helper_path = Path(__file__).resolve().parents[1] / "native" / "build" / "jvm_load.py"
     spec = importlib.util.spec_from_file_location("milvus_native_jvm_load", helper_path)
     if spec is None or spec.loader is None:
         raise ValueError(f"Cannot load JVM native validation helper: {helper_path}")
@@ -268,7 +268,7 @@ def package(directory, provenance_path, output, licenses=None, evidence=None):
     platform = provenance.get("platform")
     # A platform is packaged when the build covers it, which is what having a
     # Conan profile means; the driver checks the same thing.
-    profiles = Path(__file__).resolve().parents[1] / "native-build" / "profiles"
+    profiles = Path(__file__).resolve().parents[1] / "native" / "build" / "profiles"
     if not platform or not (profiles / platform).is_file():
         raise ValueError("Unsupported native bundle platform: " + str(platform))
     for feature in ("with_cardinal", "with_diskann"):

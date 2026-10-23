@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[2]
 RESOURCE_ROOTS = (
     "core/src/test/resources/read-fixtures",
     "core/src/test/data",
-    "native-vector/src/test/resources/read-fixtures",
+    "native/vector/src/test/resources/read-fixtures",
 )
 
 
@@ -51,7 +51,7 @@ def check_package(path, source_root):
 
 def check_source_layout(root):
     count = 0
-    for module in ("native-runtime", "native-storage", "native-vector", "core", "spark", "integration"):
+    for module in ("native/runtime", "native/storage", "native/vector", "core", "spark", "integration"):
         for scope in ("main", "test"):
             base = root / module / "src" / scope
             source_roots = [base / "scala", base / "java"]

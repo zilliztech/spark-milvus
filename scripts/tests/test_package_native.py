@@ -539,7 +539,7 @@ class PackageNativeTest(unittest.TestCase):
 
     def test_build_locks_profiles_dependency_pins_and_source_patches_are_embedded_verbatim(self):
         evidence = self.root / "evidence"
-        helper_directory = SCRIPT.parents[1] / "native-build"
+        helper_directory = SCRIPT.parents[1] / "native" / "build"
         records = {
             "NativeLoadCheck.java": (helper_directory / "NativeLoadCheck.java").read_bytes(),
             "jvm_load.py": (helper_directory / "jvm_load.py").read_bytes(),
