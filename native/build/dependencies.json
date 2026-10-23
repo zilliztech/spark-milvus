@@ -41,7 +41,7 @@
     "zstd": "zstd/1.5.5#70dc5eb8ea16708fc946fbac884c507e"
   },
   "platform_scope": {
-    "_comment": "References upstream declares for one operating system only; the engines' own conanfiles gate these the same way. llvm-openmp is the OpenMP runtime Apple Clang does not ship, built for the same deployment target as every other library; a Homebrew bottle states the macOS release it was built on instead.",
+    "_comment": "References upstream declares for one operating system only; the engines' own conanfiles gate these the same way. llvm-openmp is the OpenMP runtime Apple Clang does not ship, held to the deployment-target baseline like every other library; a Homebrew bottle states the macOS release it was built on instead.",
     "liburing": [
       "Linux"
     ],

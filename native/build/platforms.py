@@ -343,9 +343,9 @@ class MachO(Format):
 
     # Apple Clang has no OpenMP runtime of its own, and a Homebrew libomp
     # bottle is built for the macOS release it was poured on, not for the
-    # deployment target. libomp therefore comes from the Conan graph
-    # (llvm-openmp), like every other dependency; there is no compiler runtime
-    # to locate on this host.
+    # deployment-target baseline. libomp therefore comes from the Conan graph
+    # (llvm-openmp), audited like every other dependency; there is no compiler
+    # runtime to locate on this host.
 
     def system_libraries(self):
         # Names a binary can record without a path; anything with a system path
