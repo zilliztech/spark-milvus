@@ -235,7 +235,7 @@ The pinned CMake 3 lives in a virtual environment of its own because a current C
 
 ```bash
 xcode-select --install                       # clang, otool, install_name_tool, codesign
-brew install libomp ninja ccache openjdk@21 sbt   # libomp: Apple Clang ships no OpenMP runtime
+brew install ninja ccache openjdk@21 sbt
 curl https://sh.rustup.rs -sSf | sh          # cargo, for the storage Rust bridge
 python3 -m venv ~/toolchain/cmake3venv       # not under /tmp, which the system empties
 ~/toolchain/cmake3venv/bin/pip install cmake==3.31.10 ninja conan==2.25.1
@@ -309,8 +309,10 @@ and Conan recipes. Rust bindgen loads libclang when building the storage
 bridge's `custom-labels` dependency; install `libclang-dev` on Ubuntu, and on
 macOS point `LIBCLANG_PATH` at the Command Line Tools copy. Linux adds
 `patchelf` and the libaio development package; macOS adds `otool`,
-`install_name_tool`, `codesign` and Homebrew's `libomp`, since Apple Clang
-ships no OpenMP runtime.
+`install_name_tool` and `codesign`. Apple Clang ships no OpenMP runtime, so on
+macOS the graph builds LLVM's (`llvm-openmp`) for the deployment target like
+every other dependency; a Homebrew bottle would carry the macOS release it was
+built on instead.
 `--with-cardinal` also needs access to both pinned Cardinal
 revisions. `dependencies.json` selects the newer version when the two source
 recipes conflict. Every dependency uses the exact upstream recipe revision in

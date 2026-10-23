@@ -46,6 +46,7 @@ libdwarf/*:shared=True
 libevent/*:shared=True
 libiconv/*:shared=True
 libxml2/*:shared=True
+llvm-openmp/*:shared=True
 lz4/*:shared=True
 libsodium/*:shared=True
 metis/*:shared=True

@@ -139,8 +139,9 @@ def toolchain_identity(platform):
 
 def darwin_toolchain_identity(java_home):
     """What decides the bytes of a macOS build: the selected Xcode's Apple clang
-    and SDK, the deployment target, the pinned build tools and the OpenMP
-    runtime Homebrew supplies, on a named macOS release."""
+    and SDK, the deployment target and the pinned build tools, on a named macOS
+    release. The OpenMP runtime is a Conan dependency, fingerprinted with the
+    dependency pins."""
     target = os.environ.get("MACOSX_DEPLOYMENT_TARGET", "")
     require(target == MACOS_DEPLOYMENT_TARGET,
             "MACOSX_DEPLOYMENT_TARGET must be " + MACOS_DEPLOYMENT_TARGET + " for a release build")
@@ -158,7 +159,6 @@ def darwin_toolchain_identity(java_home):
         "ninja": ["ninja", "--version"],
         "otool": ["otool", "--version"],
         "python": [sys.executable, "--version"],
-        "libomp": ["brew", "list", "--versions", "libomp"],
     }
     tools = {name: command(arguments) for name, arguments in probes.items()}
     require(all(tools.values()), "A native toolchain version probe returned no identity")

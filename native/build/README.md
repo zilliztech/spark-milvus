@@ -80,7 +80,7 @@ PATH=~/toolchain/cmake3venv/bin:$PATH scripts/build-native.sh --work-dir ...
 | Platform | Compilers | Binary tools | Also |
 | --- | --- | --- | --- |
 | `linux-x86_64`, `linux-aarch64` | GCC/G++/gfortran 12 | patchelf, readelf, ldd, binutils | the libaio development package, which Folly's async I/O needs; Ubuntu supplies libclang in `libclang-dev` |
-| `darwin-x86_64`, `darwin-aarch64` | Apple Clang 17 or later, since Knowhere uses `std::atomic_ref`, which libc++ provides from LLVM 19; Homebrew's OpenMP runtime; no Fortran | otool, install_name_tool, codesign | no libaio, liburing or OpenBLAS: `dependencies.json` scopes those to Linux, as the engines' own conanfiles do, and faiss takes Accelerate for BLAS |
+| `darwin-x86_64`, `darwin-aarch64` | Apple Clang 17 or later, since Knowhere uses `std::atomic_ref`, which libc++ provides from LLVM 19; the OpenMP runtime is the graph's `llvm-openmp`, macOS only; no Fortran | otool, install_name_tool, codesign | no libaio, liburing or OpenBLAS: `dependencies.json` scopes those to Linux, as the engines' own conanfiles do, and faiss takes Accelerate for BLAS |
 
 Where the platforms differ in what an engine carries, the bundle declares it:
 `with_diskann` is false on a platform whose adapter reports no DiskANN, because

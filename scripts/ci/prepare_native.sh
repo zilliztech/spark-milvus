@@ -29,10 +29,10 @@ python3 -m venv "$toolchain"
 if [[ "$(uname -s)" == Darwin ]]; then
   # The darwin profiles were validated with Apple clang 17, which is what the
   # runner's default Xcode (16.4) and its Xcode 26 installs both report, and
-  # they name CMake 3.31.10 as a platform tool. Apple clang ships no OpenMP
-  # runtime, so Homebrew's libomp is the compiler runtime the bundle carries;
-  # ccache is not preinstalled.
-  brew list --versions libomp >/dev/null 2>&1 || brew install libomp
+  # they name CMake 3.31.10 as a platform tool. The OpenMP runtime Apple clang
+  # lacks is a Conan dependency (llvm-openmp), built for the deployment target
+  # like everything else: a Homebrew bottle would state the runner's own macOS
+  # release. ccache is not preinstalled.
   brew list --versions ccache >/dev/null 2>&1 || brew install ccache
   "$toolchain/bin/python" -m pip install --disable-pip-version-check \
     conan==2.25.1 cmake==3.31.10 ninja==1.13.0

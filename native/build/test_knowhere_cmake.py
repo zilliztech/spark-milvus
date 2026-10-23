@@ -31,7 +31,6 @@ function(find_package name)
 endfunction()
 set(MILVUS_KNOWHERE_AIO_LIBRARY "${CMAKE_CURRENT_LIST_FILE}")
 set(Java_JAVAC_EXECUTABLE "${CMAKE_COMMAND}")
-set(OpenMP_CXX_FLAGS fixture)
 
 # Evaluate only upstream source-group selection, with every architecture branch
 # disabled. This supplies an independent reference for our explicit source list.

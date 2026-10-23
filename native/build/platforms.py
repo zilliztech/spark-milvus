@@ -341,28 +341,11 @@ class MachO(Format):
         # way upstream does when the option is off.
         return False
 
-    def compiler_runtime(self):
-        # Apple Clang has no OpenMP runtime of its own; libomp is the macOS
-        # counterpart of libgomp, which the Linux bundle already carries.
-        return frozenset({"libomp.dylib"})
-
-    def locate_compiler_runtime(self, name):
-        prefix = None
-        try:
-            prefix = _command(self, "brew", "--prefix", "libomp").strip()
-        except Exception:
-            prefix = None
-        for candidate in (prefix, "/opt/homebrew/opt/libomp", "/usr/local/opt/libomp"):
-            if candidate and (Path(candidate) / "lib" / name).is_file():
-                return Path(candidate) / "lib" / name
-        raise ValueError("Missing OpenMP runtime " + name + "; install libomp")
-
-    def compiler_runtime_origin(self, path):
-        version = "unknown"
-        receipt = path.resolve().parents[1] / "INSTALL_RECEIPT.json"
-        if receipt.is_file():
-            version = path.resolve().parents[1].name
-        return "homebrew libomp " + version
+    # Apple Clang has no OpenMP runtime of its own, and a Homebrew libomp
+    # bottle is built for the macOS release it was poured on, not for the
+    # deployment target. libomp therefore comes from the Conan graph
+    # (llvm-openmp), like every other dependency; there is no compiler runtime
+    # to locate on this host.
 
     def system_libraries(self):
         # Names a binary can record without a path; anything with a system path

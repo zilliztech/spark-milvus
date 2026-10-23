@@ -52,29 +52,18 @@ function(milvus_add_knowhere)
         set(MILVUS_KNOWHERE_DISKANN_TARGET diskann)
     endif()
 
-    # Apple Clang ships no OpenMP runtime; knowhere's own conanfile points CMake
-    # at Homebrew libomp the same way (knowhere/conanfile.py 257-277).
-    if(APPLE AND NOT OpenMP_CXX_FLAGS)
-        execute_process(COMMAND brew --prefix libomp
-            OUTPUT_VARIABLE milvus_libomp OUTPUT_STRIP_TRAILING_WHITESPACE
-            ERROR_QUIET)
-        foreach(candidate "${milvus_libomp}" /opt/homebrew/opt/libomp /usr/local/opt/libomp)
-            if(candidate AND EXISTS "${candidate}/lib/libomp.dylib")
-                set(milvus_libomp "${candidate}")
-                break()
-            endif()
-        endforeach()
-        if(NOT EXISTS "${milvus_libomp}/lib/libomp.dylib")
-            message(FATAL_ERROR "Apple Clang has no OpenMP; install libomp (brew install libomp)")
-        endif()
-        set(OpenMP_C_FLAGS "-Xpreprocessor -fopenmp -I${milvus_libomp}/include")
-        set(OpenMP_CXX_FLAGS "-Xpreprocessor -fopenmp -I${milvus_libomp}/include")
-        set(OpenMP_C_LIB_NAMES "omp")
-        set(OpenMP_CXX_LIB_NAMES "omp")
-        set(OpenMP_omp_LIBRARY "${milvus_libomp}/lib/libomp.dylib")
+    # Apple Clang ships no OpenMP runtime. The unified graph builds LLVM's
+    # (dependencies.json scopes llvm-openmp to macOS) for the deployment target
+    # every other library is built for, and its Conan CMake config supplies
+    # OpenMP::OpenMP_CXX; CMake's FindOpenMP module would only probe the
+    # compiler, which fails. GCC answers that module with libgomp.
+    if(APPLE)
+        find_package(OpenMP REQUIRED CONFIG)
+    else()
+        find_package(OpenMP REQUIRED)
     endif()
 
-    set(knowhere_packages Boost OpenMP folly nlohmann_json glog prometheus-cpp fmt
+    set(knowhere_packages Boost folly nlohmann_json glog prometheus-cpp fmt
                           xxHash simde opentelemetry-cpp milvus-common double-conversion)
     foreach(package IN LISTS knowhere_packages)
         find_package(${package} REQUIRED)

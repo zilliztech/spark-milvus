@@ -23,6 +23,7 @@
     "libevent": "libevent/2.1.12#95065aaefcd58d3956d6dfbfc5631d97",
     "libunwind": "libunwind/1.8.1#748a981ace010b80163a08867b732e71",
     "liburing": "liburing/2.8#62ead9595cc393717972842e53dc3099",
+    "llvm-openmp": "llvm-openmp/20.1.6#bbaf5c293545d8ddb004762d85c706a0",
     "lz4": "lz4/1.10.0#982d9b673900f665a1da109e09c17cab",
     "metis": "metis/5.2.1#85cfe7ee0dfc0cba7c0334e92efcbbc6",
     "milvus-common": "milvus-common/1.0.0-78f2c29@milvus/dev#af77e5f5444d6dd7cc5573182b958491",
@@ -40,12 +41,15 @@
     "zstd": "zstd/1.5.5#70dc5eb8ea16708fc946fbac884c507e"
   },
   "platform_scope": {
-    "_comment": "References upstream declares for one operating system only; the engines' own conanfiles gate these the same way.",
+    "_comment": "References upstream declares for one operating system only; the engines' own conanfiles gate these the same way. llvm-openmp is the OpenMP runtime Apple Clang does not ship, built for the same deployment target as every other library; a Homebrew bottle states the macOS release it was built on instead.",
     "liburing": [
       "Linux"
     ],
     "libunwind": [
       "Linux"
+    ],
+    "llvm-openmp": [
+      "Macos"
     ],
     "openblas": [
       "Linux"

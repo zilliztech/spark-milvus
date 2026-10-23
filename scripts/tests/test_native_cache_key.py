@@ -230,7 +230,7 @@ class NativeCacheKeyTest(unittest.TestCase):
                     "tools": {"clang": "Apple clang version 17.0.0 (clang-1700.6.4.2)",
                               "developerDir": "/Applications/Xcode_16.4.app/Contents/Developer",
                               "sdk": "15.5", "cmake": "cmake version 3.31.10", "conan": "Conan version 2.25.1",
-                              "libomp": "libomp 21.1.2", "deploymentTarget": "14.0"}}
+                              "deploymentTarget": "14.0"}}
         result = cache.fingerprint(self.root, self.plan, "darwin-aarch64", identity)
         self.assertTrue(result["key"].startswith("native-bundle-v2-darwin-aarch64-"))
         self.assertEqual(result["inputs"]["baseline"], {"libc": "libc++", "macos": "14.0"})
