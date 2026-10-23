@@ -35,13 +35,15 @@ class ConsumerTest(unittest.TestCase):
 
     def manifest(self):
         return {
-            "plan": {"native": [{"platform": "linux-x86_64"}, {"platform": "linux-aarch64"}]},
+            "plan": {"native": [{"platform": "linux-x86_64"}, {"platform": "linux-aarch64"},
+                                {"platform": "darwin-aarch64"}]},
             "artifacts": [
                 self.jar("spark-milvus-4.0_2.13"),
                 self.jar("spark-milvus-4.0-linux-x86_64_2.13"),
                 self.jar("spark-milvus-4.0-jvm_2.13"),
                 self.jar("spark-milvus-native-linux-x86_64", "linux-x86_64"),
                 self.jar("spark-milvus-native-linux-aarch64", "linux-aarch64"),
+                self.jar("spark-milvus-native-darwin-aarch64", "darwin-aarch64"),
             ],
         }
 
@@ -71,11 +73,15 @@ class ConsumerTest(unittest.TestCase):
     def test_universal_and_platform_have_distinct_native_closures(self):
         manifest = self.manifest()
         _, universal = consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "universal")
-        self.assertEqual(len(universal), 4)
+        self.assertEqual(len(universal), 5)
         _, platform = consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "platform")
         self.assertEqual(len(platform), 3)
         self.keep(platform)
         self.assertEqual(len(consumer.check_resolved(self.ivy, platform)), 3)
+        # The universal entry carries every platform bundle of the plan, macOS included.
+        self.manifest()
+        self.keep(universal)
+        self.assertEqual(len(consumer.check_resolved(self.ivy, universal)), 5)
 
     def test_substituted_candidate_jar_fails(self):
         manifest = self.manifest()

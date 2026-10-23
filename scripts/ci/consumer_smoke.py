@@ -39,6 +39,11 @@ FIXTURE_CLASSES = (
     MAIN.replace(".", "/"), "com/zilliz/milvus/storage/io/ReadFixtures",
 )
 GROUP = "com.zilliz"
+# Native platform -> the (sys.platform, uname machine) of the host that consumes
+# it; also what tells a platform bundle from the native-runtime, native-storage
+# and native-vector modules, whose names share the prefix.
+HOSTS = {"linux-x86_64": ("linux", "x86_64"), "linux-aarch64": ("linux", "aarch64"),
+         "darwin-aarch64": ("darwin", "arm64"), "darwin-x86_64": ("darwin", "x86_64")}
 CENTRAL = "https://repo.maven.apache.org/maven2"
 
 
@@ -175,7 +180,7 @@ def check_resolved(ivy, expected):
     wanted_platforms = {
         name.removeprefix("spark-milvus-native-")
         for name in expected
-        if name in {"spark-milvus-native-linux-x86_64", "spark-milvus-native-linux-aarch64"}
+        if name.removeprefix("spark-milvus-native-") in HOSTS
     }
     if native_platforms != wanted_platforms:
         raise RuntimeError(f"Resolved native platforms {native_platforms} != {wanted_platforms}")
@@ -301,11 +306,6 @@ def compile_fixture(work, repository, version, row, entry_id, env):
     jar = project / "target/scala-2.13/smoke.jar"
     verify_fixture_jar(jar, resources)
     return jar
-
-
-# Native platform -> the (sys.platform, uname machine) of the host that consumes it.
-HOSTS = {"linux-x86_64": ("linux", "x86_64"), "linux-aarch64": ("linux", "aarch64"),
-         "darwin-aarch64": ("darwin", "arm64"), "darwin-x86_64": ("darwin", "x86_64")}
 
 
 def jvm_launcher(root, java_home, signal):
