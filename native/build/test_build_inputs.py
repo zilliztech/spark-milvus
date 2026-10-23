@@ -51,12 +51,14 @@ class BuildContextPinTest(unittest.TestCase):
     def test_milvus_common_takes_openmp_from_the_graph_only_where_llvm_openmp_is_selected(self):
         self.assertEqual([], macos_openmp_redirect({"zlib": "zlib/1.3.1#8045"}, Path("/work/openmp-config")))
         options = macos_openmp_redirect({"llvm-openmp": "llvm-openmp/20.1.6#bbaf"}, Path("/work/openmp-config"))
-        self.assertEqual(["-c:h", "-c:h"], options[::2])
-        variables, mode = options[1::2]
+        self.assertEqual(["-c:h", "-c:h", "-c:h"], options[::2])
+        variables, identity, mode = options[1::2]
         prefix = "milvus-common/*:tools.cmake.cmaketoolchain:extra_variables="
         self.assertTrue(variables.startswith(prefix))
         self.assertEqual({"OpenMP_DIR": {"value": "/work/openmp-config", "cache": True, "type": "PATH"},
                           "CMAKE_FIND_PACKAGE_PREFER_CONFIG": "ON"}, json.loads(variables[len(prefix):]))
+        self.assertEqual('milvus-common/*:tools.info.package_id:confs=["tools.cmake.cmaketoolchain:extra_variables"]',
+                         identity)
         self.assertEqual("milvus-common/*:tools.system.package_manager:mode=report", mode)
 
     def test_replacements_keep_the_exact_recipe_revision(self):

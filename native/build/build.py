@@ -232,7 +232,10 @@ def macos_openmp_redirect(references, generators):
         return []
     variables = {"OpenMP_DIR": {"value": str(generators), "cache": True, "type": "PATH"},
                  "CMAKE_FIND_PACKAGE_PREFER_CONFIG": "ON"}
+    # Where OpenMP came from decides the binary, so it identifies the package:
+    # a cached milvus-common linked against a Homebrew libomp is not this one.
     return ["-c:h", "milvus-common/*:tools.cmake.cmaketoolchain:extra_variables=" + json.dumps(variables),
+            "-c:h", 'milvus-common/*:tools.info.package_id:confs=["tools.cmake.cmaketoolchain:extra_variables"]',
             "-c:h", "milvus-common/*:tools.system.package_manager:mode=report"]
 
 
