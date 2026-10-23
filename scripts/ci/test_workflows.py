@@ -165,8 +165,8 @@ class WorkflowGateTest(unittest.TestCase):
                 "run.get('path') == '.github/workflows/ci.yml'",
                 "run.get('head_branch') == 'refactor/v2'",
                 "run.get('head_sha') == sha", "run.get('status') == 'completed'",
-                "run.get('conclusion') == 'success'", "native-linux-x86_64",
-                "native-linux-aarch64", "artifact.get('expired') is False",
+                "run.get('conclusion') == 'success'", "scripts/release-matrix.json",
+                "'native-' + row['platform'] for row in matrix['native']", "artifact.get('expired') is False",
                 "artifact.get('workflow_run', {}).get('id') == run_id"):
             self.assertIn(fragment, script)
         self.assertNotIn("secrets.", str(source))
@@ -189,7 +189,9 @@ class WorkflowGateTest(unittest.TestCase):
         artifacts = [{
             "name": name, "expired": False, "size_in_bytes": 1,
             "workflow_run": artifact_run,
-        } for name in ("native-linux-x86_64", "native-linux-aarch64")]
+        } for name in ("native-" + row["platform"] for row in
+                       json.loads((ROOT / "scripts/release-matrix.json").read_text())["native"])]
+        self.assertIn("native-darwin-aarch64", [artifact["name"] for artifact in artifacts])
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             runs_path = root / "runs.json"
@@ -315,9 +317,24 @@ class WorkflowGateTest(unittest.TestCase):
         })
         self.assertEqual(build["permissions"], {"actions": "read", "contents": "read"})
         self.assertNotIn("if", build["jobs"]["jvm"])
-        for name in ("native", "native-cpu", "candidate"):
+        for name in ("native", "native-cpu", "darwin-reads", "candidate"):
             self.assertEqual(build["jobs"][name]["if"], "inputs.build_native")
-        self.assertEqual(set(build["jobs"]["candidate"]["needs"]), {"native", "native-cpu", "jvm"})
+        self.assertEqual(set(build["jobs"]["candidate"]["needs"]), {"native", "native-cpu", "darwin-reads", "jvm"})
+        # The macOS read suites run on the darwin bundle before any candidate is assembled.
+        darwin = build["jobs"]["darwin-reads"]
+        self.assertEqual(darwin["runs-on"], "macos-15")
+        self.assertEqual(darwin["needs"], "native")
+        downloads = [step["with"]["name"] for step in darwin["steps"]
+                     if step.get("uses", "").startswith("actions/download-artifact")]
+        self.assertEqual(downloads, ["native-darwin-aarch64"])
+        suites = [step["run"] for step in darwin["steps"] if "read_validation.py" in step.get("run", "")]
+        self.assertEqual(len(suites), 2)
+        self.assertTrue(all("--native-bundle native-input/milvus-native-darwin-aarch64.jar" in run for run in suites))
+        self.assertTrue(any(" shared " in run for run in suites) and any(" spark " in run for run in suites))
+        candidate_inputs = [step["with"]["pattern"] for step in build["jobs"]["candidate"]["steps"]
+                            if step.get("uses", "").startswith("actions/download-artifact") and "pattern" in step.get("with", {})]
+        self.assertIn("native-linux-*", candidate_inputs)
+        self.assertIn("native-darwin-*", candidate_inputs)
         self.assertNotIn("secrets", build["on"]["workflow_call"])
         self.assertNotIn("environment", build["jobs"]["native"])
         self.assertNotIn("environment", build["jobs"]["jvm"])
@@ -403,7 +420,18 @@ class WorkflowGateTest(unittest.TestCase):
         self.assertNotIn("if", audit)
         self.assertIn("scripts/check-native-abi.py", audit["run"])
         self.assertLess(steps.index(build), steps.index(audit))
-        self.assertEqual(trim["if"], "steps.native_build.outcome == 'success'")
+        # The dependency cache is restored and saved explicitly, and saved even
+        # after a failed or timed-out build so the next attempt continues.
+        self.assertEqual(dependencies["uses"], "actions/cache/restore@v4")
+        self.assertEqual(dependencies["id"], "dependency-cache")
+        self.assertEqual(trim["if"], "always() && steps.native_build.outcome != 'skipped'")
+        save = by_name["Save native dependencies"]
+        self.assertEqual(save["uses"], "actions/cache/save@v4")
+        self.assertEqual(save["if"], "always() && steps.native_build.outcome != 'skipped' "
+                                     "&& steps.dependency-cache.outputs.cache-hit != 'true'")
+        self.assertEqual(save["with"]["key"], dependencies["with"]["key"])
+        self.assertEqual(save["with"]["path"], dependencies["with"]["path"])
+        self.assertLess(steps.index(trim), steps.index(save))
         self.assertLess(steps.index(audit), steps.index(trim))
         self.assertIn("conan cache clean '*' --build --source --download --temp", trim["run"])
         self.assertIn("ccache --cleanup", trim["run"])

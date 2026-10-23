@@ -9,6 +9,12 @@ case "$(uname -s):$(uname -m):$platform" in
   *) echo "Runner does not match native platform $platform" >&2; exit 1 ;;
 esac
 
+# The Linux images carry SDKs this job never uses; freeing them comes before the
+# disk check. Never remove local developer tooling or caches, and never apply
+# this cleanup to a self-hosted runner. The macOS images have no such bulk.
+if [[ "$(uname -s)" == Linux && "${GITHUB_ACTIONS:-}" == "true" && "${RUNNER_ENVIRONMENT:-}" == "github-hosted" ]]; then
+  sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc
+fi
 runner_directory="${RUNNER_TEMP:?RUNNER_TEMP must name the disposable runner directory}"
 available_kib="$(df -Pk "$runner_directory" | awk 'NR == 2 { print $4 }')"
 if [[ ! "$available_kib" =~ ^[0-9]+$ ]] || (( available_kib < 30 * 1024 * 1024 )); then
@@ -49,11 +55,6 @@ if [[ "$(uname -s)" == Darwin ]]; then
   test -f /Library/Developer/CommandLineTools/usr/lib/libclang.dylib
   test -f "${JAVA_HOME:?}/lib/libjsig.dylib"
 else
-  # These SDKs are unused by this job. Never remove local developer tooling or
-  # caches, and never apply this cleanup to a self-hosted runner.
-  if [[ "${GITHUB_ACTIONS:-}" == "true" && "${RUNNER_ENVIRONMENT:-}" == "github-hosted" ]]; then
-    sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc
-  fi
   sudo apt-get update -qq
   sudo apt-get install -y --no-install-recommends \
     gcc-12 g++-12 gfortran-12 libaio-dev libclang-dev patchelf binutils \
