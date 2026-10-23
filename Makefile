@@ -82,7 +82,7 @@ help:
 	@echo "  $(GREEN)package$(NC)                - Package JAR with the selected platform resources"
 	@echo "  $(GREEN)test$(NC)                   - Type-check tests (incl. integration) and run unit tests"
 	@echo "  $(GREEN)compile-it$(NC)             - Type-check integration tests (no external services)"
-	@echo "  $(GREEN)run-demo$(NC)               - Read/search CANDIDATE with DEMO_ARGS (requires SPARK_HOME)"
+	@echo "  $(GREEN)run-demo$(NC)               - Run examples with DEMO_ARGS='python 04_exact_search.py' or 'java ExactSearch'"
 	@echo "  $(GREEN)init-submodules$(NC)        - Initialize Git submodules"
 	@echo "  $(GREEN)status$(NC)                 - Show build status"
 	@echo ""
@@ -163,11 +163,12 @@ compile-it: package
 	@$(NATIVE_SBT) "integration/Test/compile"
 	@echo "$(GREEN)Integration tests compile complete$(NC)"
 
-# Consume an independently verified candidate and caller-owned fixed inputs.
-# Example: CANDIDATE=/candidate make run-demo DEMO_ARGS='--options /read.json --queries /queries.json'
+# Run one example with an explicit local assembly or verified candidate.
+# Example: CONNECTOR_JAR=/connector.jar make run-demo DEMO_ARGS='python 04_exact_search.py'
+# Java: CONNECTOR_JAR=/connector.jar make run-demo DEMO_ARGS='java ExactSearch'
 run-demo:
 	@echo "$(BLUE)Running demo...$(NC)"
-	@bash scripts/spark_submit_demo.sh $(DEMO_ARGS)
+	@bash demo/run.sh $(DEMO_ARGS)
 
 # Development targets
 rebuild:

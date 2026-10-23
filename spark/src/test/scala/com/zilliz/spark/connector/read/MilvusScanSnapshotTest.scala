@@ -413,6 +413,37 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
     )
   }
 
+  test("minio snapshot locations use the configured bucket, not the endpoint") {
+    val location =
+      "minio://localhost:29000/spark-demo-live/files/snapshots/10/metadata/1.json"
+    assert(StorageOptions.snapshotBucket(location).isEmpty)
+    assert(
+      StorageOptions.snapshotS3BucketForRelativePaths(
+        location,
+        Map(StorageProperties.BucketName -> "spark-demo-live")
+      ) == Some("spark-demo-live")
+    )
+    assert(
+      StorageOptions.snapshotBucketsToConfigure(location, "spark-demo-live") ==
+        Seq("spark-demo-live")
+    )
+    assert(
+      StorageOptions
+        .snapshotS3BucketForRelativePaths(location, Map.empty)
+        .isEmpty
+    )
+    val unknown = intercept[IllegalArgumentException](
+      StorageOptions.snapshotBucket(
+        "minioo://localhost:29000/spark-demo-live/files/snapshot.json"
+      )
+    )
+    assert(
+      unknown.getMessage.contains(
+        "Unsupported storage location scheme 'minioo'"
+      )
+    )
+  }
+
   test("snapshotBucketsToConfigure includes cross-bucket snapshot locations") {
     assert(
       StorageOptions.snapshotBucketsToConfigure(

@@ -12,8 +12,9 @@ package com.zilliz.milvus.storage
   * the default bucket rather than the parser guessing at the first segment.
   * Standard user URIs likewise keep their authority as the bucket.
   * `StoragePath.parseMilvus` is reserved for Milvus-produced metadata, where an
-  * explicit authority port or exact match with the configured endpoint means
-  * the next path component is the bucket.
+  * explicit authority port or exact match with the configured endpoint host
+  * means the next path component is the bucket, including Milvus's `minio://`
+  * snapshot locations. The configured storage identity remains authoritative.
   *
   * Format knowledge stays out: `core.delete` and `core.manifest` call resolve
   * with their own `_delta/` and `_metadata/manifest-N.avro` fragments.

@@ -73,6 +73,7 @@ git submodule update --init milvus-proto milvus-storage knowhere
 
 | Document | What it answers |
 |---|---|
+| [demo/README.md](demo/README.md) | Run Python and Java examples for snapshot path lookup, reads, SQL, vector search and partition selection |
 | [docs/reference-en.md](docs/reference-en.md) | V3 read options, vector search, data types and supported entry points |
 | [docs/contributing.md](docs/contributing.md) | Building, formatting, testing and the native bundle, beyond this README |
 | [docs/releasing.md](docs/releasing.md) | Maven coordinates, the supported release matrix, candidate validation and Central publication |
@@ -230,43 +231,37 @@ its universal/platform-specific Maven entry, for the selected Spark line. See
 [release coordinates](docs/releasing.md). For a local build, use the selected
 `spark/assembly` bundle.
 
-### Run the read and search demo
+### Run the demos
 
-[scripts/spark_submit_demo.sh](scripts/spark_submit_demo.sh) verifies a supplied
-public candidate and submits the [file-only example](scripts/search_demo.py).
-It uses Spark 4.0.1 / Scala 2.13, Java 21 and PySpark from that distribution.
-No Milvus endpoint, SDK, Catalog or fixture writer participates.
+The [demo directory](demo/README.md) contains Python and Java examples for
+snapshot reads, filters and projections, SQL analytics, exact and indexed vector
+search, vector functions, and partition selection. These use a committed 14-row
+snapshot by default and need no Milvus service or object-store credentials. A
+separate REST example looks up an existing snapshot's path on deployments that
+expose the snapshot API and can write connector read options for it.
 
-Create a private options JSON containing `milvus.snapshot.path` and the
-corresponding `fs.*` / `extfs.*` storage settings. For example, a local immutable
-fixture can use:
-
-```json
-{"milvus.snapshot.path":"snapshot.json","fs.storage_type":"local","fs.root_path":"/data/nearest"}
-```
-
-The separate queries JSON contains one or more `{ "qid": 1, "vector": [0.1, 0.2] }`
-objects in an array. Keep credential-bearing options files outside the checkout.
-For a small snapshot with `id` and `vector` columns:
+Use Linux x86_64 or aarch64, Java 21, Spark 4.0.1 for Scala 2.13, and a local
+`spark/assembly` JAR containing the native libraries for your platform. From
+the checkout root:
 
 ```bash
-export SPARK_HOME=/path/to/spark-4.0.1-bin-hadoop3
-export JAVA_HOME=/path/to/jdk-21
-export CANDIDATE=/verified/public-candidate
-./scripts/spark_submit_demo.sh --options /private/read-options.json \
-  --queries /data/queries.json --mode exact
-./scripts/spark_submit_demo.sh --options /private/read-options.json \
-  --queries /data/queries.json --mode approx
+export SPARK_HOME=/absolute/path/to/spark-4.0.1-bin-hadoop3-scala2.13
+export JAVA_HOME=/absolute/path/to/jdk-21
+export CONNECTOR_JAR="/absolute/path/to/spark-milvus-4.0-bundle-<version>.jar"
+./demo/run.sh python 01_read_snapshot.py
+./demo/run.sh java ReadSnapshot
+./demo/run.sh python 04_exact_search.py
+./demo/run.sh java ExactSearch
+./demo/run.sh python 05_filtered_search.py --explain
+./demo/run.sh java IndexSearch
 ```
 
-The example bounds its oracle input to 10,000 rows. EXACT must match an
-independent L2 calculation. APPROX must load and search a persisted index and
-reports recall against that oracle; an arbitrary approximate index is not
-required to return the exact ranking. Both modes require actual connector native
-search. `--id-column`, `--vector-column` and `--k` select the example fields and
-result size. Driver and workers need access to the same fixed input and the JDK's
-`libjsig` path. The script configures only the read extension and plugin and never
-creates or deletes the input. A successful run prints `Search demo passed`.
+Replace the paths and version with your actual installation and assembly.
+The [walkthrough](demo/README.md) covers all nine example pairs, assembly setup,
+expected results, a verified release candidate, REST path lookup, and your own
+snapshot. Java sources compile on launch using the existing JDK and JARs;
+no Maven build or dependency download is required.
+`./demo/run.sh --help` works before Spark is configured.
 
 ### Query with Scala DataFrames
 

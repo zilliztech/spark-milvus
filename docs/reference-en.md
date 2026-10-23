@@ -120,8 +120,10 @@ callers that already possess complete V3 metadata.
 
 A standard object-store URI uses `s3a://`, `s3://`, `gs://` or `oss://` with
 the bucket as its authority. A bucket-relative key uses `fs.bucket_name`.
-Milvus-produced `https://<endpoint>/<bucket>/<key>` snapshot locations are
-accepted when the host and bucket match the configured input. A local backend
+Milvus-produced `https://<endpoint>/<bucket>/<key>` and
+`minio://<endpoint>/<bucket>/<key>` snapshot locations are
+recognized by an explicit endpoint port or a host matching the configured
+endpoint. Their bucket must match the configured input. A local backend
 accepts local paths or `file:` URIs and rejects bucket-bearing locations.
 Unsupported schemes and cross-bucket references fail during planning.
 
@@ -198,7 +200,8 @@ keys, the keys are left out and the native default chain reads the same
 variables. Any other temporary credential is rejected; set `fs.use_iam=true` or
 pass long-term keys as `fs.access_key_id` and `fs.access_key_value`.
 The endpoint that results is also the one Milvus-produced
-`https://<endpoint>/<bucket>/<key>` locations are recognized against, including
+`https://<endpoint>/<bucket>/<key>` and `minio://<endpoint>/<bucket>/<key>`
+locations are recognized against, including
 an endpoint that only the Hadoop configuration supplies.
 Milvus metadata may spell an object as
 `s3://endpoint:port/bucket/key`. The connector recognizes that form only while

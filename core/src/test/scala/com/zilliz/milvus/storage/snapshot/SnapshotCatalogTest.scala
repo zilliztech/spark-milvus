@@ -487,6 +487,29 @@ class SnapshotCatalogTest extends AnyFunSuite {
     }
   }
 
+  test("minio snapshot locations preserve the catalog's bucket binding") {
+    withDir { dir =>
+      val key = "files/snapshots/10/metadata/1.json"
+      write(dir, key, snapshotJson("s1", 100L))
+      val c = new SnapshotCatalog(
+        new LocalObjectStore(dir.toString),
+        "spark-demo-live",
+        endpoint = "localhost:29000"
+      )
+      assert(
+        c.read(s"minio://localhost:29000/spark-demo-live/$key").name == "s1"
+      )
+      val wrongBucket = intercept[IllegalArgumentException](
+        c.read(s"minio://localhost:29000/other-bucket/$key")
+      )
+      assert(wrongBucket.getMessage.contains("bucket 'other-bucket'"))
+      val noBucket = intercept[IllegalArgumentException](
+        catalog(dir).read(s"minio://localhost:29000/spark-demo-live/$key")
+      )
+      assert(noBucket.getMessage.contains("local backend"))
+    }
+  }
+
   test("fromLists returns path-normalization failures as Left") {
     val metadata = SnapshotJson
       .parse(

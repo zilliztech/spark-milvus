@@ -391,6 +391,9 @@ jobs:
       - name: Packaging and Makefile tests
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 
+      - name: Demo input and launcher tests
+        run: python3 -m unittest discover -s demo/tests -p 'test_*.py'
+
       - name: Fixed read samples and source packages
         run: python3 scripts/ci/check_read_fixtures.py
 

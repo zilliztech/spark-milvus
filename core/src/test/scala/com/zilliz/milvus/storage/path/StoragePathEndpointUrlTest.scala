@@ -40,4 +40,27 @@ class StoragePathEndpointUrlTest extends AnyFunSuite {
     )
     assert(err.getMessage.contains("no key"))
   }
+
+  test("minio snapshot locations use the explicit endpoint port") {
+    val location =
+      "minio://localhost:29000/spark-demo-live/files/snapshots/10/metadata/1.json"
+    val expected = StoragePath(
+      "spark-demo-live",
+      "files/snapshots/10/metadata/1.json"
+    )
+    assert(StoragePath.parseMilvus(location) == expected)
+    assert(
+      StoragePath.parseMilvus(location, endpoint = "http://minio:9000") ==
+        expected
+    )
+  }
+
+  test("minio locations without a port use the configured endpoint host") {
+    assert(
+      StoragePath.parseMilvus(
+        "minio://minio/spark-demo-live/files/snapshot.json",
+        endpoint = "http://minio:9000"
+      ) == StoragePath("spark-demo-live", "files/snapshot.json")
+    )
+  }
 }

@@ -1,0 +1,5 @@
+{
+  "milvus.snapshot.path": "snapshot.json",
+  "fs.storage_type": "local",
+  "fs.root_path": "/absolute/path/to/your-snapshot"
+}

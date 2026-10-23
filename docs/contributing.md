@@ -588,6 +588,16 @@ builds and publication follow the task's scope and authorization.
 
 CI runs `python3 -m unittest discover -s native/build -p 'test_*.py'` plus the
 same discovery over `scripts/tests`; run them when touching `native/build/`.
+Python examples live in `demo/python`, Java examples in
+`demo/java/src/main/java/com/zilliz/spark/connector/demo`, and helper/launcher
+tests in `demo/tests`. After changing a demo, run
+`python3 -m unittest discover -s demo/tests -p 'test_*.py'` and the affected
+examples in both languages with the runtime described in
+[demo/README.md](../demo/README.md), such as
+`./demo/run.sh python 04_exact_search.py` and `./demo/run.sh java ExactSearch`.
+The launcher compiles Java sources using the existing Spark and connector JARs.
+Snapshot-path helpers use the describe REST API independently of Spark sessions;
+exercise their request/response checks without requiring a production service.
 
 ## Storage protobufs
 
