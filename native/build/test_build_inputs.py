@@ -1,4 +1,5 @@
 """Check repeated staging and reusable dependency/tool source inputs."""
+import ast
 import json
 import os
 from pathlib import Path
@@ -55,10 +56,12 @@ class BuildContextPinTest(unittest.TestCase):
         variables, identity, mode = options[1::2]
         prefix = "milvus-common/*:tools.cmake.cmaketoolchain:extra_variables="
         self.assertTrue(variables.startswith(prefix))
+        # Conan evaluates conf values with eval(); a JSON boolean would stay a string.
         self.assertEqual({"OpenMP_DIR": {"value": "/work/openmp-config", "cache": True, "type": "PATH"},
-                          "CMAKE_FIND_PACKAGE_PREFER_CONFIG": "ON"}, json.loads(variables[len(prefix):]))
-        self.assertEqual('milvus-common/*:tools.info.package_id:confs=["tools.cmake.cmaketoolchain:extra_variables"]',
-                         identity)
+                          "CMAKE_FIND_PACKAGE_PREFER_CONFIG": "ON"}, ast.literal_eval(variables[len(prefix):]))
+        prefix = "milvus-common/*:tools.info.package_id:confs="
+        self.assertTrue(identity.startswith(prefix))
+        self.assertEqual(["tools.cmake.cmaketoolchain:extra_variables"], ast.literal_eval(identity[len(prefix):]))
         self.assertEqual("milvus-common/*:tools.system.package_manager:mode=report", mode)
 
     def test_replacements_keep_the_exact_recipe_revision(self):
