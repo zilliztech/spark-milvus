@@ -162,6 +162,12 @@ object SnapshotCatalog extends Logging {
       return bad("snapshot is missing collection")
     if (metadata.collection.schema == null)
       return bad("snapshot is missing collection.schema")
+    val formatVersion = metadata.formatVersion match {
+      case Some(v) if SnapshotSegmentReader.supportsFormatVersion(v) => v
+      case Some(v) =>
+        return bad(s"Unsupported Milvus snapshot format version $v")
+      case None => return bad("snapshot is missing format_version")
+    }
     val v3Items = metadata.storageV2ManifestList.getOrElse(Seq.empty)
     if (metadata.manifestList.isEmpty && v3Items.isEmpty) {
       if (
@@ -187,7 +193,7 @@ object SnapshotCatalog extends Logging {
           val key = keyIn(bucket, path, "segment snapshot Avro", endpoint)
           SnapshotSegmentReader.parse(
             store.readAll(key),
-            metadata.manifestSchemaVersion
+            formatVersion
           ) match {
             case Right(entry) => entry
             case Left(error) =>
@@ -330,11 +336,6 @@ object SnapshotCatalog extends Logging {
                 )
               }
               if (available.nonEmpty) SegmentIndexes.Available(available)
-              // A version 5 record whose segment manifest registers the index
-              // names no files here; that is metadata this connector has not
-              // read, not a segment without an index.
-              else if (entry.manifestHasIndex.contains(true))
-                SegmentIndexes.Unknown
               else SegmentIndexes.Unindexed
           }
           segment.copy(rows = Some(entry.numOfRows), indexes = indexes)

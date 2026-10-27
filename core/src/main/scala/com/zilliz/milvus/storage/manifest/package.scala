@@ -11,7 +11,7 @@ package com.zilliz.milvus.storage
   * "manifest" in this package names the milvus-storage file only; the
   * snapshot's record is a snapshot segment record.
   *
-  * Main types: SnapshotSegmentSchema (the shared full AVSC schemas),
+  * Main types: SnapshotSegmentSchema (the source-defined full Avro schema),
   * SnapshotSegmentReader (the snapshot's Avro segment record),
   * SnapshotSegmentEntry and IndexFileEntry (data files, index files, exact
   * build ids, row counts and separate index format/path versions),
@@ -19,9 +19,12 @@ package com.zilliz.milvus.storage
   * designed Manifest, ColumnGroup and ManifestReader are not written yet. The
   * reader takes the prefix of the schema it needs. External writers share the
   * full schema because Avro binary is positional and Milvus reads every field.
-  * Schema versions 1 to 5 are bundled; version 5 (Milvus v3.0.2) adds
-  * `manifest_has_index`, which says the segment's own manifest registers the
-  * index, so a segment that names no index files there is unknown rather than
-  * unindexed.
+  * Snapshot format 4 uses the writer schema defined as a Scala string in
+  * SnapshotSegmentSchema. Version 6 uses an Avro object container with its
+  * embedded writer schema. These cover stable Milvus tags v3.0.0 through v3.0.3
+  * (format 4) and v3.0.4 (format 6 with the V4 writer schema). The snapshot
+  * reader validates its required fields and consumes exactly one record.
+  * Unsupported snapshot versions, missing fields, incompatible types and
+  * damaged framing fail explicitly.
   */
 package object manifest

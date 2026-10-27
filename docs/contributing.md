@@ -529,7 +529,7 @@ like a code problem and is not one.
 ## How tests find their fixtures
 
 Several suites read fixture files by a path relative to the repository root, for
-example `core/src/test/data/seg_manifest.avro`. Forked tests would otherwise run
+example `core/src/test/data/sample_snapshot.json`. Forked tests would otherwise run
 with the subproject as their working directory, so `Modules.nativeTest` pins
 `baseDirectory` back to the build root. If a fixture path suddenly resolves
 wrong, that setting is why.

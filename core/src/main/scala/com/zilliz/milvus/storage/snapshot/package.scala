@@ -5,7 +5,8 @@ package com.zilliz.milvus.storage
   * SnapshotCatalog, DeltaLogFile, CollectionIndex, SegmentIndex and
   * SegmentIndexes. SnapshotSource resolves the input once; SnapshotCatalog
   * validates its JSON and segment Avro records, including persisted index
-  * identity and file locations. Legacy storage formats are rejected before
+  * identity and file locations. It requires snapshot format version 4 or 6,
+  * including for empty snapshots. Legacy storage formats are rejected before
   * planning.
   *
   * SnapshotSelection validates partition and segment selections from neutral

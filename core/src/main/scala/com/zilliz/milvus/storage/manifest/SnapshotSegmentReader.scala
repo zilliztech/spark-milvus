@@ -2,8 +2,10 @@ package com.zilliz.milvus.storage.manifest
 
 import java.io.ByteArrayInputStream
 import java.util.{List => JavaList}
+import java.util.Arrays
 import scala.jdk.CollectionConverters._
 
+import org.apache.avro.file.DataFileStream
 import org.apache.avro.generic.{GenericDatumReader, GenericRecord}
 import org.apache.avro.io.DecoderFactory
 import org.apache.avro.util.Utf8
@@ -61,22 +63,22 @@ case class SnapshotSegmentEntry(
     binlogFiles: Seq[FieldBinlogEntry],
     deltaLogFiles: Seq[FieldBinlogEntry],
     statsLogFiles: Seq[FieldBinlogEntry] = Seq.empty,
-    indexFiles: Option[Vector[IndexFileEntry]] = None,
-    manifestHasIndex: Option[Boolean] = None
+    indexFiles: Option[Vector[IndexFileEntry]] = None
 )
 
 /** Decoder for the per-segment AVRO records a Milvus snapshot lists in its
   * `manifest_list`, written by milvus-datacoord.
   *
-  * The binary is schemaless (milvus uses `hamba/avro avro.Marshal` — no OCF
-  * container header), so the decoder must be given the exact writer schema. We
-  * bundle that schema as a classpath resource; its content is the verbatim
-  * `getProperAvroSchema()` string from milvus `internal/datacoord/snapshot.go`.
+  * Version 4 is schemaless Avro binary and requires its exact bundled writer
+  * schema. Version 6 uses an Avro object container with an embedded writer
+  * schema, as Milvus v3.0.4 writes in `internal/snapshotio/snapshot.go`. That
+  * container must describe exactly one segment and retain the fields and types
+  * this reader consumes; additional fields do not change their meaning.
   *
   * Usage:
   * {{{
   *   val bytes: Array[Byte] = readBytesFromS3(path)
-  *   SnapshotSegmentReader.parse(bytes) match {
+  *   SnapshotSegmentReader.parse(bytes, version) match {
   *     case Right(entry) => // validate the storage version before planning
   *     case Left(err) => throw err
   *   }
@@ -85,6 +87,12 @@ case class SnapshotSegmentEntry(
 object SnapshotSegmentReader extends com.zilliz.milvus.storage.Logging {
 
   private val LastNeededField = "index_files"
+  private val ContainerVersion = 6
+  private val ContainerMagic = Array[Byte]('O', 'b', 'j', 1)
+
+  def supportsFormatVersion(version: Int): Boolean =
+    version == ContainerVersion || SnapshotSegmentSchema.supportedVersions
+      .contains(version)
 
   private lazy val schemas: Map[Int, Schema] =
     SnapshotSegmentSchema.supportedVersions.map { version =>
@@ -139,22 +147,200 @@ object SnapshotSegmentReader extends com.zilliz.milvus.storage.Logging {
     */
   def parse(
       avroBytes: Array[Byte],
-      manifestSchemaVersion: Int = 1
+      manifestSchemaVersion: Int
   ): Either[Throwable, SnapshotSegmentEntry] = {
     try {
-      val reader =
-        new GenericDatumReader[GenericRecord](
-          schemaFor(manifestSchemaVersion)
+      if (manifestSchemaVersion == ContainerVersion) {
+        Right(readContainer(avroBytes))
+      } else {
+        val schema = schemaFor(manifestSchemaVersion)
+        require(
+          !avroBytes.startsWith(ContainerMagic),
+          s"Milvus manifest schema version $manifestSchemaVersion requires raw Avro binary, not a container"
         )
-      val decoder =
-        DecoderFactory
+        val reader = new GenericDatumReader[GenericRecord](schema)
+        val decoder = DecoderFactory
           .get()
           .binaryDecoder(new ByteArrayInputStream(avroBytes), null)
-      val rec = reader.read(null, decoder)
-      Right(projectEntry(rec))
+        Right(projectEntry(reader.read(null, decoder)))
+      }
     } catch {
       case e: Throwable => Left(e)
     }
+  }
+
+  private def readContainer(bytes: Array[Byte]): SnapshotSegmentEntry = {
+    validateContainerFraming(bytes)
+    val reader = new DataFileStream[GenericRecord](
+      new ByteArrayInputStream(bytes),
+      new GenericDatumReader[GenericRecord]()
+    )
+    try {
+      validateContainerSchema(reader.getSchema)
+      require(reader.hasNext, "Milvus manifest container contains no record")
+      val entry = projectEntry(reader.next())
+      require(
+        !reader.hasNext,
+        "Milvus manifest container contains multiple records"
+      )
+      entry
+    } finally reader.close()
+  }
+
+  /** Check framing before Avro allocates a block. DataFileStream treats EOF
+    * while starting another block as normal completion, including a partial
+    * block header; every input byte must instead belong to a complete block.
+    */
+  private def validateContainerFraming(bytes: Array[Byte]): Unit = {
+    require(
+      bytes.startsWith(ContainerMagic),
+      s"Milvus manifest schema version $ContainerVersion requires an Avro object container"
+    )
+    val input = new ByteArrayInputStream(bytes)
+    val decoder = DecoderFactory.get().directBinaryDecoder(input, null)
+    decoder.skipFixed(ContainerMagic.length)
+    def size(value: Long, remaining: Int, description: String): Int = {
+      require(
+        value >= 0 && value <= remaining,
+        s"Invalid Milvus manifest container $description size $value ($remaining bytes remain)"
+      )
+      value.toInt
+    }
+    def skipValue(): Unit = {
+      val length = decoder.readLong()
+      decoder.skipFixed(size(length, input.available(), "metadata value"))
+    }
+    var entries = decoder.readLong()
+    while (entries != 0) {
+      require(entries != Long.MinValue, "Invalid Avro metadata block count")
+      val count = math.abs(entries)
+      val blockSize =
+        if (entries < 0)
+          Some(size(decoder.readLong(), input.available(), "metadata block"))
+        else None
+      val before = input.available()
+      require(count <= before / 2, "Truncated Avro container metadata")
+      var index = 0L
+      while (index < count) {
+        skipValue()
+        skipValue()
+        index += 1
+      }
+      blockSize.foreach(expected =>
+        require(
+          before - input.available() == expected,
+          "Invalid Avro metadata block size"
+        )
+      )
+      entries = decoder.readLong()
+    }
+    val sync = new Array[Byte](16)
+    decoder.readFixed(sync)
+    var records = 0L
+    while (input.available() > 0) {
+      val count = decoder.readLong()
+      require(
+        count > 0 && count <= 1 - records,
+        "Milvus manifest container must contain exactly one record"
+      )
+      val length = decoder.readLong()
+      decoder.skipFixed(
+        size(length, input.available() - sync.length, "data block")
+      )
+      val marker = new Array[Byte](sync.length)
+      decoder.readFixed(marker)
+      require(Arrays.equals(sync, marker), "Invalid Avro container sync marker")
+      records += count
+    }
+    require(records == 1, "Milvus manifest container contains no record")
+  }
+
+  /** Validate the consumed projection by field name, not by writer field order.
+    * A self-describing schema may add fields, but cannot silently remove or
+    * reinterpret the identity, row counts, physical files or index metadata.
+    */
+  private def validateContainerSchema(schema: Schema): Unit = {
+    def expect(actual: Schema, expected: Schema.Type, path: String): Schema = {
+      require(
+        actual.getType == expected,
+        s"Milvus manifest field '$path' must be $expected, got ${actual.getType}"
+      )
+      actual
+    }
+    def field(
+        record: Schema,
+        name: String,
+        kind: Schema.Type,
+        path: String
+    ): Schema = {
+      expect(record, Schema.Type.RECORD, path)
+      val value = Option(record.getField(name)).getOrElse(
+        throw new IllegalArgumentException(
+          s"Milvus manifest schema is missing required field '$path.$name'"
+        )
+      )
+      expect(value.schema(), kind, s"$path.$name")
+    }
+    def array(
+        record: Schema,
+        name: String,
+        kind: Schema.Type,
+        path: String
+    ): Schema =
+      expect(
+        field(record, name, Schema.Type.ARRAY, path).getElementType,
+        kind,
+        s"$path.$name[]"
+      )
+    def optional(
+        record: Schema,
+        name: String,
+        kind: Schema.Type,
+        path: String
+    ): Unit =
+      Option(record.getField(name)).foreach(value =>
+        expect(value.schema(), kind, s"$path.$name")
+      )
+
+    val root = "segment"
+    Seq(
+      "segment_id",
+      "partition_id",
+      "segment_level",
+      "num_of_rows",
+      "storage_version"
+    )
+      .foreach(field(schema, _, Schema.Type.LONG, root))
+    Seq("binlog_files", "deltalog_files", "statslog_files").foreach { name =>
+      val group = array(schema, name, Schema.Type.RECORD, root)
+      val path = s"$root.$name[]"
+      field(group, "field_id", Schema.Type.LONG, path)
+      val log = array(group, "binlogs", Schema.Type.RECORD, path)
+      Seq("log_id", "entries_num").foreach(
+        field(log, _, Schema.Type.LONG, s"$path.binlogs[]")
+      )
+      field(log, "log_path", Schema.Type.STRING, s"$path.binlogs[]")
+    }
+    val index = array(schema, "index_files", Schema.Type.RECORD, root)
+    val path = s"$root.index_files[]"
+    Seq(
+      "segment_id",
+      "field_id",
+      "index_id",
+      "build_id",
+      "num_rows",
+      "serialized_size",
+      "index_version"
+    )
+      .foreach(field(index, _, Schema.Type.LONG, path))
+    field(index, "index_name", Schema.Type.STRING, path)
+    array(index, "index_file_paths", Schema.Type.STRING, path)
+    val parameter = array(index, "index_params", Schema.Type.RECORD, path)
+    Seq("key", "value").foreach(
+      field(parameter, _, Schema.Type.STRING, s"$path.index_params[]")
+    )
+    optional(index, "current_index_version", Schema.Type.INT, path)
+    optional(index, "index_store_path_version", Schema.Type.INT, path)
   }
 
   // -------------------------------------------------------------------------
@@ -194,22 +380,8 @@ object SnapshotSegmentReader extends com.zilliz.milvus.storage.Logging {
       binlogFiles = projectFieldBinlogs(rec.get("binlog_files")),
       deltaLogFiles = projectFieldBinlogs(rec.get("deltalog_files")),
       statsLogFiles = projectFieldBinlogs(rec.get("statslog_files")),
-      indexFiles = Some(projectIndexes(rec.get("index_files"))),
-      // Version 5 and later say whether the segment's own manifest registers
-      // the index; an older record leaves it absent, which is not the same as
-      // an explicit false.
-      manifestHasIndex = Option(rec.getSchema.getField("manifest_has_index"))
-        .map(_ => asBoolean(rec.get("manifest_has_index")))
+      indexFiles = Some(projectIndexes(rec.get("index_files")))
     )
-  }
-
-  private def asBoolean(value: AnyRef): Boolean = value match {
-    case flag: java.lang.Boolean => flag.booleanValue()
-    case null                    => false
-    case other =>
-      throw new IllegalStateException(
-        s"expected boolean, got ${other.getClass.getName}: $other"
-      )
   }
 
   private def projectIndexes(value: Any): Vector[IndexFileEntry] = {

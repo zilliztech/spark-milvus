@@ -4,9 +4,6 @@ These pre-existing files are pinned as they appeared at connector baseline
 `5dd6f42dadc70ed20b7b719ed479ba83581eaaa8`; nothing regenerates them.
 `SHA256SUMS` covers this directory, including the index-codec payloads.
 
-- `seg_manifest.avro` was captured from local MinIO and describes the V2
-  `hello_spark_milvus` segment. Its source key and field layout are recorded in
-  [SnapshotSegmentReaderTest](../scala/com/zilliz/milvus/storage/manifest/SnapshotSegmentReaderTest.scala).
 - `sample_snapshot.json` is the existing snapshot parser input; exact metadata
   expectations are in
   [SnapshotJsonTest](../scala/com/zilliz/milvus/storage/snapshot/json/SnapshotJsonTest.scala).

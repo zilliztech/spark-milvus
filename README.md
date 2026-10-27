@@ -4,6 +4,8 @@ Read and search fixed Storage V3 snapshots with Apache Spark, directly from
 object storage. The caller supplies the snapshot path and its storage identity
 and keeps the metadata, data, deletes and index files available for every action.
 The read/search path does not call Milvus or create snapshots.
+Snapshot metadata must declare `format_version` 4 or 6; other, missing and
+unknown versions are rejected, including for empty snapshots.
 
 Vector search uses NEAREST BY: Spark 4.2's native syntax, and the connector's
 `nearestByJoin` / `nearest_by_join` on Spark 3.5 to 4.1. EXACT scans vectors;

@@ -44,22 +44,15 @@ object SnapshotSegmentFixture {
       storageVersion: Long = 3L,
       indexes: Vector[IndexFileEntry] = Vector.empty,
       statsLogs: Seq[FieldBinlogEntry] = Seq.empty,
-      segmentLevel: Long = 2L,
-      manifestHasIndex: Boolean = false
+      segmentLevel: Long = 2L
   ): Array[Byte] = {
-    val in =
-      getClass.getResourceAsStream(s"/milvus-segment-manifest-v$version.avsc")
-    val schema =
-      try new Schema.Parser().parse(in)
-      finally in.close()
+    val schema = SnapshotSegmentSchema.schemaFor(version)
     val record = empty(schema).asInstanceOf[GenericRecord]
     record.put("segment_id", segmentId)
     record.put("partition_id", partitionId)
     record.put("segment_level", segmentLevel)
     record.put("num_of_rows", rows)
     record.put("storage_version", storageVersion)
-    if (schema.getField("manifest_has_index") != null)
-      record.put("manifest_has_index", JavaBoolean.valueOf(manifestHasIndex))
     val fieldBinlogSchema =
       schema.getField("statslog_files").schema.getElementType
     val binlogSchema =
@@ -111,11 +104,10 @@ object SnapshotSegmentFixture {
           "current_index_version",
           index.currentIndexVersion.getOrElse(0)
         )
-        if (indexSchema.getField("index_store_path_version") != null)
-          value.put(
-            "index_store_path_version",
-            index.indexStorePathVersion.getOrElse(0)
-          )
+        value.put(
+          "index_store_path_version",
+          index.indexStorePathVersion.getOrElse(0)
+        )
         value
       }.asJava
     )

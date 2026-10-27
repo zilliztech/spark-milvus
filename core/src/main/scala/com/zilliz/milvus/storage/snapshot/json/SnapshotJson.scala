@@ -159,11 +159,6 @@ case class SnapshotJson(
     rawBuildIds.map(JsonValues.toLongSeq(_).toVector)
   def allSegments: Seq[SegmentJson] =
     if (segments.nonEmpty) segments else segmentInfos
-
-  def manifestSchemaVersion: Int = formatVersion match {
-    case Some(v) if v >= 2 => v
-    case _                 => 1
-  }
 }
 
 object SnapshotJson {

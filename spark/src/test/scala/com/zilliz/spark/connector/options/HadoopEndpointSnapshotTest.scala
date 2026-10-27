@@ -55,6 +55,7 @@ class HadoopEndpointSnapshotTest
         "collection": {"schema": {"name": "endpoint_case", "fields": [
           {"fieldID": 100, "name": "id", "data_type": "Int64", "is_primary_key": true}
         ]}},
+        "format_version": 4,
         "manifest_list": [],
         "storagev2_manifest_list": [
           {"segmentID": 30, "manifest": "{\"ver\":1,\"base_path\":\"insert_log/10/20/30\"}"}

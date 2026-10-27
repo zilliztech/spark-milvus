@@ -44,6 +44,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
         {"fieldID": 100, "name": "id", "data_type": "Int64", "is_primary_key": true},
         {"fieldID": 101, "name": "v", "data_type": "FloatVector", "type_params": [{"key": "dim", "value": "4"}]}
       ]}},
+      "format_version": 4,
       "indexes": [],
       "manifest_list": [],
       "storagev2_manifest_list": [$items]
@@ -118,7 +119,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
     "a V3 segment record without its physical manifest location fails closed"
   ) {
     withDir { dir =>
-      writeAvro(dir, avroKey, SnapshotSegmentFixture.encode(version = 1))
+      writeAvro(dir, avroKey, SnapshotSegmentFixture.encode(version = 4))
       val metadata = SnapshotJson
         .parse(
           snapshotJson("unlocated", 100L, Seq.empty).replace(
@@ -149,8 +150,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
     )
     .replace(
       "\"indexes\": []",
-      """"format_version": 4,
-      "indexes": [{"collectionID":"10","fieldID":"101","indexID":"469076449917763071",
+      """"indexes": [{"collectionID":"10","fieldID":"101","indexID":"469076449917763071",
         "index_name":"v_hnsw","type_params":[{"key":"dim","value":"4"}],
         "index_params":[{"key":"index_type","value":"HNSW"},{"key":"M","value":"30"}],
         "user_index_params":[{"key":"M","value":"16"}]}],
@@ -251,7 +251,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
         dir,
         key,
         SnapshotSegmentFixture.encode(
-          version = 1,
+          version = 4,
           segmentId = 41L,
           partitionId = -1L,
           rows = 0L,
@@ -648,15 +648,66 @@ class SnapshotCatalogTest extends AnyFunSuite {
     )
   }
 
+  test("snapshot format versions are checked even without segment manifests") {
+    withDir { dir =>
+      val valid = SnapshotJson
+        .parse(snapshotJson("empty", 100L, Seq.empty))
+        .fold(throw _, identity)
+      val store = new LocalObjectStore(dir.toString)
+      for (
+        version <- Seq(
+          None,
+          Some(-1),
+          Some(0),
+          Some(1),
+          Some(2),
+          Some(3),
+          Some(5),
+          Some(7)
+        );
+        manifestList <- Seq(Seq.empty, Seq("missing.avro"))
+      ) {
+        val error = SnapshotCatalog
+          .fromMetadata(
+            valid.copy(formatVersion = version, manifestList = manifestList),
+            SnapshotOrigin.Options,
+            store,
+            ""
+          )
+          .swap
+          .toOption
+          .get
+        val expected = version match {
+          case Some(v) => s"Unsupported Milvus snapshot format version $v"
+          case None    => "snapshot is missing format_version"
+        }
+        assert(error.getMessage.contains(expected))
+      }
+      for (version <- Seq(4, 6)) {
+        val snapshot = SnapshotCatalog
+          .fromMetadata(
+            valid.copy(formatVersion = Some(version)),
+            SnapshotOrigin.Options,
+            store,
+            ""
+          )
+          .fold(throw _, identity)
+        assert(snapshot.segments.isEmpty)
+      }
+    }
+  }
+
   test(
     "an empty collection snapshot retains its schema and produces no read tasks"
   ) {
     withDir { dir =>
       val explicitLists = snapshotJson("empty", 100L, Seq.empty)
-      // Milvus format 5 exports omit both manifest lists for an empty collection.
+      // Empty collection exports may omit both manifest lists.
       val omittedLists = explicitLists
         .replace("\"manifest_list\": [],", "")
-        .replace("\"storagev2_manifest_list\": []", "\"format_version\": 5")
+        .replace("\"storagev2_manifest_list\": []", "")
+        .replace("\"format_version\": 4", "\"format_version\": 6")
+        .replace("\"indexes\": [],", "\"indexes\": []")
       Seq(explicitLists, omittedLists).foreach { json =>
         write(dir, "empty.json", json)
         val snapshot = catalog(dir).read("empty.json")
