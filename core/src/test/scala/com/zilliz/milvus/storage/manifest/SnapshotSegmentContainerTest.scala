@@ -42,8 +42,9 @@ class SnapshotSegmentContainerTest extends AnyFunSuite with Matchers {
     )
     writer.setCodec(codec)
     writer.create(value.getSchema, out)
-    try (0 until copies).foreach(_ => writer.append(value))
-    finally writer.close()
+    try {
+      (0 until copies).foreach(_ => writer.append(value))
+    } finally writer.close()
     out.toByteArray
   }
 
