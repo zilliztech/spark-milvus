@@ -112,7 +112,7 @@ original locations stay stable.
 missing or corrupt sample. Run `python3 scripts/ci/check_read_fixtures.py` to
 verify files and all source package paths, including every Spark shim
 directory.
-The same check runs in public CI, without the private knowledge submodule.
+The same check runs in CI.
 
 Each sample group records its origin and expected results. Changes to binary
 samples require deliberate regeneration and review of expected results and
@@ -129,8 +129,8 @@ with the client isolated from the classic Spark classpath. Local filesystem and
 direct JNI/Arrow regressions use checksum-verified committed fixtures and need
 no external input files. Object-storage byte reads and Hadoop-to-native
 configuration checks belong to the explicit `integration` project and use the
-same disposable MinIO fixture as its DataSource reads. They do not use a shared
-UAT bucket or cloud credentials.
+same disposable MinIO fixture as its DataSource reads. They need no external
+bucket and no cloud credentials.
 
 Spark 3.5 uses Arrow 12, whose C Data allocation needs a Java 17 test JVM.
 Set `SPARK35_TEST_JAVA_HOME` to that JDK while running sbt itself on Java 21.
@@ -174,8 +174,8 @@ Keep credentials out of Git and test artifacts.
 The [integration chart](../deploy/helm/spark-milvus-integration/README.md)
 accepts `readOptions.existingSecret` with `a.json` and `b.json`. The test image
 must supply the runner; chart linting alone does not prove that a job ran.
-The earlier service-management chart is maintained under private `deploy/helm`;
-public values reject service setup and write settings.
+The chart values reject service setup and write settings, which are outside
+this repository's scope.
 
 ### Public read CI
 
@@ -185,8 +185,8 @@ contents and runs source/spill checks. Shared modules run with their own
 configuration. The default root unit run tests Spark 4.0; other lines receive
 the matrix checks. Push/manual/full-validation CI adds mandatory native
 read/search/Arrow/Connect suites and real object-storage reads on Linux x86_64.
-The eight independent release consumer jobs cover Spark 4.0/4.2 on the two Linux
-architectures and two supported OS versions.
+The twelve independent release consumer jobs cover Spark 4.0/4.2 on the three
+native platforms, each on two supported OS versions.
 
 Candidate validation rejects the Milvus SDK and non-release dependencies.
 Native engine bindings retain upstream APIs needed by downstream libraries;
@@ -490,9 +490,8 @@ implement another C API or JNI bridge. The API JAR is cached under
 JDK and an initialized submodule, but does not download source or compile or
 load the native engine.
 
-Public release bundles use open-source Knowhere and disable Cardinal. Private
-Cardinal builds use their pinned historical native build tools, pin the plugin revisions and record
-`with_cardinal=true`; they are outside public release acceptance. The JVM
+Public release bundles use open-source Knowhere and disable Cardinal. A build
+that records `with_cardinal=true` is outside public release acceptance. The JVM
 compatibility resource records Storage/Knowhere pins and rejects mismatches
 before JNI initialization.
 
@@ -506,7 +505,8 @@ The [release consumer](releasing.md#consumer-gates-and-ci-triggers) compiles
 index samples, and loads production classes from the candidate through real
 `spark-submit --packages`. `milvus.smoke.master=local-cluster` requests an
 independent executor JVM. It verifies native reads/search, not Milvus service
-registration. Write/index-build/snapshot-output workloads are private.
+registration. Write/index-build/snapshot-output workloads are outside this
+repository's scope.
 
 `NativeVectorLibrary.load()` explicitly initializes the upstream binding and
 reports the native C ABI and index format versions. The upstream loader owns

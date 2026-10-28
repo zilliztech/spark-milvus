@@ -22,8 +22,8 @@ services:
     volumes:
       # The source tree, target/ included: build outputs stay in the checkout.
       - ..:/workspace
-      # Dependency caches, one named volume each, matching the Jenkins cache
-      # directories in vdc-jenkins/spark-milvus/build-image.groovy.
+      # Dependency caches, one named volume each, so a recreated container
+      # reuses what earlier builds downloaded.
       - conan2:/home/dev/.conan2
       - ccache:/home/dev/.ccache
       - cargo-registry:/home/dev/.cargo/registry
@@ -32,10 +32,12 @@ services:
       - ivy2:/home/dev/.ivy2
       - sbt:/home/dev/.sbt
 
-  # Local Milvus for integration, which addresses localhost:19530 and
-  # localhost:9000. The three services join the dev container's network
-  # namespace, so those addresses resolve without any test change.
-  # Start them with `scripts/devcontainer.sh up --services`.
+  # Optional local Milvus stack for manual experiments and demos at
+  # localhost:19530 and localhost:9000. The unit tests and the `integration`
+  # project do not use it; integration starts its own disposable MinIO. The
+  # three services join the dev container's network namespace, so those
+  # addresses resolve inside it. Start them with
+  # `scripts/devcontainer.sh up --services`.
   etcd:
     image: ${ETCD_IMAGE}
     profiles: [services]
