@@ -319,6 +319,14 @@ class WorkflowGateTest(unittest.TestCase):
         })
         self.assertEqual(ci["permissions"], {"actions": "read", "contents": "read"})
         self.assertIn("workflow_dispatch", ci["on"])
+
+    def test_ci_pushes_to_one_branch_supersede_each_other(self):
+        ci = workflow("ci.yml")
+        self.assertEqual(ci["concurrency"], {
+            "group": "ci-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' "
+                     "&& github.run_id || github.event.pull_request.number || github.ref }}",
+            "cancel-in-progress": "true",
+        })
         condition = "github.event_name != 'pull_request' || inputs.full_validation == true"
         self.assertEqual(ci["jobs"]["artifacts"]["with"]["build_native"], "${{ " + condition + " }}")
         self.assertEqual(ci["jobs"]["artifacts"]["with"]["native_source_run_id"],

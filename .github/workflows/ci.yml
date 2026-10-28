@@ -29,8 +29,12 @@ permissions:
   actions: read
   contents: read
 
+# A push supersedes the earlier pushes to the same branch: their runs are
+# cancelled, which also keeps them from saving a partial native dependency
+# cache. A manual dispatch is its own group, so it neither cancels nor is
+# cancelled by a push. Pull request runs group by number.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:

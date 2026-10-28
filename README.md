@@ -228,7 +228,7 @@ The [integration chart](deploy/helm/spark-milvus-integration/README.md) only run
 V3 reads with an existing Secret; it does not deploy or set up a Milvus service.
 
 The version is derived as `2.0.0-{branch}-{arch}-SNAPSHOT`, for example
-`2.0.0-refactor-v2-amd64-SNAPSHOT`.
+`2.0.0-release-2.0-amd64-SNAPSHOT` on the `release-2.0` branch.
 
 Pull the jar back out of the image:
 
