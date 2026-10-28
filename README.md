@@ -18,9 +18,10 @@ construction, snapshot output, old storage formats, backup and Cardinal are
 outside its scope. Public APIs contain no Milvus service client or SDK
 dependency.
 
-The 1.x line stopped at `v1.6.0` and is no longer maintained. The 2.0 rewrite
-continues on `refactor/v2`. Candidate versions and artifact coordinates are
-explicitly recorded by the [release workflow](docs/releasing.md).
+The 1.x line stopped at `v1.6.0` and is no longer maintained. The 2.0 line is
+developed on `main` and released from `release-2.0`. Candidate versions and
+artifact coordinates are explicitly recorded by the
+[release workflow](docs/releasing.md).
 
 ## Project structure
 

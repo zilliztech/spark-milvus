@@ -16,7 +16,7 @@ arbitrary network endpoints. GitHub publication is performed by the program.
 
 1. Merge `.github/ai-review/`, `ai-review.yml`, `ai-review-tests.yml` and the
    PR-Agent coordination change into the upstream default branch (`main`). A PR
-   into `refactor/v2` alone does not deploy the default-branch program.
+   into a `release-*` branch alone does not deploy the default-branch program.
 2. Keep the existing `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` repository
    secrets. The gateway must support the configured model's OpenAI-compatible
    chat-completions API with function tools and JSON output

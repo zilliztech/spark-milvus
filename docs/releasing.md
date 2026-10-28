@@ -295,7 +295,7 @@ a fixed-input read Job with an existing two-identity Secret.
 
 | Event | Required work |
 |---|---|
-| Pull request to `main` or `refactor/v2` | Formatting, Versions-derived five-combination source/POM/source-JAR checks, shared unit tests, selected-line aggregate coverage, clean checks, scripts and Helm; existing JVM/thin exports |
+| Pull request to `main` or a `release-*` branch | Formatting, Versions-derived five-combination source/POM/source-JAR checks, shared unit tests, selected-line aggregate coverage, clean checks, scripts and Helm; existing JVM/thin exports |
 | Push to those branches or manual CI dispatch | The checks above, native builds, mandatory read/search/Arrow/Connect suites, isolated object-storage reads, candidate verification, all eight consumer jobs, and the Spark 4.0 assembly with a local image build on both Linux architectures |
 | `v2.x.y-central-test.<digits>` tag | Full CI, signed `USER_MANAGED` upload, Central validation, authenticated byte verification, one consumer job and deployment deletion; no public release |
 | Other accepted `v2.*` release tag | Full CI explicitly enabled, nonempty validated candidate, controlled publication, public Central consumer check, then the Spark 4.0 image on both Linux architectures and its multi-architecture tag |
@@ -355,10 +355,10 @@ still runs. Caches accelerate a gate; they do not replace it.
 
 GitHub scopes caches by ref and otherwise falls back only to the repository's
 default branch. This repository's default branch is `main`, so a release tag
-cannot directly restore a complete bundle cached by `refactor/v2`. Before a
-release runs, it therefore requires a successful `CI` push run on
-`refactor/v2` for the exact tagged commit and verifies that run still has one
-unexpired native artifact for each Linux platform. On a tag-local cache miss,
+cannot directly restore a complete bundle cached by a `release-*` branch. Before
+a release runs, it therefore requires a successful `CI` push run on `main` or a
+`release-*` branch for the exact tagged commit and verifies that run still has
+one unexpired native artifact for each native platform. On a tag-local cache miss,
 the native jobs download those artifacts by exact run ID and name. They accept
 them only when the file inventory is regular and complete, the recorded native
 inputs exactly equal the inputs recomputed with the current prepared toolchain,

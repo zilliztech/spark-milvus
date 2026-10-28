@@ -160,10 +160,11 @@ class WorkflowGateTest(unittest.TestCase):
         })
         script = source["run"]
         for fragment in (
-                "actions/workflows/ci.yml/runs", "branch=refactor/v2", "event=push",
+                "actions/workflows/ci.yml/runs", "event=push",
                 "status=success", 'head_sha="$RELEASE_SHA"',
                 "run.get('path') == '.github/workflows/ci.yml'",
-                "run.get('head_branch') == 'refactor/v2'",
+                "release_branch(run.get('head_branch'))",
+                "name == 'main' or str(name).startswith('release-')",
                 "run.get('head_sha') == sha", "run.get('status') == 'completed'",
                 "run.get('conclusion') == 'success'", "scripts/release-matrix.json",
                 "'native-' + row['platform'] for row in matrix['native']", "artifact.get('expired') is False",
@@ -182,10 +183,10 @@ class WorkflowGateTest(unittest.TestCase):
             "repository": {"full_name": repository},
             "head_repository": {"full_name": repository},
             "path": ".github/workflows/ci.yml", "event": "push",
-            "head_branch": "refactor/v2", "head_sha": sha,
+            "head_branch": "release-2.0", "head_sha": sha,
             "status": "completed", "conclusion": "success",
         }
-        artifact_run = {"id": run_id, "head_branch": "refactor/v2", "head_sha": sha}
+        artifact_run = {"id": run_id, "head_branch": "release-2.0", "head_sha": sha}
         artifacts = [{
             "name": name, "expired": False, "size_in_bytes": 1,
             "workflow_run": artifact_run,
@@ -222,6 +223,26 @@ class WorkflowGateTest(unittest.TestCase):
                                     env=environment, text=True, capture_output=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(output.exists())
+
+            run["head_sha"] = sha
+            run["head_branch"] = artifact_run["head_branch"] = "codex-tencent-auth"
+            runs_path.write_text(json.dumps({"workflow_runs": [run]}))
+            artifacts_path.write_text(json.dumps({
+                "total_count": len(artifacts), "artifacts": artifacts}))
+            result = subprocess.run(["bash", "-c", source["run"]], cwd=ROOT,
+                                    env=environment, text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("main or a release-* branch", result.stderr)
+            self.assertFalse(output.exists())
+
+            run["head_branch"] = artifact_run["head_branch"] = "main"
+            runs_path.write_text(json.dumps({"workflow_runs": [run]}))
+            artifacts_path.write_text(json.dumps({
+                "total_count": len(artifacts), "artifacts": artifacts}))
+            result = subprocess.run(["bash", "-c", source["run"]], cwd=ROOT,
+                                    env=environment, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(output.read_text(), f"run_id={run_id}\n")
 
     def test_central_test_validates_downloads_and_drops_without_publishing(self):
         release = workflow("release.yml")
