@@ -1,0 +1,7 @@
+b4f2391e98c7b0bc360f526b1481c2e9f97f4b7e57486b16ecfb85d8c50ce4fd  README.md
+4824ef4e92872080f0d85dea8a3b48c4e38bf34266e4d7a120cd1ddb4ebb3fef  expected.json
+07cdb318a8f52dc64b2948832f25b2fe8220a8c5fb3e32a0089b687d982479c8  files/insert_log/10/20/40/_data/0_5738caa4-8e5d-4ba8-962a-a3401908c5ac.parquet
+6a7f46d38d03763589e282c9fe472480fb360a57df5258e0e9ffa430f813a73c  files/insert_log/10/20/40/_data/1_d8fff05a-10e4-46b1-bb50-e252a2df9824.parquet
+6f1844ab0a74fc09107acfe8e0f7cc031c2b80cad098ea6dcf8ed17e34180599  files/insert_log/10/20/40/_metadata/manifest-1.avro
+590f37787783fc2dd5aeedb6027c971fa1ddbc31b237d588fd4bfa51c8c5efb1  files/snapshots/10/manifests/1/40.avro
+7fde19c4ca2641967ed3eb455724f87a7941303ee680f11eea1b1c6291aa60b6  snapshot.json

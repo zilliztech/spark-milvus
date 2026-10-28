@@ -1,0 +1,57 @@
+package com.zilliz.spark.connector.extensions
+
+import java.util
+
+import org.apache.spark.api.plugin.{
+  DriverPlugin,
+  ExecutorPlugin,
+  PluginContext,
+  SparkPlugin
+}
+import org.apache.spark.internal.Logging
+
+import com.zilliz.milvus.jni.storage.NativeStorageLibrary
+import com.zilliz.milvus.jni.vector.NativeVectorLibrary
+
+/** `spark.plugins=com.zilliz.spark.connector.extensions.MilvusSparkPlugin`:
+  * every executor loads the connector's native libraries as it starts, off the
+  * path of its first task.
+  *
+  * Without it the libraries load the first time a task touches Knowhere or
+  * milvus-storage: the bundle is extracted from the assembly and checked (207
+  * shared libraries, 850 MiB, 3.0 s on the P3 executors) while the task that
+  * needs it waits. An executor starts long before its first search task -- the
+  * driver is still planning and delivering the query set -- so the same work
+  * done here costs the job nothing. A load that fails here is logged and left
+  * to the first task, which reports the failure the way it always did.
+  */
+class MilvusSparkPlugin extends SparkPlugin {
+  override def driverPlugin(): DriverPlugin = null
+  override def executorPlugin(): ExecutorPlugin = new MilvusExecutorPlugin
+}
+
+/** The executor side: loads the storage and vector libraries once, at start, or
+  * logs why it could not.
+  */
+class MilvusExecutorPlugin extends ExecutorPlugin with Logging {
+  override def init(
+      context: PluginContext,
+      extraConf: util.Map[String, String]
+  ): Unit = {
+    val started = System.nanoTime()
+    try {
+      NativeStorageLibrary.load()
+      val runtime = NativeVectorLibrary.load()
+      logInfo(
+        s"Native libraries loaded at executor start in ${(System
+            .nanoTime() - started) / 1000000L} ms: $runtime"
+      )
+    } catch {
+      case error: Throwable =>
+        logWarning(
+          "Native libraries did not load at executor start; the first task that needs them will load them and report any failure",
+          error
+        )
+    }
+  }
+}

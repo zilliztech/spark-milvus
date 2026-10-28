@@ -1,0 +1,17 @@
+{{- range $role := list "submitter" "driver" "executor" }}
+{{- $account := index $.Values.serviceAccounts $role }}
+{{- if $account.create }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "spark-milvus-demo.account" (dict "root" $ "role" $role) }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "spark-milvus-demo.labels" $ | nindent 4 }}
+  {{- with $account.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,190 @@
+/** Application dependency versions and the Spark compatibility matrix. */
+object Versions {
+
+  val scala212 = "2.12.20"
+  val scala213 = "2.13.16"
+
+  /** A supported Spark line; all lines compile the same selected sbt project.
+    */
+  final case class SparkLine(
+      id: String,
+      projectId: String,
+      spark: String,
+      arrow: String,
+      javaRelease: String,
+      scalas: Seq[String],
+      /** The Hadoop and Netty versions the Spark distribution ships. A line's
+        * test classpath pins every Hadoop and Netty artifact to them, because
+        * Arrow's Netty allocation manager reads Netty internals: Arrow 12 on
+        * Netty 4.1.118 fails at the first buffer.
+        */
+      hadoop: String,
+      netty: String
+  )
+
+  /** Compile against the compatibility floor, with the Arrow version that Spark
+    * ships. The runtime test matrix is a separate choice.
+    */
+  val lines: Seq[SparkLine] = Seq(
+    SparkLine(
+      "3.5",
+      "spark",
+      "3.5.5",
+      "12.0.1",
+      "11",
+      Seq(scala212, scala213),
+      hadoop = "3.3.4",
+      netty = "4.1.96.Final"
+    ),
+    SparkLine(
+      "4.0",
+      "spark",
+      "4.0.0",
+      "18.1.0",
+      "17",
+      Seq(scala213),
+      hadoop = "3.4.1",
+      netty = "4.1.118.Final"
+    ),
+    SparkLine(
+      "4.1",
+      "spark",
+      "4.1.1",
+      "18.3.0",
+      "17",
+      Seq(scala213),
+      hadoop = "3.4.2",
+      netty = "4.2.7.Final"
+    ),
+    SparkLine(
+      "4.2",
+      "spark",
+      "4.2.0",
+      "19.0.0",
+      "17",
+      Seq(scala213),
+      hadoop = "3.5.0",
+      netty = "4.2.13.Final"
+    )
+  )
+
+  def line(id: String): SparkLine =
+    lines.find(_.id == id).getOrElse(sys.error(s"unknown Spark line: $id"))
+
+  /** Select a supported compile version at build load, before dependencies
+    * resolve.
+    */
+  val selected: SparkLine = {
+    val requested = sys.props.getOrElse("sparkVersion", "4.0")
+    lines
+      .find(line => requested == line.id || requested == line.spark)
+      .getOrElse(
+        sys.error(
+          s"Unsupported -DsparkVersion=$requested; choose ${lines.map(_.id).mkString(", ")}"
+        )
+      )
+  }
+  val selectedScala: String = {
+    val requested = sys.props.getOrElse("scalaVersion", scala213)
+    require(
+      selected.scalas.contains(requested),
+      s"Spark ${selected.id} does not support Scala $requested"
+    )
+    requested
+  }
+
+  /** Shared modules must remain loadable on the 3.5 line's Java baseline. */
+  val sharedJavaRelease = "11"
+  val sharedScalas: Seq[String] = Seq(scala212, scala213)
+
+  /** Build checks cover every source combination. Publication remains a
+    * separate, smaller contract; a successful compile does not expand it.
+    */
+  val buildJava = "21"
+  val releaseConsumers: Map[String, String] =
+    Map("4.0" -> "4.0.1", "4.2" -> "4.2.0")
+
+  def buildMatrixJson: String = {
+    import scala.util.parsing.json.{JSONArray, JSONObject}
+
+    def binary(scala: String): String = scala.split('.').take(2).mkString(".")
+    val spark = for {
+      current <- lines
+      scala <- current.scalas
+    } yield JSONObject(
+      Map(
+        "line" -> current.id,
+        "project" -> current.projectId,
+        "spark" -> current.spark,
+        "scala" -> scala,
+        "scalaBinary" -> binary(scala),
+        "buildJava" -> buildJava,
+        "java" -> (if (current.id == "3.5") "17" else buildJava),
+        "javaRelease" -> current.javaRelease,
+        "arrow" -> current.arrow
+      )
+    )
+    val shared = sharedScalas.map { scala =>
+      val modules = Seq("native-storage", "core") ++
+        (if (scala == scala213) Seq("native-runtime", "native-vector")
+         else Seq.empty)
+      JSONObject(
+        Map(
+          "scala" -> scala,
+          "scalaBinary" -> binary(scala),
+          "buildJava" -> buildJava,
+          "java" -> buildJava,
+          "javaRelease" -> sharedJavaRelease,
+          "modules" -> JSONArray(modules.toList)
+        )
+      )
+    }
+    val release =
+      lines.filter(current => releaseConsumers.contains(current.id)).map {
+        current =>
+          JSONObject(
+            Map(
+              "line" -> current.id,
+              "project" -> current.projectId,
+              "spark" -> releaseConsumers(current.id),
+              "compileSpark" -> current.spark,
+              "scala" -> scala213,
+              "java" -> buildJava
+            )
+          )
+      }
+    JSONObject(
+      Map(
+        "schemaVersion" -> 1,
+        "shared" -> JSONArray(shared.toList),
+        "spark" -> JSONArray(spark.toList),
+        "release" -> JSONArray(release.toList)
+      )
+    ).toString() + "\n"
+  }
+
+  val scalapb = "0.11.3"
+  val parquet = "1.13.1"
+  val parquetAvro = "1.15.2"
+
+  /** Layer 2's own tests; each Spark line pins its distribution's version. */
+  val hadoop = "3.4.1"
+  val avro = "1.12.0"
+  val awsSdkV2 = "2.30.38"
+  val awsSdkV1Core = "1.12.780"
+  val munit = "0.7.29"
+  val scalaTest = "3.2.15"
+
+  /** Keep jackson-module-scala and jackson-databind on the same version. */
+  val jackson = "2.17.3"
+
+  /** xxh3, the hash Milvus's primary-key bloom filter is keyed by. */
+  val zeroAllocationHashing = "0.16"
+
+  /** The logging API provided by Spark 3.5 and compatible later lines. */
+  val slf4j = "2.0.7"
+
+  /** Supplies scala.jdk.CollectionConverters on Scala 2.12. */
+  val scalaCollectionCompat = "2.12.0"
+
+}

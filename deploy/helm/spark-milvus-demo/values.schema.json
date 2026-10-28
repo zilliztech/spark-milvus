@@ -1,0 +1,126 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["image", "language", "example", "input", "serviceAccounts", "rbac", "nodeSelector", "spark", "job", "extraSparkConf"],
+  "properties": {
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "digest", "pullPolicy", "pullSecrets"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"},
+        "tag": {"type": "string", "pattern": "^$|^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"},
+        "digest": {"type": "string", "pattern": "^$|^sha256:[a-f0-9]{64}$"},
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]},
+        "pullSecrets": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/definitions/name"}}
+      },
+      "anyOf": [
+        {"properties": {"tag": {"minLength": 1}}},
+        {"properties": {"digest": {"minLength": 1}}}
+      ]
+    },
+    "language": {"enum": ["python", "java"]},
+    "example": {"enum": ["read", "filter", "sql", "exact", "filtered", "index", "vectors", "partition"]},
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["existingSecret", "optionsKey", "queriesKey"],
+      "properties": {
+        "existingSecret": {
+          "type": "string",
+          "maxLength": 56,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+          "description": "Spark appends -volume, so use a DNS label with at most 56 characters."
+        },
+        "optionsKey": {"$ref": "#/definitions/inputKey"},
+        "queriesKey": {"anyOf": [{"const": ""}, {"$ref": "#/definitions/inputKey"}]}
+      }
+    },
+    "serviceAccounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["submitter", "driver", "executor"],
+      "properties": {
+        "submitter": {"$ref": "#/definitions/account"},
+        "driver": {"$ref": "#/definitions/account"},
+        "executor": {"$ref": "#/definitions/account"}
+      }
+    },
+    "rbac": {
+      "type": "object", "additionalProperties": false, "required": ["create"],
+      "properties": {"create": {"type": "boolean"}}
+    },
+    "nodeSelector": {
+      "type": "object",
+      "required": ["kubernetes.io/os", "kubernetes.io/arch"],
+      "properties": {
+        "kubernetes.io/os": {"const": "linux"},
+        "kubernetes.io/arch": {"enum": ["amd64", "arm64"]}
+      },
+      "additionalProperties": {"type": "string"}
+    },
+    "spark": {
+      "type": "object", "additionalProperties": false, "required": ["driver", "executor"],
+      "properties": {
+        "driver": {"$ref": "#/definitions/driver"},
+        "executor": {"$ref": "#/definitions/executor"}
+      }
+    },
+    "job": {
+      "type": "object", "additionalProperties": false, "required": ["activeDeadlineSeconds", "resources"],
+      "properties": {
+        "activeDeadlineSeconds": {"type": "integer", "minimum": 1},
+        "resources": {
+          "type": "object", "additionalProperties": false, "required": ["requests", "limits"],
+          "properties": {
+            "requests": {"$ref": "#/definitions/quantities"},
+            "limits": {"$ref": "#/definitions/quantities"}
+          }
+        }
+      }
+    },
+    "extraSparkConf": {
+      "type": "object", "additionalProperties": false,
+      "patternProperties": {"^spark\\.[A-Za-z0-9_./-]+$": {"type": "string"}}
+    }
+  },
+  "definitions": {
+    "name": {"type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+    "inputKey": {"type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+    "stringMap": {"type": "object", "additionalProperties": {"type": "string"}},
+    "account": {
+      "type": "object", "additionalProperties": false, "required": ["create", "name", "annotations"],
+      "properties": {
+        "create": {"type": "boolean"},
+        "name": {"anyOf": [{"const": ""}, {"$ref": "#/definitions/name"}]},
+        "annotations": {"$ref": "#/definitions/stringMap"}
+      }
+    },
+    "memory": {"type": "string", "pattern": "^[1-9][0-9]*[kKmMgGtT]$"},
+    "driver": {
+      "type": "object", "additionalProperties": false, "required": ["cores", "memory", "memoryOverhead"],
+      "properties": {
+        "cores": {"type": "integer", "minimum": 1},
+        "memory": {"$ref": "#/definitions/memory"},
+        "memoryOverhead": {"$ref": "#/definitions/memory"}
+      }
+    },
+    "executor": {
+      "type": "object", "additionalProperties": false, "required": ["instances", "cores", "memory", "memoryOverhead"],
+      "properties": {
+        "instances": {"type": "integer", "minimum": 1},
+        "cores": {"type": "integer", "minimum": 1},
+        "memory": {"$ref": "#/definitions/memory"},
+        "memoryOverhead": {"$ref": "#/definitions/memory"}
+      }
+    },
+    "quantities": {
+      "type": "object", "additionalProperties": false, "required": ["cpu", "memory"],
+      "properties": {
+        "cpu": {"type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?m?$"},
+        "memory": {"type": "string", "pattern": "^[1-9][0-9]*(Ki|Mi|Gi|Ti)$"}
+      }
+    }
+  }
+}

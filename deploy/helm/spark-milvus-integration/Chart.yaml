@@ -1,0 +1,6 @@
+apiVersion: v2
+name: spark-milvus-integration
+description: Read fixed Milvus V3 inputs with two object-storage identities
+type: application
+version: 0.3.0
+appVersion: "2.0.0"

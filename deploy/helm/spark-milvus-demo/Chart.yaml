@@ -1,0 +1,6 @@
+apiVersion: v2
+name: spark-milvus-demo
+description: Submit Python or Java snapshot demos to Kubernetes with Spark 4.0.1
+type: application
+version: 0.1.0
+appVersion: "4.0.1"

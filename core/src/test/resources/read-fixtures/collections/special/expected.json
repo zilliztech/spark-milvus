@@ -1,0 +1,88 @@
+{
+  "dimension": 2,
+  "rowTimestamp": 100,
+  "segments": [
+    {
+      "id": 40,
+      "deletedIds": [],
+      "metric": null,
+      "rows": [
+        {
+          "id": 4000,
+          "vector": [
+            1.0,
+            0.0
+          ],
+          "category": 1
+        },
+        {
+          "id": 4001,
+          "vector": [
+            "NaN",
+            0.0
+          ],
+          "category": 1
+        },
+        {
+          "id": 4002,
+          "vector": [
+            0.0,
+            0.0
+          ],
+          "category": 1
+        },
+        {
+          "id": 4003,
+          "vector": [
+            "Infinity",
+            1.0
+          ],
+          "category": 1
+        },
+        {
+          "id": 4004,
+          "vector": [
+            1099511627776.0,
+            549755813888.0
+          ],
+          "category": 1
+        },
+        {
+          "id": 4005,
+          "vector": [
+            9.313225746154785e-10,
+            3.725290298461914e-09
+          ],
+          "category": 1
+        },
+        {
+          "id": 4006,
+          "vector": [
+            3.0,
+            5.0
+          ],
+          "category": 1
+        },
+        {
+          "id": 4007,
+          "vector": [
+            -2.0,
+            1.0
+          ],
+          "category": 1
+        }
+      ]
+    }
+  ],
+  "survivingIds": [
+    4000,
+    4001,
+    4002,
+    4003,
+    4004,
+    4005,
+    4006,
+    4007
+  ],
+  "floatSpecialValues": "NaN and Infinity strings denote IEEE-754 values, not vector text"
+}

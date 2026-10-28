@@ -3,8 +3,8 @@ extra_instructions = """\
 This is spark-milvus, the Apache Spark connector for Milvus. Read the target branch's
 README.md and agent instructions, when present, for supported versions and contracts.
 Review every changed file, including documentation, tests, locks and generated files.
-It reads Milvus binlog/segment data and the milvus-storage (Loon) format through a JNI bridge,
-and ships ETL operations such as backfill, backup reads and Milvus writes.
+It reads fixed Milvus Storage V3 snapshots through a JNI bridge and runs vector search
+over them from Spark; it does not write to Milvus or call its service.
 
 Review focus areas:
 - Data correctness: schema mapping, null handling and Spark<->Milvus type conversions must round-trip exactly
@@ -13,7 +13,7 @@ Review focus areas:
 - JNI/native boundary: resource lifecycle (close/free), thread safety and error propagation from milvus-storage
 - CLI/config changes must follow the target branch's compatibility policy and update the user-facing references
 - Follow the target branch's documented test layout
-- Check documentation against code, commands, options, links and capability/package indexes
+- Check documentation against code, commands, options and links
 """
 num_code_suggestions = 5
 inline_code_comments = true

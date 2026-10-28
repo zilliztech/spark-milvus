@@ -1,0 +1,29 @@
+package com.zilliz.milvus.storage
+
+/** Milvus column-value encoding and decoding, and persisted-index file
+  * handling, including neutral file-format contracts reused by consumers.
+  *
+  * Float16 and BFloat16 packing lives here, as does the (index, value) encoding
+  * of sparse vectors and the protobuf `ScalarField` an Array value is stored
+  * as. The split against the schema package: schema answers "what type is this
+  * field", codec answers "what does one value of that type look like in bytes".
+  *
+  * BinlogCodec decodes the common event envelope and flat Parquet payload used
+  * by deletion files and persisted index files. It opens no storage itself.
+  * MilvusIndexFileDecoder takes one index object apart and IndexFileCodec
+  * assembles the slices of a persisted index and hands the payload to the
+  * vector library; both belong to the Milvus format side rather than to the
+  * computation. `IndexFileFormat` provides shared envelope and slice
+  * definitions. FloatConverter packs read-query vectors, so its encode methods
+  * remain part of this read-side package.
+  *
+  * `VectorIndexFamilies` is the one list of index types this connector reads
+  * loads, with the byte markers each family's persisted stream starts with: the
+  * types that can be loaded and the markers that identify them are the same
+  * fact, and splitting them is how a family ends up declared but unreadable.
+  *
+  * Main types: FloatConverter, SparseFloatVectorConverter, ArrayCodec,
+  * BinlogCodec, BinlogFormat, MilvusIndexFileDecoder, IndexFileCodec,
+  * IndexFileFormat, VectorIndexFamilies.
+  */
+package object codec

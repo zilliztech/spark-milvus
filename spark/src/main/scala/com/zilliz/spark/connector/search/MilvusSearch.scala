@@ -1,0 +1,364 @@
+package com.zilliz.spark.connector.search
+
+import scala.jdk.CollectionConverters._
+
+import org.apache.spark.broadcast.Broadcast
+import org.apache.spark.internal.Logging
+import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
+
+import com.zilliz.milvus.storage.expr.{FilterExpr, PredicateExpr}
+import com.zilliz.milvus.storage.read.exec.SegmentIndexHandle
+import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
+import com.zilliz.milvus.storage.vector.{
+  CandidateBytes,
+  CandidateDictionary,
+  CandidateEncoding,
+  RankingFunction,
+  SearchPlan
+}
+import com.zilliz.spark.connector.metrics.SearchMetrics
+import com.zilliz.spark.connector.options.{MilvusOption, SearchLimits}
+import com.zilliz.spark.connector.read.MilvusInputPartition
+import io.milvus.grpc.schema.FieldSchema
+
+/** The two-stage search over the segments of a Milvus table input: a query set
+  * in, every query's global top-k out, with the base columns the take stage
+  * reads.
+  *
+  * A nearest-by join over a Milvus table runs it (`NearestBySearch`); the join
+  * is how a search is written. The `exact` mode computes every distance in
+  * every segment; the `index` mode searches the persisted index the snapshot
+  * pinned. Each query id is paired with its requested base columns. A DataFrame
+  * input's search (`FrameSearch`) shares its query delivery (`SearchQueries`)
+  * and merge stage (`SearchMerge`).
+  */
+object MilvusSearch extends Logging {
+
+  /** The two Spark stages over segments already planned: candidates from every
+    * segment set, merged into each query's best k, then the output columns
+    * taken for the hits alone.
+    *
+    * `queries` is the query set: a frame of `query_id` and `vector`, or a set
+    * the driver already packed. The nearest-by join assigns unique association
+    * ids; they may have gaps and are not checked again here. `required` names
+    * the ids that must each have a row, one with NULL hit columns when nothing
+    * was found for it, which is what a LEFT OUTER nearest-by join whose query
+    * rows the driver holds needs. `filter` and `predicate` exclude rows before
+    * the top k: the Milvus filter, and what Spark pushed into the scan whose
+    * partitions these are. An index search scans exactly a segment it has no
+    * usable index for, and `metrics` is where the tasks count. `function` is
+    * what the join ranks by where Knowhere does not score a pair as it does
+    * (section 2).
+    */
+  private[connector] def execute(
+      spark: SparkSession,
+      options: Map[String, String],
+      queries: SearchQueries.Input,
+      partitions: Seq[MilvusInputPartition],
+      field: FieldSchema,
+      layout: VectorLayout,
+      k: Int,
+      searchMetric: MetricType,
+      searchMode: SearchMode,
+      searchParameters: Map[String, String],
+      filter: Option[FilterExpr],
+      predicate: Option[PredicateExpr],
+      outputSchema: StructType,
+      outputPositions: Seq[Int],
+      metrics: SearchMetrics,
+      function: RankingFunction,
+      required: Option[Array[Long]]
+  ): RDD[(Long, InternalRow)] = {
+    val limits = SearchLimits.from(options)
+    val tasks = partitions.map(_.task)
+    if (searchMode == SearchMode.PreferIndex) {
+      SegmentIndexHandle.check(tasks, field.fieldID, searchMetric)
+    }
+    val queryCount = queries.count
+    // The set is what a nearest-by join kept of its query rows: rows whose
+    // ranking value is NULL search nothing, and all of them may be. The
+    // snapshot may hold no segment.
+    if (queryCount == 0L || tasks.isEmpty)
+      return SearchMerge.missing(spark, required, outputPositions.size)
+    require(
+      queryCount <= Int.MaxValue,
+      s"A search takes at most ${Int.MaxValue} queries at a time, not $queryCount"
+    )
+
+    val caseInsensitive = new CaseInsensitiveStringMap(options.asJava)
+    val read = MilvusOption.readLimits(caseInsensitive)
+    val namedBatch =
+      if (caseInsensitive.containsKey(MilvusOption.ReadBatchMaxBytes))
+        Some(read.batchMaxBytes)
+      else None
+    val execution = SearchExecutionPlan.milvus(
+      spark,
+      limits,
+      queries,
+      tasks,
+      field.fieldID,
+      layout,
+      k,
+      searchMetric,
+      searchMode,
+      namedBatch,
+      takeColumns = outputSchema.nonEmpty
+    )
+    val plan = execution.segments
+    val delivery = execution.delivery
+    val request = SegmentSetSearch.Request(
+      vectorColumn = field.name,
+      layout = layout,
+      fieldId = field.fieldID,
+      nullable = field.nullable,
+      k = k,
+      metric = searchMetric,
+      mode = searchMode,
+      filter = filter,
+      parameters = searchParameters,
+      arrowMaxBytes = read.arrowMaxBytes,
+      predicate = predicate,
+      function = Some(function)
+    )
+    // What the first stage has to get through, so its progress has a
+    // denominator. An indexed search visits part of a segment and Knowhere does
+    // not say how much, so index mode has no pair total and counts segment
+    // searches instead.
+    val comparedPairsTotal =
+      if (searchMode != SearchMode.Exact) 0L
+      else SearchProgress.comparedPairs(queryCount, tasks)
+    logPlan(
+      execution.budget,
+      plan,
+      request,
+      execution.tasks.head,
+      execution.batch,
+      queries,
+      delivery,
+      tasks.size,
+      comparedPairsTotal,
+      execution.segmentK,
+      execution.setK
+    )
+
+    // The take stage runs under Spark's own task slots, so a task's share of
+    // the unmanaged heap is the queries' budget at that concurrency; the merge
+    // stage declares fewer tasks at once when one query's state needs more.
+    val stageHeap = execution.stageHeap
+    val mergeStage = execution.mergeStage
+    val mergePlan = execution.merge
+    val dictionary = spark.sparkContext.broadcast(execution.candidateDictionary)
+    logInfo(
+      s"Merge stage: $queryCount queries x ${plan.sets.size} answers of $k over ${mergePlan.partitions} partitions, " +
+        s"about ${mergePlan.queriesPerPartition} queries a partition; one query retains up to " +
+        s"${mergeStage.footprint.stateBytes} bytes of runs in the reduce-side map against " +
+        s"${mergeStage.executionHeap.bytes} bytes of execution pool a task, and holds " +
+        s"${mergeStage.footprint.temporaryBytes} bytes of its own against ${mergeStage.heap.bytes} bytes of heap a task; " +
+        s"tasksPerExecutor=${mergeStage.running} coresPerTask=${mergeStage.cores}" +
+        (if (mergeStage.profile.isEmpty) " (default slots)"
+         else " (declared)") +
+        s"; batches up to ${mergePlan.maxRuns} runs, " +
+        s"${mergePlan.targetBytes} retained bytes per query before compaction; " +
+        s"candidateWidth=${CandidateBytes.Width}"
+    )
+    val found = candidates(
+      spark,
+      partitions,
+      execution,
+      request,
+      layout,
+      dictionary,
+      metrics
+    )
+    SearchProgress.watch(
+      spark.sparkContext,
+      found,
+      metrics,
+      comparedPairsTotal,
+      index = searchMode == SearchMode.PreferIndex,
+      queryGroups = plan.groups.size,
+      segments = plan.sets.map(_.size).sum
+    )
+    val hits =
+      SearchMerge.merged(
+        spark,
+        found,
+        searchMetric,
+        mergePlan,
+        dictionary,
+        required,
+        mergeStage.profile
+      )
+    if (outputSchema.isEmpty) {
+      val schema = hits.schema
+      hits.queryExecution.toRdd.mapPartitions(rows =>
+        SearchTake.project(rows, schema, outputPositions)
+      )
+    } else
+      take(
+        hits,
+        outputSchema,
+        outputPositions,
+        partitions,
+        request.arrowMaxBytes,
+        metrics,
+        queryCount * k,
+        stageHeap,
+        execution.takePartitioning.get
+      )
+  }
+
+  /** The two lines a planned search leaves in the driver log: the budgets and
+    * how the plan stands against them, then the plan. A native allocation that
+    * fails does not surface as a Java exception, so these lines are what there
+    * is to read afterwards (search-resources.html sections 3.3, 3.4).
+    */
+  private def logPlan(
+      budget: SearchExecutionPlan.Budget,
+      plan: SearchPlan.Plan,
+      request: SegmentSetSearch.Request,
+      policy: SearchExecutionPlan.Task,
+      batch: SearchResources.Choice,
+      queries: SearchQueries.Input,
+      delivery: SearchQueries.Delivery,
+      segments: Int,
+      comparedPairsTotal: Long,
+      segmentK: Int,
+      setK: Int
+  ): Unit = {
+    val needs = plan.needs
+      .map(need =>
+        s"queries kept needs heap=${need.queriesHeap} offheap=${need.queriesOffHeap}, " +
+          s"segments kept needs offheap=${need.segmentsOffHeap}"
+      )
+      .getOrElse("no segments")
+    val over = plan.kept.count(_.exists(_ > plan.capacity))
+    logInfo(
+      s"Search budget: ${budget.resources.describe}; ${budget.concurrency} tasks at once " +
+        s"(${budget.slots} per executor${if (budget.profile.nonEmpty) ", each taking every core"
+          else ""}); " +
+        s"segments ${budget.segments.reason}; queries ${budget.queries.reason}; group ${budget.group.reason}; " +
+        s"collectThreads=${policy.collectThreads} callsInFlight=${policy.callsInFlight}; batch=${batch.reason}; $needs; " +
+        s"kept=${plan.resident}, sets=${plan.sets.size}" +
+        (if (plan.resident == SearchPlan.Resident.Segments)
+           s", capacity=${plan.capacity}, " +
+             (if (over == 0) "no set known to stream"
+              else s"$over sets stream once per query group")
+         else "") +
+        s", ${plan.estimated.size} segments estimated at half the budget"
+    )
+    logInfo(
+      s"Search plan: mode=${request.mode}, metric=${request.metric}, topK=${request.k} " +
+        s"(hits a query: at most $segmentK from a segment, $setK from a set), " +
+        s"queries=${queries.count}, queryBytes=${SearchQueries
+            .bytes(queries.count, request.layout)} " +
+        s"delivered by ${delivery.describe}, " +
+        s"queryGroups=${plan.groups.size}, segments=$segments in " +
+        s"${plan.sets.size} sets x ${plan.queryRanges.size} query ranges = " +
+        s"${plan.tasks} tasks, collectThreads=${policy.collectThreads}, " +
+        s"work=${plan.groups.size.toLong * plan.sets.map(_.size.toLong).sum} segment searches" +
+        (if (comparedPairsTotal > 0L)
+           s" over $comparedPairsTotal distance pairs"
+         else "")
+    )
+  }
+
+  /** The take stage: the columns of `outputSchema` read for the hits alone.
+    * What a take task buffers is every hit of its partition, `hitCount` over
+    * the tasks, against the same heap share as the merge.
+    */
+  private def take(
+      hits: DataFrame,
+      outputSchema: StructType,
+      outputPositions: Seq[Int],
+      partitions: Seq[MilvusInputPartition],
+      arrowMaxBytes: Long,
+      metrics: SearchMetrics,
+      hitCount: Long,
+      stageHeap: SearchResources.Choice,
+      partitioning: SearchTake.Partitioning
+  ): RDD[(Long, InternalRow)] = {
+    logInfo(
+      s"Take stage: $hitCount hits over ${partitioning.partitions} tasks" +
+        s" (${partitioning.buckets} bucket(s) per segment), " +
+        s"about ${hitCount / partitioning.partitions} hits a task at " +
+        s"${SearchTake.HitRowBytes} bytes each against ${stageHeap.bytes} bytes of heap a task"
+    )
+    SearchTake.rows(
+      hits,
+      outputSchema,
+      outputPositions,
+      partitions
+        .map(partition => partition.task.segmentId -> partition)
+        .toMap,
+      arrowMaxBytes,
+      metrics,
+      partitioning
+    )
+  }
+
+  /** The candidates of the first stage: each task searches one segment set over
+    * one query range, reading the groups of its range one at a time.
+    */
+  private def candidates(
+      spark: SparkSession,
+      partitions: Seq[MilvusInputPartition],
+      execution: SearchExecutionPlan.Milvus,
+      request: SegmentSetSearch.Request,
+      layout: VectorLayout,
+      dictionary: Broadcast[CandidateDictionary],
+      metrics: SearchMetrics
+  ): RDD[(Long, Array[Byte])] = {
+    val plan = execution.segments
+    val byId =
+      partitions.map(partition => partition.task.segmentId -> partition).toMap
+    val sets = plan.sets.map(_.map(task => byId(task.segmentId)))
+    val groups = plan.groups
+    val delivered = execution.delivery.groups(
+      spark,
+      groups,
+      request.metric,
+      layout,
+      execution.packingProfile
+    )
+    require(
+      delivered.getNumPartitions == groups.size,
+      s"The packed query set is ${groups.size} groups, not " +
+        s"${delivered.getNumPartitions} partitions"
+    )
+    // Task `index` is set `index / ranges` and range `index % ranges`, which
+    // is how `SearchQueryRanges` numbers its partitions. The task learns its
+    // set from that index before it reads a group, and the sets are
+    // broadcast once for the executor rather than once for each task.
+    val held = spark.sparkContext.broadcast((sets.toVector, execution.tasks))
+    val profile = execution.budget.profile
+    val ranges = plan.queryRanges
+    val rangeCount = ranges.size
+    val rangeSizes = ranges.map(_.size).toVector
+    val searched = new SearchQueryRanges(delivered, sets.size, ranges)
+      .mapPartitionsWithIndex { (index, streamed) =>
+        val set = held.value._1(index / rangeCount)
+        // Only this set's address mapping enters its packers. The full
+        // dictionary remains in the one executor broadcast shared with merge.
+        val encoding = CandidateEncoding(
+          dictionary.value,
+          set.map(_.task.segmentId)
+        )
+        SegmentSetSearch.run(
+          set,
+          request,
+          held.value._2(index),
+          encoding,
+          streamed,
+          rangeSizes(index % rangeCount),
+          metrics
+        )
+      }
+    profile.fold(searched)(searched.withResources)
+  }
+
+}

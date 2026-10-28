@@ -1,0 +1,192 @@
+import java.util.Locale
+
+import sbt._
+import sbt.Keys._
+
+/** Shared settings and build constraints for the 2.0 modules.
+  */
+object Modules {
+
+  /** The JVM's signal-chaining library is preloaded through
+    * `DYLD_INSERT_LIBRARIES` (`libjsig.dylib`) on macOS and `LD_PRELOAD`
+    * (`libjsig.so`) elsewhere; the build only has to name the right environment
+    * variable.
+    */
+  val isMacOS: Boolean =
+    System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("mac")
+
+  /** The environment variable that preloads `jdk`'s signal-chaining library,
+    * and that library.
+    */
+  def signalChaining(jdk: File): (String, File) =
+    if (isMacOS) "DYLD_INSERT_LIBRARIES" -> jdk / "lib" / "libjsig.dylib"
+    else "LD_PRELOAD" -> jdk / "lib" / "libjsig.so"
+
+  val checkNoSpark = taskKey[Unit](
+    "The core layer must not depend on Spark: org.apache.spark in a source file fails the build"
+  )
+
+  /** Comments may explain old Spark dependencies without introducing one. */
+  private def stripComments(source: String): String =
+    source
+      .replaceAll("(?s)/\\*.*?\\*/", "")
+      .replaceAll("(?m)//.*$", "")
+
+  /** Reject Spark references in the shared modules before compilation. */
+  val noSparkImports: Seq[Setting[_]] = Seq(
+    checkNoSpark := {
+      val log = streams.value.log
+      val offenders = (Compile / unmanagedSources).value.filter { f =>
+        val n = f.getName
+        (n.endsWith(".scala") || n.endsWith(".java")) &&
+        stripComments(IO.read(f)).contains("org.apache.spark")
+      }
+      if (offenders.nonEmpty) {
+        offenders.foreach { f =>
+          log.error(
+            s"${name.value}: the core layer must not depend on Spark, but $f mentions org.apache.spark"
+          )
+        }
+        sys.error(
+          s"${name.value} has ${offenders.size} Spark dependencies"
+        )
+      }
+    },
+    Compile / compile := (Compile / compile).dependsOn(checkNoSpark).value
+  )
+
+  /** Layer 2's compile baseline, common dependencies and no-Spark check. */
+  val sparkFreeModuleSettings: Seq[Setting[_]] = Seq(
+    crossScalaVersions := Versions.sharedScalas,
+    scalacOptions ++= Seq("-release", Versions.sharedJavaRelease),
+    javacOptions ++= Seq("--release", Versions.sharedJavaRelease),
+    libraryDependencies ++= Seq(
+      "org.scala-lang.modules" %% "scala-collection-compat" % Versions.scalaCollectionCompat,
+      // The core logging facade is built on slf4j; at runtime it uses the copy
+      // Spark ships.
+      "org.slf4j" % "slf4j-api" % Versions.slf4j % "provided"
+    )
+  ) ++ noSparkImports
+
+  /** Knowhere's layer-1 module is plain Java, so its artifact carries no Scala
+    * suffix. Storage compiles upstream Scala sources for each shared Scala
+    * line.
+    */
+  val javaOnly: Seq[Setting[_]] = Seq(
+    crossPaths := false,
+    autoScalaLibrary := false,
+    javacOptions ++= Seq("--release", Versions.sharedJavaRelease)
+  )
+
+  /** Compile settings for one Spark line's Java and Scala versions. */
+  def perLine(l: Versions.SparkLine): Seq[Setting[_]] = Seq(
+    crossScalaVersions := l.scalas,
+    scalacOptions ++= Seq("-release", l.javaRelease),
+    javacOptions ++= Seq("--release", l.javaRelease)
+  )
+
+  /** Only these shim roots enter compilation; formatting covers every retained
+    * root.
+    */
+  def sparkSources(line: Versions.SparkLine): Seq[Setting[_]] = {
+    import org.scalafmt.sbt.ScalafmtPlugin.autoImport._
+    val mainShims = line.id match {
+      case "3.5"         => Seq("spark-3.5", "spark-3.5-4.1")
+      case "4.0" | "4.1" => Seq("spark-4.0-4.1", "spark-3.5-4.1")
+      case "4.2"         => Seq("spark-4.2")
+    }
+    Seq(
+      Compile / unmanagedSourceDirectories ++= mainShims.map(name =>
+        baseDirectory.value / "src" / "main" / "scala-shims" / name
+      ),
+      Test / unmanagedSourceDirectories ++= (if (line.id == "3.5") Seq.empty
+                                             else
+                                               Seq(
+                                                 baseDirectory.value / "src" / "test" / "scala-shims" / "spark-4.0-4.2"
+                                               )),
+      // scalafmt reads its source list separately from its directory list.
+      // Enumerate unselected shims here without adding them to compilation.
+      Compile / scalafmt / unmanagedSources :=
+        ((Compile / unmanagedSources).value ++
+          ((baseDirectory.value / "src" / "main" / "scala-shims") ** "*.scala").get).distinct,
+      Test / scalafmt / unmanagedSources :=
+        ((Test / unmanagedSources).value ++
+          ((baseDirectory.value / "src" / "test" / "scala-shims") ** "*.scala").get).distinct,
+      Compile / scalafmt / unmanagedSourceDirectories ++=
+        ((baseDirectory.value / "src" / "main" / "scala-shims") * "*").get
+          .filter(_.isDirectory),
+      Test / scalafmt / unmanagedSourceDirectories ++=
+        ((baseDirectory.value / "src" / "test" / "scala-shims") * "*").get
+          .filter(_.isDirectory)
+    )
+  }
+
+  /** Keep standalone core's Jackson family aligned. The Spark module relies on
+    * its distribution's own Jackson set and excludes it from bundles.
+    */
+  val jacksonPin: Seq[Setting[_]] = Seq(
+    dependencyOverrides ++= Seq(
+      Dependencies.jacksonDatabind,
+      Dependencies.jacksonScala,
+      "com.fasterxml.jackson.core" % "jackson-core" % Versions.jackson,
+      "com.fasterxml.jackson.core" % "jackson-annotations" % Versions.jackson,
+      "com.fasterxml.jackson.datatype" % "jackson-datatype-jsr310" % Versions.jackson
+    )
+  )
+
+  /** Test JVM settings for Arrow access and the selected native libraries. */
+  def nativeTest: Seq[Setting[_]] = Seq(
+    fork := true,
+    // Fixtures are addressed relative to the repository root.
+    baseDirectory := (ThisBuild / baseDirectory).value,
+    parallelExecution := true,
+    logBuffered := false,
+    javaOptions := {
+      val root = (ThisBuild / baseDirectory).value
+      val nativeDir = (if (NativeBundle.selected.nonEmpty)
+                         root / "target" / "empty-native-path"
+                       else
+                         root / "native" / "storage" / "src" / "main" / "resources" / "native").getAbsolutePath
+      Seq(
+        "-Xss2m",
+        "-Xmx4g",
+        s"-Djava.library.path=$nativeDir",
+        "-Dlog4j2.configurationFile=log4j2.properties",
+        "-Dlog4j2.debug=false",
+        "--add-opens=java.base/java.nio=ALL-UNNAMED",
+        "--add-opens=java.base/java.lang=ALL-UNNAMED",
+        "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
+        "--add-opens=java.base/java.util=ALL-UNNAMED",
+        "--add-opens=java.base/sun.security.action=ALL-UNNAMED",
+        // Spark 3.5 on JDK 17+ reaches sun.nio.ch.DirectBuffer from
+        // StorageUtils and these others from its own launcher list.
+        "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
+        "--add-opens=java.base/sun.nio.cs=ALL-UNNAMED",
+        "--add-opens=java.base/sun.util.calendar=ALL-UNNAMED",
+        "--add-opens=java.base/java.io=ALL-UNNAMED",
+        "--add-opens=java.base/java.net=ALL-UNNAMED",
+        "--add-opens=java.base/java.lang.reflect=ALL-UNNAMED",
+        "--add-opens=java.base/java.util.concurrent=ALL-UNNAMED",
+        "--add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED"
+      )
+    },
+    // LD_LIBRARY_PATH is read by the Linux loader, DYLD_LIBRARY_PATH by dyld;
+    // setting both is harmless on either platform. Each forked test JVM
+    // preloads its own JDK's signal-chaining library: the sbt process cannot
+    // carry that variable on macOS, where the system shell launching sbt
+    // refuses an inserted library of another architecture.
+    envVars := {
+      val jdk = javaHome.value.getOrElse(file(sys.props("java.home")))
+      val (preload, signalLibrary) = signalChaining(jdk)
+      val libraryPaths =
+        if (NativeBundle.selected.nonEmpty)
+          Map("LD_LIBRARY_PATH" -> "", "LD_BIND_NOW" -> "1")
+        else {
+          val nativeDir =
+            ((ThisBuild / baseDirectory).value / "native" / "storage" / "src" / "main" / "resources" / "native").getAbsolutePath
+          Map("LD_LIBRARY_PATH" -> nativeDir, "DYLD_LIBRARY_PATH" -> nativeDir)
+        }
+      libraryPaths + (preload -> signalLibrary.getAbsolutePath)
+    }
+  )
+}

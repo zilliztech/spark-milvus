@@ -1,0 +1,172 @@
+{
+  "dimension": 2,
+  "rowTimestamp": 100,
+  "deleteTimestamp": 200,
+  "segments": [
+    {
+      "id": 30,
+      "deletedIds": [
+        3002
+      ],
+      "metric": "L2",
+      "rows": [
+        {
+          "id": 3000,
+          "vector": [
+            0.0,
+            0.0
+          ],
+          "category": 0
+        },
+        {
+          "id": 3001,
+          "vector": [
+            1.0,
+            0.0
+          ],
+          "category": null
+        },
+        {
+          "id": 3002,
+          "vector": [
+            2.0,
+            0.0
+          ],
+          "category": 1
+        },
+        {
+          "id": 3003,
+          "vector": [
+            3.0,
+            0.0
+          ],
+          "category": 1
+        },
+        {
+          "id": 3004,
+          "vector": [
+            4.0,
+            0.0
+          ],
+          "category": 1
+        },
+        {
+          "id": 3005,
+          "vector": [
+            5.0,
+            0.0
+          ],
+          "category": 1
+        },
+        {
+          "id": 3006,
+          "vector": [
+            6.0,
+            0.0
+          ],
+          "category": 1
+        },
+        {
+          "id": 3007,
+          "vector": [
+            7.0,
+            0.0
+          ],
+          "category": 1
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "deletedIds": [
+        3105
+      ],
+      "metric": "L2",
+      "rows": [
+        {
+          "id": 3100,
+          "vector": [
+            0.25,
+            1.0
+          ],
+          "category": 0
+        },
+        {
+          "id": 3101,
+          "vector": [
+            1.25,
+            1.0
+          ],
+          "category": 1
+        },
+        {
+          "id": 3102,
+          "vector": [
+            2.25,
+            1.0
+          ],
+          "category": 0
+        },
+        {
+          "id": 3103,
+          "vector": [
+            3.25,
+            1.0
+          ],
+          "category": 1
+        },
+        {
+          "id": 3104,
+          "vector": [
+            4.25,
+            1.0
+          ],
+          "category": 0
+        },
+        {
+          "id": 3105,
+          "vector": [
+            5.25,
+            1.0
+          ],
+          "category": 1
+        },
+        {
+          "id": 3106,
+          "vector": [
+            6.25,
+            1.0
+          ],
+          "category": 0
+        },
+        {
+          "id": 3107,
+          "vector": [
+            7.25,
+            1.0
+          ],
+          "category": 1
+        }
+      ]
+    }
+  ],
+  "survivingIds": [
+    3000,
+    3001,
+    3003,
+    3004,
+    3005,
+    3006,
+    3007,
+    3100,
+    3101,
+    3102,
+    3103,
+    3104,
+    3106,
+    3107
+  ],
+  "nullableCategoryIds": [
+    3001
+  ]
+}
