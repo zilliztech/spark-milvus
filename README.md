@@ -212,7 +212,7 @@ docker build -t spark-milvus .  # current architecture, Spark 4.0 local read bun
 
 | Build argument | Default | Meaning |
 |---|---|---|
-| `GIT_BRANCH` | `unknown` | Goes into the version string |
+| `GIT_BRANCH` | `unknown` | Goes into the version string, except on a release branch |
 | `NATIVE_BUNDLE` | empty | Prebuilt unified Linux JAR inside the build context, with its checksum sidecar |
 | `NATIVE_JOBS` | `50` | Native build concurrency, from 1 to 50 |
 | `NATIVE_BUILD_OPTIONS` | empty | Unified OSS source build options, including `--conan-lock` |
@@ -228,7 +228,9 @@ The [integration chart](deploy/helm/spark-milvus-integration/README.md) only run
 V3 reads with an existing Secret; it does not deploy or set up a Milvus service.
 
 The version is derived as `2.0.0-{branch}-{arch}-SNAPSHOT`, for example
-`2.0.0-release-2.0-amd64-SNAPSHOT` on the `release-2.0` branch.
+`2.0.0-main-amd64-SNAPSHOT`. A `release-{major}.{minor}` branch names the line
+it releases, so its snapshots drop the branch: `release-2.0` builds
+`2.0.0-amd64-SNAPSHOT`.
 
 Pull the jar back out of the image:
 

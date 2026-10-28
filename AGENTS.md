@@ -19,8 +19,8 @@ and legacy storage compatibility are outside this repository's scope.
 
 The 1.x line stopped at tag `v1.6.0` and is no longer maintained: it takes no
 fixes. The 2.0 line is a rewrite developed on `main` and released from
-`release-2.0`, versioned `2.0.0-{branch}-{arch}-SNAPSHOT`. Everything below
-describes 2.0.
+`release-2.0`; snapshots are versioned `2.0.0-{branch}-{arch}-SNAPSHOT`, and
+`2.0.0-{arch}-SNAPSHOT` on the release branch. Everything below describes 2.0.
 
 ## The three public layers
 
