@@ -100,14 +100,14 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
   }
 
   test(
-    "a task names the delete files it applies: the collection's L0 files, its partition's, then its own"
+    "a task carries its resolved L0 files followed by its own delete files"
   ) {
     val listing = DeleteFileListing(
       v3BySegment = Map(30L -> Seq(log(3)), 31L -> Seq(log(4))),
-      inheritedByPartition = Map(
-        -1L -> Seq(log(1)),
-        20L -> Seq(log(2)),
-        21L -> Seq(log(9))
+      inheritedBySegment = Map(
+        30L -> Seq(log(1), log(2)),
+        31L -> Seq(log(1), log(2)),
+        99L -> Seq(log(9))
       ),
       v3ReadVersions = Map.empty
     )
@@ -135,7 +135,7 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
   test("a segment with no delete file of any kind carries DeleteSource.None") {
     val listing = DeleteFileListing(
       v3BySegment = Map.empty,
-      inheritedByPartition = Map(21L -> Seq(log(9))), // another partition
+      inheritedBySegment = Map(99L -> Seq(log(9))), // another segment
       v3ReadVersions = Map.empty
     )
     val plan = ReadPlan.of(
@@ -150,7 +150,7 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
   test("applyDeletes=false ships no delete file") {
     val listing = DeleteFileListing(
       v3BySegment = Map(30L -> Seq(log(3)), 31L -> Seq(log(4))),
-      inheritedByPartition = Map(20L -> Seq(log(2))),
+      inheritedBySegment = Map(30L -> Seq(log(2)), 31L -> Seq(log(2))),
       v3ReadVersions = Map.empty
     )
     val plan = ReadPlan.of(

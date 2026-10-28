@@ -13,15 +13,17 @@ final case class Segment(
     layout: SegmentLayout,
     deletes: DeleteFiles,
     indexes: SegmentIndexes = SegmentIndexes.Unknown,
-    statistics: SegmentStatistics = SegmentStatistics.Unknown
+    statistics: SegmentStatistics = SegmentStatistics.Unknown,
+    isDeleteOnly: Boolean = false,
+    channelName: String = ""
 ) {
 
-  /** False for a delete-only (L0) segment, which has no column groups. */
-  def hasData: Boolean = layout match {
+  /** L0 segments carry only deletes, including when they have a V3 manifest. */
+  def hasData: Boolean = !isDeleteOnly && (layout match {
     case SegmentLayout.Manifest(_, _) => true
     case physical: SegmentLayout.PhysicalColumnGroups =>
       physical.groups.nonEmpty
-  }
+  })
 
   /** The delete files a source listed; empty when there are none or when they
     * are inside the manifest.

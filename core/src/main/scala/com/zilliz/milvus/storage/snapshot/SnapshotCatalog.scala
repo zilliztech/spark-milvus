@@ -338,7 +338,12 @@ object SnapshotCatalog extends Logging {
               if (available.nonEmpty) SegmentIndexes.Available(available)
               else SegmentIndexes.Unindexed
           }
-          segment.copy(rows = Some(entry.numOfRows), indexes = indexes)
+          segment.copy(
+            rows = Some(entry.numOfRows),
+            indexes = indexes,
+            isDeleteOnly = entry.segmentLevel == 1L,
+            channelName = entry.channelName
+          )
       }
     }
     snapshot.copy(

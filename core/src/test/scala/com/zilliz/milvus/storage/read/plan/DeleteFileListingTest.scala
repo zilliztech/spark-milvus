@@ -160,6 +160,103 @@ class DeleteFileListingTest extends AnyFunSuite with Matchers {
     }
   }
 
+  test(
+    "V3 L0 deletes follow source channel and partition after segment pruning"
+  ) {
+    withDir { dir =>
+      // (id, partition, channel, delete-only)
+      val segments = Seq(
+        (30L, 20L, "a", false),
+        (31L, 21L, "a", false),
+        (32L, 20L, "b", false),
+        (40L, 20L, "a", true),
+        (41L, -1L, "a", true),
+        (42L, 20L, "b", true)
+      )
+      val items = segments.map { case (id, partition, _, l0) =>
+        val base = s"files/insert_log/10/$partition/$id"
+        writeManifest(
+          dir,
+          base,
+          1L,
+          if (l0) Seq((s"delete-$id", 0, 1L)) else Seq.empty
+        )
+        ManifestItemJson(id, s"""{"ver":1,"base_path":"$base"}""")
+      }
+      val initial = snapshotOf(v3 = items)
+      val snapshot = initial.copy(
+        partitionIds = Seq(20L, 21L),
+        segments = initial.segments.zip(segments).map {
+          case (segment, (_, _, channel, l0)) =>
+            segment.copy(channelName = channel, isDeleteOnly = l0)
+        }
+      )
+      val store = new LocalObjectStore(dir.toString)
+      def list(value: Snapshot) =
+        DeleteFileListing.of(value, true, "", store).fold(throw _, identity)
+      def keys(listing: DeleteFileListing, id: Long) =
+        listing.filesFor(id).map(_.logPath.split('/').last).toSet
+      val listed = list(snapshot)
+      keys(listed, 30L) shouldBe Set("delete-40", "delete-41")
+      keys(listed, 31L) shouldBe Set("delete-41")
+      keys(listed, 32L) shouldBe Set("delete-42")
+      val narrowed = snapshot.narrow(Seq.empty, Seq(30L))
+      keys(list(narrowed), 30L) shouldBe Set("delete-40", "delete-41")
+      val pruned = snapshot.retainDataSegments(Set(30L))
+      keys(list(pruned), 30L) shouldBe Set("delete-40", "delete-41")
+      ReadPlan
+        .of(snapshot, _ => Map.empty, applyDeletes = true, deletes = listed)
+        .specs
+        .map(_.segmentId) shouldBe Seq(30L, 31L, 32L)
+      val disabled =
+        DeleteFileListing.of(snapshot, false, "", store).fold(throw _, identity)
+      disabled.inheritedBySegment shouldBe empty
+      val missingChannel = snapshot.copy(segments =
+        snapshot.segments.map(_.copy(channelName = ""))
+      )
+      DeleteFileListing.of(missingChannel, true, "", store).isLeft shouldBe true
+    }
+  }
+
+  test("disabled deletes do not resolve an unpinned L0 manifest") {
+    val items = Seq(
+      ManifestItemJson(
+        30L,
+        """{"ver":3,"base_path":"files/insert_log/10/20/30"}"""
+      ),
+      ManifestItemJson(41L, "files/insert_log/10/-1/41")
+    )
+    Seq((schema, false), (schemaWithoutPrimaryKey, true)).foreach {
+      case (collection, applyDeletes) =>
+        val initial = snapshotOf(v3 = items, collectionSchema = collection)
+        val snapshot = initial.copy(segments =
+          initial.segments.map(segment =>
+            segment.copy(
+              isDeleteOnly = segment.id == 41L,
+              channelName = "source"
+            )
+          )
+        )
+        DeleteFileListing.requiresStore(snapshot, applyDeletes) shouldBe false
+        val listing = DeleteFileListing
+          .of(
+            snapshot,
+            applyDeletes,
+            "",
+            new FailingObjectStore(
+              new IllegalStateException("must not be opened")
+            )
+          )
+          .fold(throw _, identity)
+        listing.v3ReadVersions shouldBe Map(30L -> 3L)
+        listing.inheritedBySegment shouldBe empty
+        val plan =
+          ReadPlan.of(snapshot, _ => Map.empty, applyDeletes, deletes = listing)
+        plan.specs.map(_.segmentId) shouldBe Seq(30L)
+        plan.specs.head.readVersionOrLatest shouldBe 3L
+    }
+  }
+
   test("a V3 delete-log endpoint URI becomes a bucket-relative key") {
     withDir { dir =>
       val base = "files/insert_log/10/20/30"

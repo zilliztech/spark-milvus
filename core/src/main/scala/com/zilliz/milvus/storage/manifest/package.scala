@@ -25,6 +25,7 @@ package com.zilliz.milvus.storage
   * (format 4) and v3.0.4 (format 6 with the V4 writer schema). The snapshot
   * reader validates its required fields and consumes exactly one record.
   * Unsupported snapshot versions, missing fields, incompatible types and
-  * damaged framing fail explicitly.
+  * damaged framing fail explicitly. Segment records retain source channel and
+  * L0 role for delete planning.
   */
 package object manifest

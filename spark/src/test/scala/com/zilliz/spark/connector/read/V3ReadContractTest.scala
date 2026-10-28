@@ -1,12 +1,20 @@
 package com.zilliz.spark.connector.read
 
+import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.{Files, Path}
-import java.util.Comparator
+import java.util.{Collections, Comparator}
 import scala.jdk.CollectionConverters._
 
 import com.fasterxml.jackson.databind.node.ObjectNode
 import com.fasterxml.jackson.databind.ObjectMapper
+import org.apache.avro.file.{DataFileStream, DataFileWriter}
+import org.apache.avro.generic.{
+  GenericDatumReader,
+  GenericDatumWriter,
+  GenericRecord
+}
+import org.apache.avro.io.{DecoderFactory, EncoderFactory}
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanHelper
 import org.apache.spark.sql.functions.call_function
@@ -16,7 +24,10 @@ import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.jni.storage.NativeStorageLibrary
 import com.zilliz.milvus.jni.vector.NativeVectorLibrary
-import com.zilliz.milvus.storage.manifest.SnapshotSegmentFixture
+import com.zilliz.milvus.storage.manifest.{
+  SnapshotSegmentFixture,
+  SnapshotSegmentSchema
+}
 import com.zilliz.spark.connector.extensions.{
   MilvusNearestByJoinExec,
   MilvusReadSparkSessionExtensions,
@@ -106,6 +117,23 @@ class V3ReadContractTest
     Files.write(path, mapper.writeValueAsBytes(json))
   }
 
+  private def segmentMetadata(root: Path, segment: Long)(
+      change: GenericRecord => Unit
+  ): Unit = {
+    val path = root.resolve(s"files/snapshots/10/manifests/1/$segment.avro")
+    val schema = SnapshotSegmentSchema.schemaFor(4)
+    val record = new GenericDatumReader[GenericRecord](schema).read(
+      null,
+      DecoderFactory.get().binaryDecoder(Files.readAllBytes(path), null)
+    )
+    change(record)
+    val bytes = new ByteArrayOutputStream()
+    val encoder = EncoderFactory.get().directBinaryEncoder(bytes, null)
+    new GenericDatumWriter[GenericRecord](schema).write(record, encoder)
+    encoder.flush()
+    Files.write(path, bytes.toByteArray)
+  }
+
   private def damage(root: Path, key: String, missing: Boolean): Unit =
     if (missing) Files.delete(root.resolve(key))
     else
@@ -139,7 +167,8 @@ class V3ReadContractTest
   private def searchIds(
       base: DataFrame,
       mode: String,
-      indexedSegments: Long
+      indexedSegments: Long,
+      segments: Long = 2L
   ): Seq[Long] = {
     val result = search(base, mode).select("id")
     val found = result.collect().map(_.getLong(0)).toSeq.sorted
@@ -154,7 +183,7 @@ class V3ReadContractTest
     assert(
       execution
         .metrics(NearestByMetrics.ExactSegments)
-        .value == 2L - indexedSegments
+        .value == segments - indexedSegments
     )
     assert(execution.metrics(SearchMetrics.KnowhereCalls).value > 0L)
     if (indexedSegments > 0L)
@@ -180,6 +209,109 @@ class V3ReadContractTest
       assert(ids(frame.filter("category IS NULL")) == Seq(3001L))
       assert(searchIds(frame, "exact", 0L) == Seq(3000L, 3001L, 3100L))
       assert(searchIds(frame, "approx", 2L) == Seq(3000L, 3001L, 3100L))
+    }
+  }
+
+  test(
+    "L0 deletes respect partition and channel scope across native reads and narrowed searches"
+  ) {
+    for (
+      (partition, channel, applies) <- Seq(
+        (-1L, "source-channel", true),
+        (20L, "source-channel", true),
+        (21L, "source-channel", false),
+        (-1L, "other-channel", false)
+      )
+    ) withClue(s"L0 partition=$partition channel=$channel: ") {
+      fixture { (root, options) =>
+        val l0Base = s"files/insert_log/10/$partition/41"
+        val l0Avro = "files/snapshots/10/manifests/1/41.avro"
+        val l0Manifest = root.resolve(s"$l0Base/_metadata/manifest-1.avro")
+        Files.createDirectories(l0Manifest.getParent)
+        val reader = new DataFileStream[GenericRecord](
+          new ByteArrayInputStream(Files.readAllBytes(root.resolve(manifest))),
+          new GenericDatumReader[GenericRecord]()
+        )
+        val record =
+          try reader.next()
+          finally reader.close()
+        // Reuse the frozen delta, with no column groups in the L0 manifest.
+        record.put("column_groups", Collections.emptyList[GenericRecord]())
+        val writer = new DataFileWriter[GenericRecord](
+          new GenericDatumWriter[GenericRecord](record.getSchema)
+        )
+        writer.create(record.getSchema, l0Manifest.toFile)
+        try writer.append(record)
+        finally writer.close()
+        val l0Delete = root.resolve(s"$l0Base/_delta/delete.parquet")
+        Files.createDirectories(l0Delete.getParent)
+        Files.copy(root.resolve(delete), l0Delete)
+        Files.write(
+          root.resolve(l0Avro),
+          SnapshotSegmentFixture.encode(
+            segmentId = 41L,
+            partitionId = partition,
+            rows = 0L,
+            segmentLevel = 1L,
+            channelName = channel
+          )
+        )
+        Seq(30L, 31L).foreach { segment =>
+          segmentMetadata(root, segment)(
+            _.put("channel_name", "source-channel")
+          )
+        }
+        metadata(root) { json =>
+          val items = json.withArray("storagev2_manifest_list")
+          items.elements().asScala.foreach { item =>
+            if (item.get("segmentID").asLong() == 30L) {
+              // Version 1 has no deletes: only a matching L0 removes PK 3002.
+              val value = item.asInstanceOf[ObjectNode]
+              value.put(
+                "manifest",
+                value.get("manifest").asText().replace("\"ver\":2", "\"ver\":1")
+              )
+            }
+          }
+          items
+            .addObject()
+            .put("segmentID", 41L)
+            .put("manifest", s"""{"ver":1,"base_path":"$l0Base"}""")
+          json.withArray("manifest_list").add(l0Avro)
+        }
+        assert(
+          ids(read(options + ("milvus.read.apply.deletes" -> "false"))) ==
+            ((3000L until 3008L) ++ (3100L until 3108L))
+        )
+        val expectedAll = if (applies) liveIds else (liveIds :+ 3002L).sorted
+        val expectedSegment = (3000L until 3008L)
+          .filterNot(id => applies && id == 3002L)
+        val expectedHits = if (applies) Seq(3000L) else Seq(3000L, 3002L)
+        Seq(true, false).foreach { columnar =>
+          val readOptions =
+            options + ("milvus.read.columnar" -> columnar.toString)
+          assert(ids(read(readOptions)) == expectedAll)
+          // Both restrictions exclude the L0 source itself. Its applicable
+          // deletes must already have been attached to the retained data task.
+          val narrowed = read(
+            readOptions ++ Map(
+              "milvus.partitions" -> "20",
+              "milvus.segments" -> "30"
+            )
+          )
+          assert(ids(narrowed) == expectedSegment)
+          Seq("exact", "approx").foreach { mode =>
+            assert(
+              searchIds(
+                narrowed.filter("id IN (3000, 3002)"),
+                mode,
+                indexedSegments = if (mode == "approx") 1L else 0L,
+                segments = 1L
+              ) == expectedHits
+            )
+          }
+        }
+      }
     }
   }
 

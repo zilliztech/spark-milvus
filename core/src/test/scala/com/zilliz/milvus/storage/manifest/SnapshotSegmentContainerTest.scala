@@ -21,6 +21,7 @@ class SnapshotSegmentContainerTest extends AnyFunSuite with Matchers {
     val schema = SnapshotSegmentSchema.schemaFor(4)
     val bytes = SnapshotSegmentFixture.encode(
       indexes = Vector(SnapshotSegmentFixture.index()),
+      channelName = "source-channel",
       statsLogs = Seq(
         FieldBinlogEntry(100L, Seq(BinlogEntry(9L, "files/stats_log/9", 2L)))
       )
@@ -86,6 +87,7 @@ class SnapshotSegmentContainerTest extends AnyFunSuite with Matchers {
     entry.segmentId shouldBe 30L
     entry.storageVersion shouldBe 3L
     entry.numOfRows shouldBe 2L
+    entry.channelName shouldBe "source-channel"
     entry.indexFiles shouldBe Some(Vector(SnapshotSegmentFixture.index()))
     entry.statsLogFiles shouldBe Seq(
       FieldBinlogEntry(100L, Seq(BinlogEntry(9L, "files/stats_log/9", 2L)))

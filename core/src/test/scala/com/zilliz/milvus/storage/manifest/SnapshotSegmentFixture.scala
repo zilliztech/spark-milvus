@@ -44,13 +44,15 @@ object SnapshotSegmentFixture {
       storageVersion: Long = 3L,
       indexes: Vector[IndexFileEntry] = Vector.empty,
       statsLogs: Seq[FieldBinlogEntry] = Seq.empty,
-      segmentLevel: Long = 2L
+      segmentLevel: Long = 2L,
+      channelName: String = ""
   ): Array[Byte] = {
     val schema = SnapshotSegmentSchema.schemaFor(version)
     val record = empty(schema).asInstanceOf[GenericRecord]
     record.put("segment_id", segmentId)
     record.put("partition_id", partitionId)
     record.put("segment_level", segmentLevel)
+    record.put("channel_name", channelName)
     record.put("num_of_rows", rows)
     record.put("storage_version", storageVersion)
     val fieldBinlogSchema =

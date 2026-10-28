@@ -52,15 +52,15 @@ object ReadPlan extends Logging {
       collection.mutable.Map.empty[Int, Map[String, String]]
     def propertiesFor(version: Int): Map[String, String] =
       propertiesByVersion.getOrElseUpdate(version, properties(version))
-    def deleteSourceFor(segmentId: Long, partitionId: Long): DeleteSource = {
+    def deleteSourceFor(segmentId: Long): DeleteSource = {
       val files =
-        if (applyDeletes) deletes.filesFor(segmentId, partitionId)
+        if (applyDeletes) deletes.filesFor(segmentId)
         else Seq.empty
       if (files.isEmpty) DeleteSource.None else DeleteSource.Files(files)
     }
     val schemaBytes = snapshot.schemaBytes
 
-    val v3Tasks = snapshot.v3Segments.map { seg =>
+    val v3Tasks = snapshot.v3Segments.filter(_.hasData).map { seg =>
       val (basePath, listedVersion) = seg.layout match {
         case SegmentLayout.Manifest(path, version) => (path, version)
         case _ =>
@@ -85,7 +85,7 @@ object ReadPlan extends Logging {
         schemaBytes = schemaBytes,
         properties = propertiesFor(3),
         neededFieldIds = neededFieldIds,
-        deletes = deleteSourceFor(seg.id, seg.partitionId),
+        deletes = deleteSourceFor(seg.id),
         indexes = seg.indexes,
         // A snapshot that lists manifests alone states no row count; the
         // manifest read for the delete files states one.

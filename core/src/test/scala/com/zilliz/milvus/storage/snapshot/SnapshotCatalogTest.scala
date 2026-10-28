@@ -243,6 +243,62 @@ class SnapshotCatalogTest extends AnyFunSuite {
   }
 
   test(
+    "V3 L0 roles survive materialization and narrowing"
+  ) {
+    withDir { dir =>
+      val l0Key = "files/snapshots/10/manifests/1/41.avro"
+      writeAvro(
+        dir,
+        avroKey,
+        SnapshotSegmentFixture.encode(
+          channelName = "channel-a"
+        )
+      )
+      writeAvro(
+        dir,
+        l0Key,
+        SnapshotSegmentFixture.encode(
+          segmentId = 41L,
+          partitionId = -1L,
+          rows = 0L,
+          segmentLevel = 1L,
+          channelName = "channel-a"
+        )
+      )
+      write(
+        dir,
+        "snapshot.json",
+        snapshotJson(
+          "with-l0",
+          100L,
+          Seq(
+            30L -> "files/insert_log/10/20/30",
+            41L -> "files/insert_log/10/-1/41"
+          )
+        ).replace(
+          "\"manifest_list\": []",
+          s"\"manifest_list\": [\"$avroKey\",\"$l0Key\"]"
+        )
+      )
+      val snapshot = catalog(dir).read("snapshot.json")
+      assert(snapshot.dataSegments.map(_.id) == Seq(30L))
+      assert(snapshot.deleteOnlySegments.map(_.id) == Seq(41L))
+      assert(snapshot.deleteOnlySegments.head.partitionId == -1L)
+      assert(snapshot.dataSegments.head.channelName == "channel-a")
+      val narrowed = snapshot.narrow(Seq.empty, Seq(30L))
+      assert(narrowed.segments.map(_.id) == Seq(30L, 41L))
+      assert(
+        snapshot.retainDataSegments(Set(30L)).segments.map(_.id) == Seq(
+          30L,
+          41L
+        )
+      )
+      val plan = ReadPlan.of(narrowed, _ => Map.empty, applyDeletes = false)
+      assert(plan.specs.map(_.segmentId) == Seq(30L))
+    }
+  }
+
+  test(
     "legacy L0 Avro entries are rejected by the V3 reader"
   ) {
     withDir { dir =>

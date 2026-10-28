@@ -1914,7 +1914,10 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
       ),
       DeleteFileListing(
         v3BySegment = Map(30L -> Seq(log(3))),
-        inheritedByPartition = Map(-1L -> Seq(log(1)), 20L -> Seq(log(2))),
+        inheritedBySegment = Map(
+          30L -> Seq(log(1), log(2)),
+          31L -> Seq(log(1))
+        ),
         v3ReadVersions = Map.empty
       )
     )
