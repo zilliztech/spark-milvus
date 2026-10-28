@@ -40,8 +40,9 @@ class WorkflowGateTest(unittest.TestCase):
                 self.assertNotIn("continue-on-error", check)
                 if name.endswith("native"):
                     self.assertIn("--native-bundle", check["run"])
-                    self.assertEqual(job["if"],
-                                     "github.event_name != 'pull_request' || inputs.full_validation == true")
+                    self.assertEqual(job["if"], "(github.event_name != 'pull_request' && "
+                                                "github.event_name != 'merge_group') || "
+                                                "inputs.full_validation == true")
                 else:
                     self.assertNotIn("if", job)
         aggregate = jobs["build-and-test"]
@@ -327,7 +328,9 @@ class WorkflowGateTest(unittest.TestCase):
                      "&& github.run_id || github.event.pull_request.number || github.ref }}",
             "cancel-in-progress": "true",
         })
-        condition = "github.event_name != 'pull_request' || inputs.full_validation == true"
+        condition = ("(github.event_name != 'pull_request' && github.event_name != 'merge_group') "
+                     "|| inputs.full_validation == true")
+        self.assertEqual(ci["on"]["merge_group"]["branches"], ci["on"]["pull_request"]["branches"])
         self.assertEqual(ci["jobs"]["artifacts"]["with"]["build_native"], "${{ " + condition + " }}")
         self.assertEqual(ci["jobs"]["artifacts"]["with"]["native_source_run_id"],
                          "${{ inputs.native_source_run_id }}")

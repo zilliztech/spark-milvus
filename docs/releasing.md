@@ -295,10 +295,17 @@ a fixed-input read Job with an existing two-identity Secret.
 
 | Event | Required work |
 |---|---|
-| Pull request to `main` or a `{major}.{minor}` release branch such as `2.0` | Formatting, Versions-derived five-combination source/POM/source-JAR checks, shared unit tests, selected-line aggregate coverage, clean checks, scripts and Helm; existing JVM/thin exports |
+| Pull request to `main` or a `{major}.{minor}` release branch such as `2.0`, and its merge queue entry | Formatting, Versions-derived five-combination source/POM/source-JAR checks, shared unit tests, selected-line aggregate coverage, clean checks, scripts and Helm; existing JVM/thin exports |
 | Push to those branches or manual CI dispatch | The checks above, native builds, mandatory read/search/Arrow/Connect suites, isolated object-storage reads, candidate verification, all eight consumer jobs, and the Spark 4.0 assembly with a local image build on both Linux architectures |
 | `v2.x.y-central-test.<digits>` tag | Full CI, signed `USER_MANAGED` upload, Central validation, authenticated byte verification, one consumer job and deployment deletion; no public release |
 | Other accepted `v2.*` release tag | Full CI explicitly enabled, nonempty validated candidate, controlled publication, public Central consumer check, then the Spark 4.0 image on both Linux architectures and its multi-architecture tag |
+
+A repository ruleset protects `main` and every `{major}.{minor}` branch with no
+bypass, administrators included: one approving review, signed commits, linear
+history, no force pushes or deletion, and the pull request checks above as
+required status checks. The merge queue on `main` reruns those checks on the
+merge group before it merges. Renaming a matrix job renames its check, so the
+ruleset's required checks change in the same pull request.
 
 A successful PR CI result covers the PR checks and JVM export; it does not mean
 the full native release matrix has passed. Reusable CI defaults to full
