@@ -4,7 +4,7 @@ on:
   pull_request:
     paths: ['.github/ai-review/**', '.github/workflows/ai-review*.yml']
   push:
-    branches: [main, refactor/v2]
+    branches: [main, '[0-9]*.[0-9]*']
     paths: ['.github/ai-review/**', '.github/workflows/ai-review*.yml']
 
 permissions:

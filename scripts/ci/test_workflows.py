@@ -40,8 +40,9 @@ class WorkflowGateTest(unittest.TestCase):
                 self.assertNotIn("continue-on-error", check)
                 if name.endswith("native"):
                     self.assertIn("--native-bundle", check["run"])
-                    self.assertEqual(job["if"],
-                                     "github.event_name != 'pull_request' || inputs.full_validation == true")
+                    self.assertEqual(job["if"], "(github.event_name != 'pull_request' && "
+                                                "github.event_name != 'merge_group') || "
+                                                "inputs.full_validation == true")
                 else:
                     self.assertNotIn("if", job)
         aggregate = jobs["build-and-test"]
@@ -160,10 +161,11 @@ class WorkflowGateTest(unittest.TestCase):
         })
         script = source["run"]
         for fragment in (
-                "actions/workflows/ci.yml/runs", "branch=refactor/v2", "event=push",
+                "actions/workflows/ci.yml/runs", "event=push",
                 "status=success", 'head_sha="$RELEASE_SHA"',
                 "run.get('path') == '.github/workflows/ci.yml'",
-                "run.get('head_branch') == 'refactor/v2'",
+                "release_branch(run.get('head_branch'))",
+                "name == 'main' or re.fullmatch(r'\\d+\\.\\d+', str(name)) is not None",
                 "run.get('head_sha') == sha", "run.get('status') == 'completed'",
                 "run.get('conclusion') == 'success'", "scripts/release-matrix.json",
                 "'native-' + row['platform'] for row in matrix['native']", "artifact.get('expired') is False",
@@ -182,10 +184,10 @@ class WorkflowGateTest(unittest.TestCase):
             "repository": {"full_name": repository},
             "head_repository": {"full_name": repository},
             "path": ".github/workflows/ci.yml", "event": "push",
-            "head_branch": "refactor/v2", "head_sha": sha,
+            "head_branch": "2.0", "head_sha": sha,
             "status": "completed", "conclusion": "success",
         }
-        artifact_run = {"id": run_id, "head_branch": "refactor/v2", "head_sha": sha}
+        artifact_run = {"id": run_id, "head_branch": "2.0", "head_sha": sha}
         artifacts = [{
             "name": name, "expired": False, "size_in_bytes": 1,
             "workflow_run": artifact_run,
@@ -222,6 +224,26 @@ class WorkflowGateTest(unittest.TestCase):
                                     env=environment, text=True, capture_output=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(output.exists())
+
+            run["head_sha"] = sha
+            run["head_branch"] = artifact_run["head_branch"] = "release-2.0"
+            runs_path.write_text(json.dumps({"workflow_runs": [run]}))
+            artifacts_path.write_text(json.dumps({
+                "total_count": len(artifacts), "artifacts": artifacts}))
+            result = subprocess.run(["bash", "-c", source["run"]], cwd=ROOT,
+                                    env=environment, text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("main or a <major>.<minor> release branch", result.stderr)
+            self.assertFalse(output.exists())
+
+            run["head_branch"] = artifact_run["head_branch"] = "main"
+            runs_path.write_text(json.dumps({"workflow_runs": [run]}))
+            artifacts_path.write_text(json.dumps({
+                "total_count": len(artifacts), "artifacts": artifacts}))
+            result = subprocess.run(["bash", "-c", source["run"]], cwd=ROOT,
+                                    env=environment, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(output.read_text(), f"run_id={run_id}\n")
 
     def test_central_test_validates_downloads_and_drops_without_publishing(self):
         release = workflow("release.yml")
@@ -298,7 +320,17 @@ class WorkflowGateTest(unittest.TestCase):
         })
         self.assertEqual(ci["permissions"], {"actions": "read", "contents": "read"})
         self.assertIn("workflow_dispatch", ci["on"])
-        condition = "github.event_name != 'pull_request' || inputs.full_validation == true"
+
+    def test_ci_pushes_to_one_branch_supersede_each_other(self):
+        ci = workflow("ci.yml")
+        self.assertEqual(ci["concurrency"], {
+            "group": "ci-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' "
+                     "&& github.run_id || github.event.pull_request.number || github.ref }}",
+            "cancel-in-progress": "true",
+        })
+        condition = ("(github.event_name != 'pull_request' && github.event_name != 'merge_group') "
+                     "|| inputs.full_validation == true")
+        self.assertEqual(ci["on"]["merge_group"]["branches"], ci["on"]["pull_request"]["branches"])
         self.assertEqual(ci["jobs"]["artifacts"]["with"]["build_native"], "${{ " + condition + " }}")
         self.assertEqual(ci["jobs"]["artifacts"]["with"]["native_source_run_id"],
                          "${{ inputs.native_source_run_id }}")

@@ -563,7 +563,15 @@ lazy val gitBranch = {
   branch.replaceAll("[^a-zA-Z0-9._-]", "-")
 }
 
+// A release branch is named after the line it releases, 2.0, so its snapshots
+// carry the version and the architecture alone. Every other branch keeps its
+// name in the version so snapshots from two checkouts never share coordinates.
+lazy val ReleaseBranch = "(\\d+\\.\\d+)".r
+
 // The 2.0 version carried by the selected Spark bundle.
 lazy val connectorVersion = ReleaseArtifacts.requestedVersion.getOrElse(
-  s"2.0.0-$gitBranch-$arch-SNAPSHOT"
+  gitBranch match {
+    case ReleaseBranch(line) => s"$line.0-$arch-SNAPSHOT"
+    case branch              => s"2.0.0-$branch-$arch-SNAPSHOT"
+  }
 )

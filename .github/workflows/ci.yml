@@ -20,17 +20,25 @@ on:
         description: Candidate that passed the build and consumer gates
         value: ${{ jobs.artifacts.outputs.candidate_artifact }}
   pull_request:
-    branches: [main, refactor/v2]
+    branches: [main, '[0-9]*.[0-9]*']
+  # The merge queue builds main plus the queued pull requests on a temporary
+  # branch; branch protection requires the pull request checks on it.
+  merge_group:
+    branches: [main, '[0-9]*.[0-9]*']
   push:
-    branches: [main, refactor/v2]
+    branches: [main, '[0-9]*.[0-9]*']
   workflow_dispatch:
 
 permissions:
   actions: read
   contents: read
 
+# A push supersedes the earlier pushes to the same branch: their runs are
+# cancelled, which also keeps them from saving a partial native dependency
+# cache. A manual dispatch is its own group, so it neither cancels nor is
+# cancelled by a push. Pull request runs group by number.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -140,14 +148,15 @@ jobs:
     uses: ./.github/workflows/build-artifacts.yml
     with:
       version: ${{ inputs.version || format('2.0.0-ci.{0}.{1}', github.run_id, github.run_attempt) }}
-      # Direct fork PRs have no workflow_call inputs. Reusable callers can
-      # request the full gate even when their originating event is a PR.
-      build_native: ${{ github.event_name != 'pull_request' || inputs.full_validation == true }}
+      # Pull requests and merge queue entries run the ordinary checks; pushes,
+      # dispatches and reusable callers run the full gate. Direct fork PRs have
+      # no workflow_call inputs.
+      build_native: ${{ (github.event_name != 'pull_request' && github.event_name != 'merge_group') || inputs.full_validation == true }}
       native_source_run_id: ${{ inputs.native_source_run_id }}
 
   consumer:
     needs: artifacts
-    if: github.event_name != 'pull_request' || inputs.full_validation == true
+    if: (github.event_name != 'pull_request' && github.event_name != 'merge_group') || inputs.full_validation == true
     uses: ./.github/workflows/integration.yml
     with:
       candidate_artifact: ${{ needs.artifacts.outputs.candidate_artifact }}
@@ -255,7 +264,7 @@ jobs:
   shared-native:
     name: Shared native reads (Scala ${{ matrix.scala }})
     needs: [read-matrix, artifacts]
-    if: github.event_name != 'pull_request' || inputs.full_validation == true
+    if: (github.event_name != 'pull_request' && github.event_name != 'merge_group') || inputs.full_validation == true
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.read-matrix.outputs.shared) }}
@@ -294,7 +303,7 @@ jobs:
   spark-native:
     name: Offline reads and search (${{ matrix.line }}, Scala ${{ matrix.scala }})
     needs: [read-matrix, artifacts]
-    if: github.event_name != 'pull_request' || inputs.full_validation == true
+    if: (github.event_name != 'pull_request' && github.event_name != 'merge_group') || inputs.full_validation == true
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.read-matrix.outputs.spark) }}

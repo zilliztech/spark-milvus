@@ -18,8 +18,10 @@ Writing, backfill, index construction, snapshot output, service clients, backup
 and legacy storage compatibility are outside this repository's scope.
 
 The 1.x line stopped at tag `v1.6.0` and is no longer maintained: it takes no
-fixes. The 2.0 line is a rewrite on branch `refactor/v2`, versioned
-`2.0.0-{branch}-{arch}-SNAPSHOT`. Everything below describes 2.0.
+fixes. The 2.0 line is a rewrite developed on `main` and released from branch
+`2.0`, where the `v2.0.x` tags are cut; snapshots are versioned
+`2.0.0-{branch}-{arch}-SNAPSHOT`, and `2.0.0-{arch}-SNAPSHOT` on the release
+branch. Everything below describes 2.0.
 
 ## The three public layers
 
