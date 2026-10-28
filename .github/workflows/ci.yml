@@ -20,9 +20,9 @@ on:
         description: Candidate that passed the build and consumer gates
         value: ${{ jobs.artifacts.outputs.candidate_artifact }}
   pull_request:
-    branches: [main, 'release-*']
+    branches: [main, '[0-9]*.[0-9]*']
   push:
-    branches: [main, 'release-*']
+    branches: [main, '[0-9]*.[0-9]*']
   workflow_dispatch:
 
 permissions:

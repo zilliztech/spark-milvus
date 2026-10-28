@@ -19,9 +19,9 @@ outside its scope. Public APIs contain no Milvus service client or SDK
 dependency.
 
 The 1.x line stopped at `v1.6.0` and is no longer maintained. The 2.0 line is
-developed on `main` and released from `release-2.0`. Candidate versions and
-artifact coordinates are explicitly recorded by the
-[release workflow](docs/releasing.md).
+developed on `main` and released from branch `2.0`, where the `v2.0.x` tags
+are cut. Candidate versions and artifact coordinates are explicitly recorded by
+the [release workflow](docs/releasing.md).
 
 ## Project structure
 
@@ -228,8 +228,8 @@ The [integration chart](deploy/helm/spark-milvus-integration/README.md) only run
 V3 reads with an existing Secret; it does not deploy or set up a Milvus service.
 
 The version is derived as `2.0.0-{branch}-{arch}-SNAPSHOT`, for example
-`2.0.0-main-amd64-SNAPSHOT`. A `release-{major}.{minor}` branch names the line
-it releases, so its snapshots drop the branch: `release-2.0` builds
+`2.0.0-main-amd64-SNAPSHOT`. A `{major}.{minor}` release branch is named after
+the line it releases, so its snapshots drop the branch: branch `2.0` builds
 `2.0.0-amd64-SNAPSHOT`.
 
 Pull the jar back out of the image:
