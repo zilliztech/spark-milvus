@@ -1,0 +1,202 @@
+package com.zilliz.milvus.storage.read.plan
+
+import com.zilliz.milvus.storage.delete.DeletePlan
+import com.zilliz.milvus.storage.io.ObjectStore
+import com.zilliz.milvus.storage.snapshot.{
+  DeltaLogFile,
+  SegmentIndexes,
+  SegmentLayout
+}
+import io.milvus.grpc.schema.FieldSchema
+
+/** Where the rows deleted from a segment come from.
+  *
+  * [[Files]] is what the planner emits: the delete files that apply to the
+  * segment, its own and the partition's L0 ones, read on the executor by
+  * `core.read.exec.DeletePlans`. [[Materialized]] carries a plan already read;
+  * nothing on the driver produces it any more, but a caller that has a plan in
+  * hand, a test above all, can still hand it over.
+  */
+sealed trait DeleteSource extends Serializable {
+
+  /** The plan, for a source that already holds one.
+    *
+    * [[DeleteSource.Files]] throws here on purpose. Answering with an empty
+    * plan would let a reader that cannot read delta logs return deleted rows
+    * with no exception and no warning, which is the failure the delete path
+    * already had once. The executor resolves files through
+    * `core.read.exec.DeletePlans`.
+    */
+  def materializedPlan: DeletePlan
+}
+
+object DeleteSource {
+
+  /** A format decoder supplied by the input, invoked only on the executor. The
+    * caller owns the borrowed store and closes it even after failure.
+    */
+  trait Reader extends Serializable {
+    def read(
+        primaryKey: FieldSchema,
+        bucket: String,
+        store: ObjectStore
+    ): DeletePlan
+  }
+
+  final case class Deferred(reader: Reader) extends DeleteSource {
+    require(reader != null, "a deferred delete source requires a reader")
+    override def materializedPlan: DeletePlan =
+      throw new UnsupportedOperationException(
+        "the deferred delete source has not been read"
+      )
+  }
+
+  /** Deletes are off for this read (`milvus.read.apply.deletes=false`), or
+    * nothing was deleted from this segment.
+    */
+  case object None extends DeleteSource {
+    override def materializedPlan: DeletePlan = DeletePlan.empty
+  }
+
+  /** A plan already read. */
+  final case class Materialized(plan: DeletePlan) extends DeleteSource {
+    override def materializedPlan: DeletePlan = plan
+  }
+
+  /** The delete files to read on the executor, each with its entry count so a
+    * reader can size what it builds before opening anything.
+    */
+  final case class Files(files: Seq[DeltaLogFile]) extends DeleteSource {
+    override def materializedPlan: DeletePlan =
+      throw new UnsupportedOperationException(
+        s"these ${files.size} delete file(s) have not been read; " +
+          "core.read.exec.DeletePlans reads them on the executor"
+      )
+  }
+}
+
+/** One segment, read by one task.
+  *
+  * Descriptions only: no native handle, no Hadoop `Configuration`, no open
+  * resource. A handle is a pointer inside one process and this object is built
+  * on the driver and shipped, so anything that cannot survive serialization
+  * cannot be a field here. The reader opens what it needs on the executor from
+  * what this says.
+  *
+  * @param properties
+  *   the `fs.*` map from `core.credential.StorageProperties`, already parsed
+  *   and validated. Paths below are bucket-relative keys, because the C
+  *   filesystem roots itself at `fs.bucket_name` and appends what it is given.
+  * @param neededFieldIds
+  *   Milvus field ids the caller wants, empty for all of them. Field ids rather
+  *   than column names, because that is what a snapshot and a parquet footer
+  *   agree on; resolving them to Arrow column names needs the schema.
+  */
+final case class SegmentReadTask(
+    segmentId: Long,
+    partitionId: Long,
+    layout: SegmentLayout,
+    schemaBytes: Array[Byte],
+    properties: Map[String, String],
+    neededFieldIds: Seq[Long] = Seq.empty,
+    deletes: DeleteSource = DeleteSource.None,
+    indexes: SegmentIndexes = SegmentIndexes.Unknown,
+    snapshotRows: Option[Long] = None,
+    limits: ReadLimits = ReadLimits.Default
+) extends Serializable {
+
+  /** True when this partition has to evaluate deletes at all. A reader checks
+    * this before pulling the primary-key and timestamp columns it would
+    * otherwise not need, which is what makes deletes cost column pruning.
+    */
+  def appliesDeletes: Boolean = deletes match {
+    case DeleteSource.None               => false
+    case DeleteSource.Materialized(plan) => !plan.isEmpty
+    case DeleteSource.Files(files)       => files.nonEmpty
+    case DeleteSource.Deferred(_)        => true
+  }
+
+  /** The plan of a source that already holds one; see
+    * [[DeleteSource.materializedPlan]]. A reader goes through
+    * `core.read.exec.DeletePlans`, which also reads files.
+    */
+  def deletePlan: DeletePlan = deletes.materializedPlan
+
+  /** The manifest version this partition was pinned to, or -1 when the layout
+    * names none (a column-group layout has no manifest at all).
+    */
+  def readVersionOrLatest: Long = layout match {
+    case SegmentLayout.Manifest(_, version)    => version
+    case _: SegmentLayout.PhysicalColumnGroups => -1L
+  }
+
+  /** Every data file this partition will open, for logging and for the plan's
+    * own accounting. Empty for a manifest layout: the file list is inside the
+    * manifest and only the native library has read it.
+    */
+  def dataFiles: Seq[String] = layout match {
+    case SegmentLayout.Manifest(_, _) => Seq.empty
+    case physical: SegmentLayout.PhysicalColumnGroups =>
+      physical.groups.flatMap(_.filePaths)
+  }
+
+  /** Physical rows recorded by the snapshot, or by its column groups when the
+    * source has no snapshot Avro count.
+    *
+    * All column groups of a segment carry the same row total, so one group's
+    * sum is the segment's. A reader compares this against what it actually
+    * delivered: a short read has to be an error, not a short DataFrame.
+    */
+  def expectedRows: Option[Long] = snapshotRows.orElse(layout match {
+    case SegmentLayout.Manifest(_, _) => scala.None
+    case physical: SegmentLayout.PhysicalColumnGroups =>
+      physical.groups.headOption.map(_.fileRowCounts.sum)
+  })
+
+  /** A complete physical row count that can bound an encoded row address.
+    * Unlike search sizing, this never infers a physical bound from an index's
+    * row count. Without a snapshot count, every column group must account for
+    * all of its files, without negative counts or overflow, and agree on the
+    * same total. Unknown or inconsistent metadata cannot prove a bound; the
+    * reader's existing validation still applies independently.
+    */
+  def provenPhysicalRows: Option[Long] = snapshotRows match {
+    case Some(rows) => if (rows >= 0L) Some(rows) else None
+    case None =>
+      val counts = layout match {
+        case physical: SegmentLayout.PhysicalColumnGroups =>
+          physical.groups.map(group =>
+            group.filePaths.size -> group.fileRowCounts
+          )
+        case _ => Seq.empty
+      }
+      if (counts.nonEmpty) {
+        var expected: Option[Long] = None
+        val remaining = counts.iterator
+        while (remaining.hasNext) {
+          val (fileCount, rows) = remaining.next()
+          if (fileCount != rows.size) return None
+          var total = 0L
+          val counts = rows.iterator
+          while (counts.hasNext) {
+            val count = counts.next()
+            if (count < 0L || count > Long.MaxValue - total) return None
+            total += count
+          }
+          if (expected.exists(_ != total)) return None
+          expected = Some(total)
+        }
+        expected
+      } else None
+  }
+
+  /** Rows available for search sizing, including a persisted index's count when
+    * the snapshot and column groups do not state one. This estimate does not
+    * replace `expectedRows`, the reader's independent short-read guard.
+    */
+  def knownRows: Option[Long] = expectedRows.orElse(indexes match {
+    case SegmentIndexes.Available(all) =>
+      all.map(_.rowCount).filter(_ > 0L).reduceOption(_ max _)
+    case _ => None
+  })
+}

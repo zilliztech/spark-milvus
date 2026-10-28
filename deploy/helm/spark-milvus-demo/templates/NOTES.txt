@@ -1,0 +1,14 @@
+Spark submission Job: {{ .Release.Namespace }}/{{ include "spark-milvus-demo.fullname" . }}-submit
+Spark driver Pod: {{ .Release.Namespace }}/{{ include "spark-milvus-demo.fullname" . }}-driver
+
+Inspect submission and application status separately:
+  kubectl -n {{ .Release.Namespace }} logs job/{{ include "spark-milvus-demo.fullname" . }}-submit
+  kubectl -n {{ .Release.Namespace }} get pod {{ include "spark-milvus-demo.fullname" . }}-driver
+  kubectl -n {{ .Release.Namespace }} logs {{ include "spark-milvus-demo.fullname" . }}-driver
+  kubectl -n {{ .Release.Namespace }} get pods -l 'spark-role=driver,app.kubernetes.io/instance={{ .Release.Name }}' -o custom-columns=NAME:.metadata.name,PHASE:.status.phase
+
+Spark waits for the driver to finish, but a completed submission Job does not
+prove that the Spark application succeeded. Check the driver phase and logs.
+The chart never creates or deletes input Secrets or the namespace. Spark-created
+Pods are not Helm resources; inspect and clean up this release's application
+resources explicitly after completion. Use a new release name for a new run.

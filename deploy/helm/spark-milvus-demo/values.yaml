@@ -1,0 +1,66 @@
+# Build this image with docker/build.sh and make it pullable by the cluster.
+image:
+  repository: spark-milvus-demo
+  tag: "4.0.1-jdk21-amd64"
+  digest: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+language: python
+# read, filter, sql, exact, filtered, index, vectors, partition
+# The default needs no snapshot or object-storage identity.
+example: vectors
+
+input:
+  # Existing namespace-local Secret. Its contents are never Helm values.
+  existingSecret: ""
+  optionsKey: read-options.json
+  # Search examples require this key. Set empty to use the baked 2D queries.
+  queriesKey: queries.json
+
+serviceAccounts:
+  submitter:
+    create: true
+    name: ""
+    annotations: {}
+  driver:
+    create: true
+    name: ""
+    annotations: {}
+  executor:
+    create: true
+    name: ""
+    annotations: {}
+
+rbac:
+  # Namespace-scoped baseline for submitter and driver; executor gets no Role.
+  create: true
+
+nodeSelector:
+  kubernetes.io/os: linux
+  kubernetes.io/arch: amd64
+
+spark:
+  driver:
+    cores: 1
+    memory: 2g
+    memoryOverhead: 1g
+  executor:
+    instances: 2
+    cores: 2
+    memory: 4g
+    memoryOverhead: 4g
+
+job:
+  activeDeadlineSeconds: 1800
+  resources:
+    requests:
+      cpu: 100m
+      memory: 1Gi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+
+# Non-secret Spark properties only. Chart-managed settings cannot be overridden.
+# Use ServiceAccount IAM or existing Secret references for credentials.
+extraSparkConf: {}

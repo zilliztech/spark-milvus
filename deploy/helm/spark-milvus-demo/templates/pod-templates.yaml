@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "spark-milvus-demo.fullname" . }}-templates
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "spark-milvus-demo.labels" . | nindent 4 }}
+data:
+  driver.yaml: |
+    {{- include "spark-milvus-demo.podTemplate" (dict "root" . "role" "driver") | nindent 4 }}
+  executor.yaml: |
+    {{- include "spark-milvus-demo.podTemplate" (dict "root" . "role" "executor") | nindent 4 }}

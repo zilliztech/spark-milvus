@@ -1,0 +1,446 @@
+{
+  "validatedOn": "2026-10-27",
+  "status": "passed",
+  "connectorSourceCommit": "b772cc5f92d23b9bd346abbf859702d008ba02ce",
+  "image": {
+    "tag": "spark-milvus-demo:4.0.1-b772cc5f-amd64",
+    "localImageId": "sha256:f5187cb6ef6e5b0a1bb61986e1436035b1ac63df6ec1d1956496a388a9281170",
+    "registryPublished": false,
+    "base": "spark@sha256:d43725ac5529b74fcffd602e9b0c31955afea245975d799d4ee04edd6ba574af",
+    "assemblySha256": "08b29493c72c05f10260166c5bb43d162e361bf04a6d35b91ae84e14bf3cfa31",
+    "platform": "linux/amd64",
+    "user": "185:185",
+    "workingDirectory": "/opt/spark/work-dir",
+    "spark": "4.0.1",
+    "scala": "2.13",
+    "java": "21.0.10"
+  },
+  "input": {
+    "source": "Committed nearest read fixture, verified against SHA256SUMS",
+    "path": "core/src/test/resources/read-fixtures/collections/nearest",
+    "visibleRows": 14,
+    "milvusServiceContacted": false
+  },
+  "localExamples": [
+    {
+      "language": "python",
+      "example": "01_read_snapshot.py",
+      "exitCode": 0
+    },
+    {
+      "language": "java",
+      "example": "ReadSnapshot",
+      "exitCode": 0
+    },
+    {
+      "language": "python",
+      "example": "04_exact_search.py",
+      "exitCode": 0,
+      "result": {
+        "mode": "exact",
+        "queries": {
+          "1": {
+            "ids": [
+              3000,
+              3001,
+              3100
+            ],
+            "recallAtK": 1.0
+          },
+          "2": {
+            "ids": [
+              3107,
+              3106,
+              3007
+            ],
+            "recallAtK": 1.0
+          }
+        },
+        "metrics": {
+          "milvus.search.candidates": 12,
+          "indexSegments": 0,
+          "milvus.search.knowhere.calls": 4,
+          "sparkQueries": 0,
+          "milvus.search.segment.searches": 4,
+          "milvus.search.exact.rescans": 0,
+          "searchedQueries": 2,
+          "milvus.search.take.nanos": 90704560,
+          "milvus.search.index.bytes": 0,
+          "milvus.search.index.load.nanos": 0,
+          "milvus.search.read.nanos": 57107177,
+          "milvus.search.knowhere.nanos": 2078919,
+          "unrankedQueries": 0,
+          "milvus.search.read.bytes": 496,
+          "milvus.search.bitmap.nanos": 0,
+          "numOutputRows": 6,
+          "milvus.search.take.rows": 6,
+          "exactSegments": 2,
+          "milvus.search.compared.pairs": 28
+        }
+      }
+    },
+    {
+      "language": "java",
+      "example": "ExactSearch",
+      "exitCode": 0,
+      "result": {
+        "mode": "exact",
+        "queries": {
+          "1": {
+            "ids": [
+              3000,
+              3001,
+              3100
+            ],
+            "recallAtK": 1.0
+          },
+          "2": {
+            "ids": [
+              3107,
+              3106,
+              3007
+            ],
+            "recallAtK": 1.0
+          }
+        },
+        "metrics": {
+          "milvus.search.candidates": 12,
+          "indexSegments": 0,
+          "milvus.search.knowhere.calls": 4,
+          "sparkQueries": 0,
+          "milvus.search.segment.searches": 4,
+          "milvus.search.exact.rescans": 0,
+          "searchedQueries": 2,
+          "milvus.search.take.nanos": 168584065,
+          "milvus.search.index.bytes": 0,
+          "milvus.search.index.load.nanos": 0,
+          "milvus.search.read.nanos": 12271522,
+          "milvus.search.knowhere.nanos": 2082523,
+          "unrankedQueries": 0,
+          "milvus.search.read.bytes": 496,
+          "milvus.search.bitmap.nanos": 0,
+          "numOutputRows": 6,
+          "milvus.search.take.rows": 6,
+          "exactSegments": 2,
+          "milvus.search.compared.pairs": 28
+        }
+      }
+    },
+    {
+      "language": "python",
+      "example": "05_filtered_search.py",
+      "exitCode": 0,
+      "result": {
+        "mode": "exact",
+        "queries": {
+          "1": {
+            "ids": [
+              3101,
+              3003,
+              3103
+            ],
+            "recallAtK": 1.0
+          },
+          "2": {
+            "ids": [
+              3107,
+              3007,
+              3006
+            ],
+            "recallAtK": 1.0
+          }
+        },
+        "metrics": {
+          "milvus.search.candidates": 12,
+          "indexSegments": 0,
+          "milvus.search.knowhere.calls": 4,
+          "sparkQueries": 0,
+          "milvus.search.segment.searches": 4,
+          "milvus.search.exact.rescans": 0,
+          "searchedQueries": 2,
+          "milvus.search.take.nanos": 42583170,
+          "milvus.search.index.bytes": 0,
+          "milvus.search.index.load.nanos": 0,
+          "milvus.search.read.nanos": 52186451,
+          "milvus.search.knowhere.nanos": 1993651,
+          "unrankedQueries": 0,
+          "milvus.search.read.bytes": 628,
+          "milvus.search.bitmap.nanos": 0,
+          "numOutputRows": 6,
+          "milvus.search.take.rows": 6,
+          "exactSegments": 2,
+          "milvus.search.compared.pairs": 16
+        }
+      }
+    },
+    {
+      "language": "java",
+      "example": "FilteredSearch",
+      "exitCode": 0,
+      "result": {
+        "metrics": {
+          "milvus.search.candidates": 12,
+          "indexSegments": 0,
+          "milvus.search.knowhere.calls": 4,
+          "sparkQueries": 0,
+          "milvus.search.segment.searches": 4,
+          "milvus.search.exact.rescans": 0,
+          "searchedQueries": 2,
+          "milvus.search.take.nanos": 123220651,
+          "milvus.search.index.bytes": 0,
+          "milvus.search.index.load.nanos": 0,
+          "milvus.search.read.nanos": 13269516,
+          "milvus.search.knowhere.nanos": 1742855,
+          "unrankedQueries": 0,
+          "milvus.search.read.bytes": 628,
+          "milvus.search.bitmap.nanos": 0,
+          "numOutputRows": 6,
+          "milvus.search.take.rows": 6,
+          "exactSegments": 2,
+          "milvus.search.compared.pairs": 16
+        },
+        "queries": {
+          "1": {
+            "recallAtK": 1.0,
+            "ids": [
+              3101,
+              3003,
+              3103
+            ]
+          },
+          "2": {
+            "recallAtK": 1.0,
+            "ids": [
+              3107,
+              3007,
+              3006
+            ]
+          }
+        },
+        "mode": "exact"
+      }
+    },
+    {
+      "language": "python",
+      "example": "06_index_search.py",
+      "exitCode": 0,
+      "result": {
+        "mode": "approx",
+        "queries": {
+          "1": {
+            "ids": [
+              3000,
+              3001,
+              3100
+            ],
+            "recallAtK": 1.0
+          },
+          "2": {
+            "ids": [
+              3107,
+              3106,
+              3007
+            ],
+            "recallAtK": 1.0
+          }
+        },
+        "metrics": {
+          "milvus.search.candidates": 12,
+          "indexSegments": 2,
+          "milvus.search.knowhere.calls": 4,
+          "sparkQueries": 0,
+          "milvus.search.segment.searches": 4,
+          "milvus.search.exact.rescans": 0,
+          "searchedQueries": 2,
+          "milvus.search.take.nanos": 38261381,
+          "milvus.search.index.bytes": 2414,
+          "milvus.search.index.load.nanos": 56822710,
+          "milvus.search.read.nanos": 10031205,
+          "milvus.search.knowhere.nanos": 2400554,
+          "unrankedQueries": 0,
+          "milvus.search.read.bytes": 366,
+          "milvus.search.bitmap.nanos": 12372858,
+          "numOutputRows": 6,
+          "milvus.search.take.rows": 6,
+          "exactSegments": 0,
+          "milvus.search.compared.pairs": 0
+        }
+      }
+    },
+    {
+      "language": "java",
+      "example": "IndexSearch",
+      "exitCode": 0,
+      "result": {
+        "queries": {
+          "1": {
+            "ids": [
+              3000,
+              3001,
+              3100
+            ],
+            "recallAtK": 1.0
+          },
+          "2": {
+            "ids": [
+              3107,
+              3106,
+              3007
+            ],
+            "recallAtK": 1.0
+          }
+        },
+        "metrics": {
+          "milvus.search.candidates": 12,
+          "indexSegments": 2,
+          "milvus.search.knowhere.calls": 4,
+          "sparkQueries": 0,
+          "milvus.search.segment.searches": 4,
+          "milvus.search.exact.rescans": 0,
+          "searchedQueries": 2,
+          "milvus.search.take.nanos": 108966211,
+          "milvus.search.index.bytes": 2414,
+          "milvus.search.index.load.nanos": 55720109,
+          "milvus.search.read.nanos": 15266526,
+          "milvus.search.knowhere.nanos": 2272413,
+          "unrankedQueries": 0,
+          "milvus.search.read.bytes": 366,
+          "milvus.search.bitmap.nanos": 12287739,
+          "numOutputRows": 6,
+          "milvus.search.take.rows": 6,
+          "exactSegments": 0,
+          "milvus.search.compared.pairs": 0
+        },
+        "mode": "approx"
+      }
+    }
+  ],
+  "separateExecutorExamples": [
+    {
+      "language": "java",
+      "example": "IndexSearch",
+      "master": "local-cluster[2,1,2048]",
+      "exitCode": 0,
+      "executorIds": [
+        "0",
+        "1"
+      ],
+      "result": {
+        "mode": "approx",
+        "metrics": {
+          "milvus.search.candidates": 12,
+          "indexSegments": 2,
+          "milvus.search.knowhere.calls": 4,
+          "sparkQueries": 0,
+          "milvus.search.segment.searches": 4,
+          "milvus.search.exact.rescans": 0,
+          "searchedQueries": 2,
+          "milvus.search.take.nanos": 58257270,
+          "milvus.search.index.bytes": 2414,
+          "milvus.search.index.load.nanos": 202437989,
+          "milvus.search.read.nanos": 20887333,
+          "milvus.search.knowhere.nanos": 3240529,
+          "unrankedQueries": 0,
+          "milvus.search.read.bytes": 366,
+          "milvus.search.bitmap.nanos": 78862780,
+          "numOutputRows": 6,
+          "milvus.search.take.rows": 6,
+          "exactSegments": 0,
+          "milvus.search.compared.pairs": 0
+        },
+        "queries": {
+          "1": {
+            "ids": [
+              3000,
+              3001,
+              3100
+            ],
+            "recallAtK": 1.0
+          },
+          "2": {
+            "ids": [
+              3107,
+              3106,
+              3007
+            ],
+            "recallAtK": 1.0
+          }
+        }
+      }
+    },
+    {
+      "language": "python",
+      "example": "04_exact_search.py",
+      "master": "local-cluster[2,1,2048]",
+      "exitCode": 0,
+      "executorIds": [
+        "0",
+        "1"
+      ],
+      "result": {
+        "mode": "exact",
+        "queries": {
+          "1": {
+            "ids": [
+              3000,
+              3001,
+              3100
+            ],
+            "recallAtK": 1.0
+          },
+          "2": {
+            "ids": [
+              3107,
+              3106,
+              3007
+            ],
+            "recallAtK": 1.0
+          }
+        },
+        "metrics": {
+          "milvus.search.candidates": 12,
+          "indexSegments": 0,
+          "milvus.search.knowhere.calls": 4,
+          "sparkQueries": 0,
+          "milvus.search.segment.searches": 4,
+          "milvus.search.exact.rescans": 0,
+          "searchedQueries": 2,
+          "milvus.search.take.nanos": 55320735,
+          "milvus.search.index.bytes": 0,
+          "milvus.search.index.load.nanos": 0,
+          "milvus.search.read.nanos": 14172327,
+          "milvus.search.knowhere.nanos": 2696344,
+          "unrankedQueries": 0,
+          "milvus.search.read.bytes": 496,
+          "milvus.search.bitmap.nanos": 0,
+          "numOutputRows": 6,
+          "milvus.search.take.rows": 6,
+          "exactSegments": 2,
+          "milvus.search.compared.pairs": 28
+        }
+      }
+    }
+  ],
+  "containerRestrictions": {
+    "uid": 185,
+    "gid": 185,
+    "capabilitiesDropped": "ALL",
+    "noNewPrivileges": true,
+    "externalNetworking": false,
+    "separateExecutorRun": {
+      "readOnlyRootFilesystem": true,
+      "writableTmpfs": [
+        "/tmp",
+        "/opt/spark/work-dir",
+        "/opt/spark/work"
+      ],
+      "standaloneWorkerDirectoryNote": "/opt/spark/work is needed only by the local-cluster standalone workers in this test."
+    }
+  },
+  "deploymentTemplates": {
+    "path": "deploy/helm/spark-milvus-demo",
+    "strictHelmLint": "passed",
+    "renderTestsPassed": 14,
+    "liveKubernetesDeployment": false
+  }
+}

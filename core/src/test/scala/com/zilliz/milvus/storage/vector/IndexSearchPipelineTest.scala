@@ -1,0 +1,755 @@
+package com.zilliz.milvus.storage.vector
+
+import java.nio.ByteBuffer
+import java.util.concurrent.{
+  CompletableFuture,
+  CountDownLatch,
+  Executors,
+  TimeUnit
+}
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.BitSet
+
+import org.apache.arrow.memory.RootAllocator
+import org.scalatest.funsuite.AnyFunSuite
+import org.scalatest.matchers.should.Matchers
+import org.scalatest.BeforeAndAfterAll
+
+import com.zilliz.milvus.storage.schema.{
+  MetricType,
+  VectorElementType,
+  VectorLayout
+}
+
+/** A segment's groups through the search pipeline: the answer of one group is
+  * checked and collected while the index searches the next, and the mergers end
+  * up exactly as a sequential search would leave them.
+  */
+class IndexSearchPipelineTest
+    extends AnyFunSuite
+    with Matchers
+    with BeforeAndAfterAll {
+
+  private val allocator = new RootAllocator(Long.MaxValue)
+  private val layout = VectorLayout(VectorElementType.Float32, 2)
+  private val rows = 1000L
+  private val k = 4
+
+  override def afterAll(): Unit = allocator.close()
+
+  private def matrix(queries: Int, first: Int): QueryMatrix = {
+    val vectors = (0 until queries).map(index =>
+      Array((first + index).toFloat, -(first + index).toFloat)
+    )
+    QueryMatrix.ofPacked(
+      QueryMatrix.packFloats(vectors, layout),
+      0,
+      queries,
+      layout,
+      allocator
+    )
+  }
+
+  /** A deterministic index: query q's hit s is row (q * 31 + s * 7 + segment)
+    * mod rows with score s + q / 1000, best first. `shortUntilEf` makes the
+    * last hit of query 0 missing until the search is at least that wide.
+    */
+  private final class Fake(
+      val segmentId: Long,
+      shortUntilEf: Int = 0,
+      badRow: Boolean = false,
+      // A score in place of the deterministic one, by (query, slot).
+      scoreAt: (Int, Int) => Option[Float] = (_, _) => None,
+      beforeSearch: Int => Unit = _ => ()
+  ) extends IndexSearch.Target {
+    val calls = new AtomicInteger
+    var lastParameters = ""
+    var lastExcluded: Option[ByteBuffer] = None
+    def rows: Long = IndexSearchPipelineTest.this.rows
+    def dimension: Int = 2
+    def metric: MetricType = MetricType.L2
+    def indexType: String = "HNSW"
+    def family: String = "HNSW"
+    def bytes: Long = 0L
+    def rowOf(label: Long): Long = label
+    def labelsOf(excluded: BitSet): BitSet = excluded
+    def close(): Unit = ()
+    def rowOf(query: Int, slot: Int, first: Int): Long =
+      ((first + query).toLong * 31L + slot * 7L + segmentId) % rows
+    def scoreOf(query: Int, slot: Int, first: Int): Float =
+      slot + (first + query) / 1000f
+    def search(
+        queries: ByteBuffer,
+        queryRows: Long,
+        topK: Int,
+        excluded: ByteBuffer,
+        ids: ByteBuffer,
+        scores: ByteBuffer,
+        parameters: String
+    ): Unit = {
+      beforeSearch(calls.incrementAndGet())
+      lastParameters = parameters
+      lastExcluded = Option(excluded).map(_.duplicate())
+      val ef = "\"ef\":(\\d+)".r
+        .findFirstMatchIn(parameters)
+        .map(_.group(1).toInt)
+        .getOrElse(0)
+      // the first query's first value is its number in the whole set
+      val q0 = queries.getFloat(0).toInt
+      (0 until queryRows.toInt).foreach { query =>
+        (0 until topK).foreach { slot =>
+          val at = (query * topK + slot).toLong
+          val short = query == 0 && slot == topK - 1 && ef < shortUntilEf
+          val id =
+            if (short) -1L
+            else if (badRow && query == 1 && slot == 0) rows + 5
+            else rowOf(query, slot, q0)
+          ids.putLong((at * 8).toInt, id)
+          scores.putFloat(
+            (at * 4).toInt,
+            scoreAt(query, slot).getOrElse(scoreOf(query, slot, q0))
+          )
+        }
+      }
+    }
+  }
+
+  private def progress()
+      : (SegmentSearch.Progress => Unit, () => (Int, Long)) = {
+    var calls = 0
+    var nanos = 0L
+    (
+      step => { calls += step.nativeCalls; nanos += step.nativeNanos },
+      () => (calls, nanos)
+    )
+  }
+
+  test(
+    "two segments searched in flight on one collector merge as a sequential search would"
+  ) {
+    // Held's way: the pipelines of a task share one collector, begin/search/
+    // complete are split so the next segment's search starts while the current
+    // one's answer is still being collected, and finish waits for every collect.
+    val groups = Seq(7, 5, 6)
+    val starts = groups.scanLeft(0)(_ + _)
+    val matrices =
+      groups.zip(starts).map { case (n, first) => matrix(n, first) }
+    val collector = java.util.concurrent.Executors.newSingleThreadExecutor()
+    try {
+      val segments = Seq(11L, 22L, 33L)
+      def expected(group: Int): Seq[Seq[(Float, Long, Long)]] =
+        (0 until groups(group)).map { query =>
+          segments
+            .flatMap { segment =>
+              val fake = new Fake(segment)
+              (0 until k).map(slot =>
+                (
+                  fake.scoreOf(query, slot, starts(group)).toFloat,
+                  segment,
+                  fake.rowOf(query, slot, starts(group))
+                )
+              )
+            }
+            .sorted
+            .take(k)
+        }
+      val (onProgress, seen) = progress()
+      val fakes = segments.map(new Fake(_))
+      val pipelines = fakes.map(fake =>
+        new IndexSearch.Pipeline(
+          fake,
+          new BitSet(),
+          k,
+          Map.empty,
+          allocator,
+          groups.max,
+          2,
+          false,
+          Some(collector)
+        )
+      )
+      try {
+        matrices.zipWithIndex.foreach { case (m, g) =>
+          val merger = new TopKMerger(groups(g), k, MetricType.L2)
+          // two in flight: begin and search the next before completing the current
+          val begun = pipelines.map(_.begin(m))
+          pipelines.zip(begun).foreach { case (p, a) => p.search(a) }
+          pipelines.zip(begun).foreach { case (p, a) =>
+            p.complete(a, merger, onProgress)
+          }
+          pipelines.foreach(_.finish(onProgress))
+          (0 until groups(g)).foreach { query =>
+            merger
+              .sort(query)
+              .results(query)
+              .map(c => (c.score, c.segmentId, c.rowOffset)) shouldBe expected(
+              g
+            )(query)
+          }
+        }
+        fakes.foreach(_.calls.get() shouldBe groups.size)
+        seen()._1 shouldBe segments.size * groups.size
+      } finally pipelines.foreach(_.close())
+      // the shared collector outlives the pipelines: closing them must not shut it down
+      collector.isShutdown shouldBe false
+    } finally {
+      collector.shutdownNow()
+      matrices.foreach(_.close())
+    }
+  }
+
+  test("pipelined groups leave the mergers as a sequential search would") {
+    val groups = Seq(7, 5, 6, 8, 3)
+    val starts = groups.scanLeft(0)(_ + _)
+    val matrices =
+      groups.zip(starts).map { case (n, first) => matrix(n, first) }
+    try {
+      // Expected: top-k across three segments, computed from the fake alone.
+      val segments = Seq(11L, 22L, 33L)
+      def expected(group: Int): Seq[Seq[(Float, Long, Long)]] =
+        (0 until groups(group)).map { query =>
+          segments
+            .flatMap { segment =>
+              val fake = new Fake(segment)
+              (0 until k).map(slot =>
+                (
+                  fake.scoreOf(query, slot, starts(group)).toFloat,
+                  segment,
+                  fake.rowOf(query, slot, starts(group))
+                )
+              )
+            }
+            .sorted
+            .take(k)
+        }
+      val (onProgress, seen) = progress()
+      val mergers = groups.map(n => new TopKMerger(n, k, MetricType.L2))
+      segments.foreach { segment =>
+        val fake = new Fake(segment)
+        val pipeline =
+          new IndexSearch.Pipeline(
+            fake,
+            new BitSet(),
+            k,
+            Map.empty,
+            allocator,
+            groups.max
+          )
+        try {
+          matrices.zip(mergers).zipWithIndex.foreach { case ((m, merger), g) =>
+            pipeline.run(m, merger, onProgress)
+          }
+          pipeline.finish(onProgress)
+        } finally pipeline.close()
+        fake.calls.get() shouldBe groups.size
+      }
+      mergers.zipWithIndex.foreach { case (merger, g) =>
+        (0 until groups(g)).foreach { query =>
+          val got = merger
+            .sort(query)
+            .results(query)
+            .map(c => (c.score, c.segmentId, c.rowOffset))
+          got shouldBe expected(g)(query)
+        }
+      }
+      seen()._1 shouldBe segments.size * groups.size
+    } finally matrices.foreach(_.close())
+  }
+
+  test(
+    "an answer collected over shards leaves the merger as one thread would"
+  ) {
+    val groups = Seq(9, 13, 1, 30)
+    val starts = groups.scanLeft(0)(_ + _)
+    val matrices =
+      groups.zip(starts).map { case (n, first) => matrix(n, first) }
+    try {
+      val segments = Seq(11L, 22L, 33L)
+      def collected(threads: Int): Seq[Seq[Seq[(Float, Long, Long)]]] = {
+        val (onProgress, _) = progress()
+        val mergers = groups.map(n => new TopKMerger(n, k, MetricType.L2))
+        segments.foreach { segment =>
+          val pipeline = new IndexSearch.Pipeline(
+            new Fake(segment),
+            new BitSet(),
+            k,
+            Map.empty,
+            allocator,
+            groups.max,
+            threads
+          )
+          try {
+            matrices.zip(mergers).foreach { case (m, merger) =>
+              pipeline.run(m, merger, onProgress)
+            }
+            pipeline.finish(onProgress)
+          } finally pipeline.close()
+        }
+        mergers.zipWithIndex.map { case (merger, g) =>
+          (0 until groups(g)).map(query =>
+            merger
+              .sort(query)
+              .results(query)
+              .map(c => (c.score, c.segmentId, c.rowOffset))
+          )
+        }
+      }
+      val single = collected(1)
+      collected(4) shouldBe single
+      collected(64) shouldBe single
+    } finally matrices.foreach(_.close())
+  }
+
+  test("a short answer over shards is searched again wider once") {
+    val groups = Seq(6)
+    val matrices = Seq(matrix(6, 0))
+    try {
+      val fake = new Fake(11L, shortUntilEf = 128)
+      val (onProgress, seen) = progress()
+      val merger = new TopKMerger(6, k, MetricType.L2)
+      val pipeline =
+        new IndexSearch.Pipeline(
+          fake,
+          new BitSet(),
+          k,
+          Map.empty,
+          allocator,
+          6,
+          3
+        )
+      try {
+        pipeline.run(matrices.head, merger, onProgress)
+        pipeline.finish(onProgress)
+      } finally pipeline.close()
+      fake.calls.get() shouldBe 2
+      merger.size shouldBe 6 * k
+    } finally matrices.foreach(_.close())
+  }
+
+  test("a short answer is searched again wider on the worker and reported") {
+    val m = matrix(3, 0)
+    try {
+      val fake = new Fake(5L, shortUntilEf = 200)
+      val merger = new TopKMerger(3, k, MetricType.L2)
+      val (onProgress, seen) = progress()
+      val pipeline =
+        new IndexSearch.Pipeline(fake, new BitSet(), k, Map.empty, allocator, 3)
+      try {
+        pipeline.run(m, merger, onProgress)
+        pipeline.finish(onProgress)
+      } finally pipeline.close()
+      // ef 64 -> 128 -> 256: two retries, both on the worker, reported at finish
+      fake.calls.get() shouldBe 3
+      fake.lastParameters should include("\"ef\":256")
+      seen()._1 shouldBe 3
+      merger.size shouldBe 3 * k
+    } finally m.close()
+  }
+
+  test("a bad answer fails the task where the pipeline is next used") {
+    val m = matrix(3, 0)
+    try {
+      val fake = new Fake(9L, badRow = true)
+      val merger = new TopKMerger(3, k, MetricType.L2)
+      val pipeline =
+        new IndexSearch.Pipeline(fake, new BitSet(), k, Map.empty, allocator, 3)
+      try {
+        pipeline.run(m, merger, _ => ())
+        val failure =
+          the[IllegalArgumentException] thrownBy pipeline.finish(_ => ())
+        failure.getMessage should include("outside its 1000 rows")
+      } finally pipeline.close()
+    } finally m.close()
+  }
+
+  test(
+    "close waits for an uninterruptible retry before releasing its buffers"
+  ) {
+    Seq(false, true).foreach { shared =>
+      val collector = Executors.newSingleThreadExecutor()
+      val m = matrix(2, 0)
+      val queryBytes = allocator.getAllocatedMemory
+      val retrying = new CountDownLatch(1)
+      val release = new CountDownLatch(1)
+      val closing = new CountDownLatch(1)
+      val closed = new CompletableFuture[Throwable]()
+      val fake = new Fake(
+        5L,
+        shortUntilEf = 128,
+        beforeSearch = call => {
+          if (call == 2) {
+            retrying.countDown()
+            // A native call keeps running even if shutdownNow interrupts its
+            // Java thread. Check ownership before touching the output buffers.
+            var finished = false
+            while (!finished) {
+              try {
+                release.await()
+                finished = true
+              } catch {
+                case _: InterruptedException => ()
+              }
+            }
+            allocator.getAllocatedMemory should be > queryBytes
+          }
+        }
+      )
+      val excluded = new BitSet()
+      excluded.set(999)
+      val pipeline = new IndexSearch.Pipeline(
+        fake,
+        excluded,
+        k,
+        Map.empty,
+        allocator,
+        2,
+        collector = if (shared) Some(collector) else None
+      )
+      val closer = new Thread(() => {
+        closing.countDown()
+        try {
+          pipeline.close()
+          closed.complete(null)
+        } catch {
+          case failure: Throwable => closed.complete(failure)
+        }
+      })
+      try {
+        pipeline.run(m, new TopKMerger(2, k, MetricType.L2), _ => ())
+        retrying.await(10, TimeUnit.SECONDS) shouldBe true
+        closer.start()
+        closing.await(10, TimeUnit.SECONDS) shouldBe true
+        intercept[java.util.concurrent.TimeoutException] {
+          closed.get(100, TimeUnit.MILLISECONDS)
+        }
+        allocator.getAllocatedMemory should be > queryBytes
+        release.countDown()
+        closed.get(10, TimeUnit.SECONDS) shouldBe null
+        fake.calls.get() shouldBe 2
+        allocator.getAllocatedMemory shouldBe queryBytes
+        if (shared) collector.isShutdown shouldBe false
+      } finally {
+        release.countDown()
+        if (closer.getState == Thread.State.NEW) pipeline.close()
+        else closer.join(10000)
+        SearchThreads.shutdown(collector)
+        m.close()
+      }
+    }
+  }
+
+  test(
+    "finish drains both slots after a failed answer and close does not repeat it"
+  ) {
+    val collector = Executors.newSingleThreadExecutor()
+    val m = matrix(3, 0)
+    val blocked = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+    val finished = new CompletableFuture[Throwable]()
+    val pipeline = new IndexSearch.Pipeline(
+      new Fake(9L, badRow = true),
+      new BitSet(),
+      k,
+      Map.empty,
+      allocator,
+      3,
+      collector = Some(collector)
+    )
+    val caller = new Thread(() => {
+      try {
+        pipeline.finish(_ => ())
+        finished.complete(null)
+      } catch {
+        case failure: Throwable => finished.complete(failure)
+      }
+    })
+    try {
+      pipeline.run(m, new TopKMerger(3, k, MetricType.L2), _ => ())
+      collector.submit(new Runnable {
+        def run(): Unit = {
+          blocked.countDown()
+          release.await()
+        }
+      })
+      blocked.await(10, TimeUnit.SECONDS) shouldBe true
+      pipeline.run(m, new TopKMerger(3, k, MetricType.L2), _ => ())
+      caller.start()
+      intercept[java.util.concurrent.TimeoutException] {
+        finished.get(100, TimeUnit.MILLISECONDS)
+      }
+      release.countDown()
+      val failure = finished.get(10, TimeUnit.SECONDS)
+      failure shouldBe a[IllegalArgumentException]
+      failure.getSuppressed.length shouldBe 1
+    } finally {
+      release.countDown()
+      caller.join(10000)
+      pipeline.close()
+      SearchThreads.shutdown(collector)
+      m.close()
+    }
+  }
+
+  test(
+    "held indexes reuse result slots independently of the number of segments"
+  ) {
+    for (calls <- Seq(1, 2)) {
+      val m = matrix(128, 0)
+      val queryBytes = allocator.getAllocatedMemory
+      val searching = new CountDownLatch(calls)
+      val sources = (1L to 20L).map { id =>
+        val target = new Fake(
+          id,
+          beforeSearch = call => {
+            if (id <= calls && call == 1) {
+              searching.countDown()
+              searching.await(10, TimeUnit.SECONDS) shouldBe true
+            }
+          }
+        )
+        SegmentSearch.Index(id, target, new BitSet())
+      }
+      val held =
+        new SegmentSearch.Held(sources, Map.empty, callsInFlight = calls)
+      try {
+        val (answer, _) =
+          held.search(m, k, MetricType.L2, Map.empty, allocator, threads = 2)
+        answer.size shouldBe 128 * k
+        // Two or three slots, not two slots for each of the twenty indexes.
+        allocator.getAllocatedMemory - queryBytes should be < 30000L
+        val (again, _) =
+          held.search(m, k, MetricType.L2, Map.empty, allocator, threads = 2)
+        again.results(0).toSeq shouldBe answer.results(0).toSeq
+      } finally { held.close(); m.close() }
+      allocator.getAllocatedMemory shouldBe 0L
+    }
+  }
+
+  test("a NaN score fails the search unless a ranking function ranks it") {
+    val m = matrix(2, 0)
+    try {
+      def nan(query: Int, slot: Int) =
+        if (query == 1 && slot == 0) Some(Float.NaN) else None
+      val failing = new IndexSearch.Pipeline(
+        new Fake(3L, scoreAt = nan),
+        new BitSet(),
+        k,
+        Map.empty,
+        allocator,
+        2
+      )
+      try {
+        failing.run(m, new TopKMerger(2, k, MetricType.L2), _ => ())
+        val failure =
+          the[IllegalArgumentException] thrownBy failing.finish(_ => ())
+        failure.getMessage should include("invalid score")
+      } finally failing.close()
+
+      val merger = new TopKMerger(2, k, MetricType.L2)
+      val ranking = new IndexSearch.Pipeline(
+        new Fake(3L, scoreAt = nan),
+        new BitSet(),
+        k,
+        Map.empty,
+        allocator,
+        2,
+        rankNonFinite = true
+      )
+      try {
+        ranking.run(m, merger, _ => ())
+        ranking.finish(_ => ())
+      } finally ranking.close()
+      // Float.compare puts NaN above every number: the worst L2 distance.
+      val ranked = merger.sort(1).results(1).map(_.score)
+      ranked.size shouldBe k
+      ranked.last.isNaN shouldBe true
+      ranked.init.forall(score => !score.isNaN) shouldBe true
+    } finally m.close()
+  }
+
+  test("a negative L2 score fails even under a ranking function") {
+    val m = matrix(1, 0)
+    try {
+      val pipeline = new IndexSearch.Pipeline(
+        new Fake(4L, scoreAt = (_, slot) => if (slot == 0) Some(-1f) else None),
+        new BitSet(),
+        k,
+        Map.empty,
+        allocator,
+        1,
+        rankNonFinite = true
+      )
+      try {
+        pipeline.run(m, new TopKMerger(1, k, MetricType.L2), _ => ())
+        val failure =
+          the[IllegalArgumentException] thrownBy pipeline.finish(_ => ())
+        failure.getMessage should include("invalid score")
+      } finally pipeline.close()
+    } finally m.close()
+  }
+
+  test("no excluded row passes no bitmap; an excluded row passes one") {
+    val m = matrix(2, 0)
+    try {
+      val fake = new Fake(1L)
+      val merger = new TopKMerger(2, k, MetricType.L2)
+      val pipeline =
+        new IndexSearch.Pipeline(fake, new BitSet(), k, Map.empty, allocator, 2)
+      try {
+        pipeline.run(m, merger, _ => ())
+        pipeline.finish(_ => ())
+      } finally pipeline.close()
+      fake.calls.get() shouldBe 1
+      // as Milvus does without a filter: the index searches unfiltered
+      fake.lastExcluded shouldBe None
+
+      // row 999 is never a hit of these queries; excluding it must reach the
+      // index as a bitmap with that bit alone set
+      val excluded = new BitSet()
+      excluded.set(999)
+      val filtered = new TopKMerger(2, k, MetricType.L2)
+      val withMask =
+        new IndexSearch.Pipeline(fake, excluded, k, Map.empty, allocator, 2)
+      try {
+        withMask.run(m, filtered, _ => ())
+        withMask.finish(_ => ())
+      } finally withMask.close()
+      val mask = fake.lastExcluded.getOrElse(fail("no bitmap was passed"))
+      mask.remaining() shouldBe ((rows + 7) / 8).toInt
+      (0 until mask.remaining()).count(mask.get(_) != 0) shouldBe 1
+      (mask.get(999 / 8) & 0xff) shouldBe (1 << (999 % 8))
+      filtered.size shouldBe 2 * k
+    } finally m.close()
+  }
+
+  test("a segment with nothing visible searches nothing") {
+    val m = matrix(2, 0)
+    try {
+      val fake = new Fake(1L)
+      val excluded = new BitSet()
+      (0 until rows.toInt).foreach(excluded.set)
+      val pipeline =
+        new IndexSearch.Pipeline(fake, excluded, k, Map.empty, allocator, 2)
+      try {
+        pipeline.count shouldBe 0
+        val merger = new TopKMerger(2, k, MetricType.L2)
+        pipeline.run(m, merger, _ => ())
+        pipeline.finish(_ => ())
+        merger.size shouldBe 0
+        fake.calls.get() shouldBe 0
+      } finally pipeline.close()
+    } finally m.close()
+  }
+}
+
+/** Sources opened one ahead of their use, and closed if never used. */
+class PrefetcherTest extends AnyFunSuite with Matchers {
+
+  private final class Source(val id: Long, val openedAt: Long)
+      extends AutoCloseable {
+    var closed = false
+    def close(): Unit = closed = true
+  }
+
+  test("with prefetch the next source opens while the current one is in use") {
+    val opened = new java.util.concurrent.ConcurrentLinkedQueue[Long]()
+    val inUse = new CountDownLatch(1)
+    val prefetcher = new SegmentSearch.Prefetcher[Source](
+      Seq(1L, 2L, 3L),
+      id => { opened.add(id); new Source(id, System.nanoTime()) },
+      prefetch = true
+    )
+    val seen = scala.collection.mutable.ArrayBuffer.empty[Long]
+    try
+      prefetcher.foreach { source =>
+        if (source.id == 1L) {
+          // the second source's open is submitted before body(1) runs
+          val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+          while (!opened.contains(2L) && System.nanoTime() < deadline)
+            Thread.sleep(5)
+          opened.contains(2L) shouldBe true
+          inUse.countDown()
+        }
+        seen += source.id
+        source.close()
+      }
+    finally prefetcher.close()
+    seen.toSeq shouldBe Seq(1L, 2L, 3L)
+    opened.size shouldBe 3
+  }
+
+  test("without prefetch sources open in turn") {
+    val opened = scala.collection.mutable.ArrayBuffer.empty[Long]
+    val prefetcher = new SegmentSearch.Prefetcher[Source](
+      Seq(1L, 2L),
+      id => { opened += id; new Source(id, 0L) },
+      prefetch = false
+    )
+    try
+      prefetcher.foreach { source =>
+        opened.toSeq shouldBe (1L to source.id)
+        source.close()
+      }
+    finally prefetcher.close()
+  }
+
+  test(
+    "a source opened ahead but never used is closed, and an open failure surfaces at its turn"
+  ) {
+    val sources = scala.collection.mutable.ArrayBuffer.empty[Source]
+    val prefetcher = new SegmentSearch.Prefetcher[Source](
+      Seq(1L, 2L, 3L),
+      id => {
+        if (id == 3L) throw new IllegalStateException("no segment 3")
+        val s = new Source(id, 0L); sources += s; s
+      },
+      prefetch = true
+    )
+    val failure = the[RuntimeException] thrownBy {
+      try
+        prefetcher.foreach { source =>
+          if (source.id == 1L) throw new RuntimeException("stop after one")
+        }
+      finally prefetcher.close()
+    }
+    // body(1) failed with our own exception; close() must still have taken and
+    // closed the source opened ahead (2) without turning that into a failure
+    failure.getMessage shouldBe "stop after one"
+    sources.map(_.id) should contain(2L)
+    sources.find(_.id == 2L).get.closed shouldBe true
+  }
+  test(
+    "interrupting a prefetched open closes the completed source before returning"
+  ) {
+    val opening = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+    val done = new CompletableFuture[Throwable]()
+    val second = new Source(2L, 0L)
+    val prefetcher = new SegmentSearch.Prefetcher[Source](
+      Seq(1L, 2L),
+      id => {
+        if (id == 1L) new Source(1L, 0L)
+        else { opening.countDown(); release.await(); second }
+      },
+      prefetch = true
+    )
+    val caller = new Thread(() => {
+      try prefetcher.foreach(_.close())
+      catch { case failure: Throwable => done.complete(failure) }
+      finally prefetcher.close()
+    })
+    try {
+      caller.start()
+      opening.await(10, TimeUnit.SECONDS) shouldBe true
+      caller.interrupt()
+      intercept[java.util.concurrent.TimeoutException](
+        done.get(100, TimeUnit.MILLISECONDS)
+      )
+      release.countDown()
+      done.get(10, TimeUnit.SECONDS) shouldBe a[InterruptedException]
+      caller.join(10000)
+      second.closed shouldBe true
+    } finally { release.countDown(); caller.join(10000); prefetcher.close() }
+  }
+
+}

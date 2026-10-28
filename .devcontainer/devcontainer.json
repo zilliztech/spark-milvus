@@ -1,0 +1,24 @@
+{
+  "name": "spark-milvus",
+  "dockerComposeFile": ["docker-compose.yml"],
+  "service": "dev",
+  "runServices": ["dev"],
+  "workspaceFolder": "/workspace",
+  "remoteUser": "dev",
+  "overrideCommand": false,
+  "shutdownAction": "stopCompose",
+  "postCreateCommand": "/workspace/scripts/devcontainer.sh init --inside",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "scalameta.metals",
+        "ms-vscode.cmake-tools",
+        "rust-lang.rust-analyzer",
+        "ms-python.python"
+      ],
+      "settings": {
+        "files.watcherExclude": { "**/target/**": true }
+      }
+    }
+  }
+}

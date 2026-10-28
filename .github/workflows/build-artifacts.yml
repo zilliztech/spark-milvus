@@ -1,0 +1,490 @@
+name: Build release candidate
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      build_native:
+        type: boolean
+        default: true
+      native_source_run_id:
+        type: string
+        default: ''
+    outputs:
+      candidate_artifact:
+        description: Maven candidate and its immutable release manifest
+        value: ${{ jobs.candidate.outputs.artifact }}
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-22.04
+    outputs:
+      native: ${{ steps.plan.outputs.native }}
+      jvm: ${{ steps.plan.outputs.jvm }}
+      image: ${{ steps.plan.outputs.image }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: sbt
+      - uses: sbt/setup-sbt@v1
+      - name: Export the authoritative JVM matrix
+        run: sbt 'exportBuildMatrix build-matrix.json'
+      - id: plan
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          python3 scripts/release.py plan --version "$RELEASE_VERSION" --matrix build-matrix.json --output plan.json
+          python3 - <<'PY'
+          import json, os
+          plan = json.load(open('plan.json'))
+          # The Spark 4.0 image covers the Linux native platforms; each is
+          # assembled on its own architecture because sbt validates the
+          # bundle against the build host.
+          docker = {'linux-x86_64': 'linux/amd64', 'linux-aarch64': 'linux/arm64'}
+          image = [{'platform': row['platform'], 'runner': row['runner'],
+                    'docker_platform': docker[row['platform']]}
+                   for row in plan['native'] if row['platform'] in docker]
+          if len(image) != len(docker):
+              raise SystemExit('Release plan must build every Linux native platform')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              for key, rows in (('native', plan['native']), ('jvm', plan['jvm']), ('image', image)):
+                  print(f'{key}={json.dumps({"include": rows}, separators=(",", ":"))}', file=out)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-plan
+          path: plan.json
+          if-no-files-found: error
+          retention-days: 14
+
+  native:
+    name: Native (${{ matrix.platform }})
+    needs: plan
+    if: inputs.build_native
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.native) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: false
+      - name: Initialize public engine sources
+        run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Read the pinned toolchain versions
+        id: toolchain
+        run: python3 -c 'import json; print("java=" + json.load(open("native/build/toolchain.json"))["java"])' >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ steps.toolchain.outputs.java }}
+      - name: Initialize cache locations
+        run: |
+          printf 'CONAN_HOME=%s/native-cache/conan\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'CCACHE_DIR=%s/native-cache/ccache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'CCACHE_MAXSIZE=2G\n' >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s/native-cache/cargo\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Prepare native toolchain
+        env:
+          NATIVE_PLATFORM: ${{ matrix.platform }}
+        run: bash scripts/ci/prepare_native.sh "$NATIVE_PLATFORM"
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-plan
+          path: release-inputs
+      - name: Fingerprint native inputs and the prepared toolchain
+        id: fingerprint
+        env:
+          NATIVE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          python3 scripts/native-cache-key.py --plan release-inputs/plan.json \
+            --platform "$NATIVE_PLATFORM" --output "$RUNNER_TEMP/native-cache-inputs.json" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Preserve cache inputs before a potentially long rebuild
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cache-inputs-${{ matrix.platform }}
+          path: ${{ runner.temp }}/native-cache-inputs.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Restore the exact native bundle
+        id: bundle-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/native-${{ matrix.platform }}/milvus-native-${{ matrix.platform }}.jar
+            target/native-${{ matrix.platform }}/milvus-native-${{ matrix.platform }}.jar.properties
+          key: ${{ steps.fingerprint.outputs.key }}
+      - name: Restore the exact-commit branch native artifact
+        id: branch-bundle
+        if: steps.bundle-cache.outputs.cache-hit != 'true' && inputs.native_source_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: native-${{ matrix.platform }}
+          path: target/native-${{ matrix.platform }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.native_source_run_id }}
+      - name: Verify the exact-commit branch native artifact
+        id: branch_bundle_verify
+        if: steps.branch-bundle.outcome == 'success'
+        env:
+          NATIVE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          python3 scripts/ci/verify_native_reuse.py \
+            --artifact "target/native-$NATIVE_PLATFORM" \
+            --expected-cache-inputs "$RUNNER_TEMP/native-cache-inputs.json" \
+            --platform "$NATIVE_PLATFORM"
+      - name: Restore compatible native dependencies
+        id: dependency-cache
+        if: steps.bundle-cache.outputs.cache-hit != 'true' && steps.branch_bundle_verify.outcome != 'success'
+        uses: actions/cache/restore@v4
+        with:
+          # Conan auth lives outside p/. Cargo credentials live outside these
+          # download directories. Neither is part of this cache.
+          path: |
+            ${{ env.CONAN_HOME }}/p
+            ${{ env.CCACHE_DIR }}
+            ${{ env.CARGO_HOME }}/registry
+            ${{ env.CARGO_HOME }}/git
+          key: ${{ steps.fingerprint.outputs.dependency_key_prefix }}${{ steps.fingerprint.outputs.key_digest }}
+          restore-keys: ${{ steps.fingerprint.outputs.dependency_key_prefix }}
+      - name: Build both native engines on a bundle cache miss
+        id: native_build
+        if: steps.bundle-cache.outputs.cache-hit != 'true' && steps.branch_bundle_verify.outcome != 'success'
+        env:
+          NATIVE_PLATFORM: ${{ matrix.platform }}
+          NATIVE_JOBS: ${{ matrix.build_jobs }}
+        run: |
+          make native-bundle \
+            NATIVE_WORK_DIR="$RUNNER_TEMP/native-build/$NATIVE_PLATFORM" \
+            NATIVE_BUNDLE_OUTPUT="$GITHUB_WORKSPACE/target/native-$NATIVE_PLATFORM/milvus-native-$NATIVE_PLATFORM.jar" \
+            NATIVE_JOBS="$NATIVE_JOBS"
+      - name: Audit the native ABI on every build and cache hit
+        env:
+          NATIVE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          python3 scripts/check-native-abi.py \
+            --bundle "target/native-$NATIVE_PLATFORM/milvus-native-$NATIVE_PLATFORM.jar" \
+            --platform "$NATIVE_PLATFORM" \
+            --output "target/native-$NATIVE_PLATFORM/abi.json"
+          cp "$RUNNER_TEMP/native-cache-inputs.json" "target/native-$NATIVE_PLATFORM/cache-inputs.json"
+      - name: Trim dependency caches before saving
+        # A build that failed or timed out still leaves finished dependency
+        # packages and compiler cache behind; saving them lets the next attempt
+        # continue instead of starting over, which matters most for the macOS
+        # runner's first build of the whole dependency graph.
+        if: ${{ !cancelled() && steps.native_build.outcome != 'skipped' }}
+        run: |
+          conan cache clean '*' --build --source --download --temp
+          ccache --cleanup
+          for cache_dir in "$CONAN_HOME/p" "$CARGO_HOME/registry" "$CARGO_HOME/git" "$CCACHE_DIR"; do
+            if [[ -d "$cache_dir" ]]; then
+              du -sh "$cache_dir"
+            else
+              printf 'Cache directory absent: %s\n' "$cache_dir"
+            fi
+          done
+      # A failed build still saves what it built on top of what it restored. A
+      # cancelled one does not: actions/cache restores the newest key with the
+      # prefix, so a cache cut short early would shadow a complete one.
+      - name: Save native dependencies
+        if: ${{ !cancelled() && steps.native_build.outcome != 'skipped' && steps.dependency-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.CONAN_HOME }}/p
+            ${{ env.CCACHE_DIR }}
+            ${{ env.CARGO_HOME }}/registry
+            ${{ env.CARGO_HOME }}/git
+          key: ${{ steps.fingerprint.outputs.dependency_key_prefix }}${{ steps.fingerprint.outputs.key_digest }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.platform }}
+          path: target/native-${{ matrix.platform }}/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Preserve native diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-diagnostics-${{ matrix.platform }}
+          path: |
+            ${{ runner.temp }}/native-build/${{ matrix.platform }}/status.json
+            ${{ runner.temp }}/native-build/${{ matrix.platform }}/provenance/
+            ${{ runner.temp }}/native-build/${{ matrix.platform }}/bundle/audit/
+          if-no-files-found: warn
+          retention-days: 7
+
+  native-cpu:
+    name: Native CPU portability (linux-x86_64)
+    needs: native
+    if: inputs.build_native
+    # QEMU 8+ implements the AVX/AVX2/FMA features required by this gate.
+    # The native build itself retains its Ubuntu 22.04 ABI baseline.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: false
+      - name: Initialize the pinned upstream CPU probe
+        run: git submodule update --init knowhere
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare the CPU emulator and probe compiler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends gcc-12 qemu-user binutils
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-linux-x86_64
+          path: native-input
+      - name: Check native CPU portability on every build and cache hit
+        run: |
+          python3 scripts/check-native-cpu.py \
+            --bundle native-input/milvus-native-linux-x86_64.jar \
+            --output cpu-results/cpu.json
+      - name: Preserve CPU diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpu-diagnostics-linux-x86_64
+          path: cpu-results/
+          if-no-files-found: warn
+          retention-days: 7
+
+  jvm:
+    name: JVM (Spark ${{ matrix.line }})
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.jvm) }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: false
+      - name: Initialize public API sources
+        run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '${{ matrix.java }}'
+          cache: sbt
+      - uses: sbt/setup-sbt@v1
+      - name: Build the JVM artifact without a native bundle
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          SPARK_LINE: ${{ matrix.line }}
+          SCALA_VERSION: ${{ matrix.scala }}
+        run: sbt "-DsparkVersion=$SPARK_LINE" "-DscalaVersion=$SCALA_VERSION" "-Drelease.version=$RELEASE_VERSION" "spark/releaseJvmArtifacts"
+      - name: Export transitive thin modules for Spark 4.0
+        if: matrix.line == '4.0'
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: sbt -DsparkVersion=4.0 -DscalaVersion=2.13.16 "-Drelease.version=$RELEASE_VERSION" "spark/releaseThinArtifacts"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jvm-${{ matrix.line }}
+          path: target/release-jvm/${{ matrix.line }}/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: matrix.line == '4.0'
+        with:
+          name: thin-${{ matrix.line }}
+          path: target/release-thin/${{ matrix.line }}/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  assembly:
+    name: Spark 4.0 assembly and image (${{ matrix.platform }})
+    needs: [plan, native, native-cpu]
+    if: inputs.build_native
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.image) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: false
+      - name: Initialize public API sources
+        run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: sbt
+      - uses: sbt/setup-sbt@v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-plan
+          path: release-inputs
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-${{ matrix.platform }}
+          path: native-input
+      - name: Build the Spark 4.0 assembly from the audited native bundle
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          NATIVE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          sbt -DsparkVersion=4.0 -DscalaVersion=2.13.16 "-Drelease.version=$RELEASE_VERSION" \
+            "-Dmilvus.native.bundle=$GITHUB_WORKSPACE/native-input/milvus-native-$NATIVE_PLATFORM.jar" \
+            spark/assembly
+      - name: Stage the assembly with its release identity
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          NATIVE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          python3 scripts/ci/assembly_image.py stage \
+            --assembly "spark/target/scala-2.13/spark-milvus-4.0-bundle-$RELEASE_VERSION.jar" \
+            --plan release-inputs/plan.json --platform "$NATIVE_PLATFORM" \
+            --native-bundle "native-input/milvus-native-$NATIVE_PLATFORM.jar" \
+            --output "target/assembly-$NATIVE_PLATFORM"
+      - name: Build the image locally and run both demo languages in it
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          NATIVE_PLATFORM: ${{ matrix.platform }}
+          DOCKER_PLATFORM: ${{ matrix.docker_platform }}
+        run: |
+          image="spark-milvus:ci-$NATIVE_PLATFORM"
+          ./docker/build.sh \
+            --assembly "$GITHUB_WORKSPACE/target/assembly-$NATIVE_PLATFORM/spark-milvus-4.0-bundle-$RELEASE_VERSION.jar" \
+            --image "$image" --platform "$DOCKER_PLATFORM"
+          docker run --rm "$image" /opt/spark-milvus/demo/run.sh python 04_exact_search.py
+          docker run --rm "$image" /opt/spark-milvus/demo/run.sh java IndexSearch --explain
+      - uses: actions/upload-artifact@v4
+        with:
+          name: assembly-${{ matrix.platform }}
+          path: target/assembly-${{ matrix.platform }}/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  darwin-reads:
+    name: Native reads and search (darwin-aarch64)
+    needs: native
+    if: inputs.build_native
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: false
+      - run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: sbt
+      - uses: sbt/setup-sbt@v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-darwin-aarch64
+          path: native-input
+      - name: Let the children of a JVM preloading libjsig run
+        run: scripts/ci/prepare_macos_jvm_children.sh
+      - name: Export the JVM matrix the read suites select from
+        run: sbt 'exportBuildMatrix build-matrix.json'
+      - name: Require the shared native read suites on macOS
+        run: python3 scripts/ci/read_validation.py shared --matrix build-matrix.json --scala 2.13.16 --native-bundle native-input/milvus-native-darwin-aarch64.jar
+      - name: Require every Spark 4.0 read/search suite on macOS
+        run: python3 scripts/ci/read_validation.py spark --matrix build-matrix.json --line 4.0 --scala 2.13.16 --native-bundle native-input/milvus-native-darwin-aarch64.jar
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: darwin-reads-4.0-2.13.16
+          path: |
+            target/read-ci/
+            **/target/test-reports/
+          if-no-files-found: error
+          retention-days: 7
+
+  candidate:
+    needs: [native, native-cpu, darwin-reads, jvm]
+    if: inputs.build_native
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    outputs:
+      artifact: ${{ steps.identity.outputs.artifact }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-plan
+          path: release-inputs
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: jvm-*
+          path: release-inputs
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: thin-*
+          path: release-inputs
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-linux-*
+          path: release-inputs
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-darwin-*
+          path: release-inputs
+      - name: Assemble and verify the Maven candidate
+        run: |
+          python3 scripts/release.py stage --plan release-inputs/plan.json --inputs release-inputs --output candidate
+          python3 scripts/release.py verify --candidate candidate
+      - id: identity
+        run: echo "artifact=release-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.identity.outputs.artifact }}
+          path: candidate/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

@@ -1,0 +1,9 @@
+The V3 read Job is {{ include "spark-milvus-integration.fullname" . }}.
+
+Follow its logs with:
+
+  kubectl logs --namespace {{ .Release.Namespace }} --follow job/{{ include "spark-milvus-integration.fullname" . }}
+
+The existing Secret {{ .Values.readOptions.existingSecret }} supplies two input
+identities. The Job reads fixed V3 files and does not prepare a Milvus service.
+Uninstalling the release does not delete input files or the external Secret.

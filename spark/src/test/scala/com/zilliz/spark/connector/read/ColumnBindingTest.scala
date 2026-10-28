@@ -1,0 +1,255 @@
+package com.zilliz.spark.connector.read
+
+import scala.jdk.CollectionConverters._
+
+import org.apache.spark.sql.types._
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
+import org.scalatest.funsuite.AnyFunSuite
+import org.scalatest.matchers.should.Matchers
+
+import com.zilliz.milvus.storage.delete.DeletePlan
+import com.zilliz.milvus.storage.read.plan.{DeleteSource, SegmentReadTask}
+import com.zilliz.milvus.storage.snapshot.SegmentLayout
+import com.zilliz.spark.connector.options.MilvusOption
+import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
+
+/** The derivation both readers share.
+  *
+  * It was inside each row reader before, and the columnar reader would have
+  * been a third and fourth copy. These cases pin the part that differs between
+  * the two lines — what a column is called — and the part that does not.
+  */
+class ColumnBindingTest extends AnyFunSuite with Matchers {
+
+  private val milvusSchema = CollectionSchema(
+    name = "t",
+    fields = Seq(
+      FieldSchema(
+        fieldID = 100L,
+        name = "id",
+        dataType = DataType.Int64,
+        isPrimaryKey = true
+      ),
+      FieldSchema(fieldID = 1L, name = "Timestamp", dataType = DataType.Int64),
+      FieldSchema(
+        fieldID = 101L,
+        name = "vec",
+        dataType = DataType.FloatVector,
+        // Every vector field carries its dim; the schema mapper needs it to
+        // size the fixed-width blob.
+        typeParams = Seq(io.milvus.grpc.common.KeyValuePair("dim", "4"))
+      )
+    )
+  )
+
+  private val schemaBytes = milvusSchema.toByteArray
+
+  private val dataSchema = StructType(
+    Seq(
+      StructField("id", LongType),
+      StructField("Timestamp", LongType),
+      StructField("vec", ArrayType(FloatType))
+    )
+  )
+
+  private val options = MilvusOption(
+    new CaseInsensitiveStringMap(new java.util.HashMap[String, String]())
+  )
+
+  private def task(
+      layout: SegmentLayout,
+      deletes: DeleteSource = DeleteSource.None
+  ) = SegmentReadTask(
+    segmentId = 30L,
+    partitionId = 20L,
+    layout = layout,
+    schemaBytes = schemaBytes,
+    properties = Map("fs.storage_type" -> "local"),
+    deletes = deletes
+  )
+
+  private def v3(deletes: DeleteSource = DeleteSource.None) =
+    ColumnBinding(
+      MilvusInputPartition(
+        task(SegmentLayout.Manifest("files/seg"), deletes),
+        options.milvusFilter
+      ),
+      dataSchema
+    )
+
+  // The manifest matches columns by field id; a column group uses the field's
+  // own name. Getting this backwards means the native reader is asked for
+  // columns that are not there.
+  test("V3 names columns by field id") {
+    v3().columnNameFor(101L) shouldBe Some("101")
+
+    v3().pkColumnName shouldBe "100"
+
+    v3().timestampColumnName shouldBe "1"
+    v3().arrowColumnFor(
+      MilvusOption.MilvusExtraColumnTimestamp
+    ) shouldBe "1"
+  }
+
+  // A user field named "timestamp" is not field 1; the schema handed to the
+  // native reader must still hold field 1, which delete application asks for.
+  test("a user field named timestamp does not displace stored field 1") {
+    val schema = CollectionSchema(
+      name = "t",
+      fields = Seq(
+        FieldSchema(
+          fieldID = 100L,
+          name = "id",
+          dataType = DataType.Int64,
+          isPrimaryKey = true
+        ),
+        FieldSchema(
+          fieldID = 101L,
+          name = "timestamp",
+          dataType = DataType.Int64
+        ),
+        FieldSchema(
+          fieldID = 102L,
+          name = "vec",
+          dataType = DataType.FloatVector,
+          typeParams = Seq(io.milvus.grpc.common.KeyValuePair("dim", "4"))
+        )
+      )
+    )
+    val deletes =
+      DeleteSource.Materialized(DeletePlan.fromLongPks(Map(1L -> 100L)))
+    val wanted = StructType(Seq(StructField("vec", ArrayType(FloatType))))
+    val v3Binding = ColumnBinding(
+      MilvusInputPartition(
+        task(SegmentLayout.Manifest("files/seg"), deletes)
+          .copy(schemaBytes = schema.toByteArray),
+        options.milvusFilter
+      ),
+      wanted
+    )
+    v3Binding.neededColumns should contain("1")
+    v3Binding.arrowSchema.getFields.asScala.map(_.getName) should contain("1")
+    v3Binding.arrowSchema.getFields.asScala.map(_.getName) should contain("101")
+
+  }
+
+  test("a dynamic field keeps its recorded id in V3 metadata") {
+    val dynamicField = FieldSchema(
+      fieldID = 407L,
+      name = "$meta",
+      dataType = DataType.JSON,
+      isDynamic = true,
+      nullable = true
+    )
+    val dynamicSchema = milvusSchema.copy(
+      enableDynamicField = true,
+      fields = milvusSchema.fields :+ dynamicField
+    )
+    val outputSchema = StructType(Seq(StructField("$meta", StringType)))
+
+    val v3Task = task(SegmentLayout.Manifest("files/seg")).copy(
+      schemaBytes = dynamicSchema.toByteArray,
+      neededFieldIds = Seq(407L)
+    )
+    val v3Binding = ColumnBinding(
+      MilvusInputPartition(v3Task, options.milvusFilter),
+      outputSchema
+    )
+
+    v3Binding.arrowColumnFor("$meta") shouldBe "407"
+    v3Binding.neededColumns shouldBe Seq("407")
+  }
+
+  // The schema mapper prepends the system fields, so this is about naming
+  // style, not position.
+  test("the V3 Arrow schema is named the same way as its columns") {
+    import scala.jdk.CollectionConverters._
+
+    val v3Names = v3().arrowSchema.getFields.asScala.map(_.getName)
+    v3Names should contain allOf ("100", "101")
+    v3Names should not contain "vec"
+  }
+
+  test("without deletes only the requested columns are read") {
+    v3().neededColumns should contain theSameElementsAs Seq("100", "1", "101")
+  }
+
+  test("task field ids include a projected-away physical dependency") {
+    val projectedTask = task(SegmentLayout.Manifest("files/seg")).copy(
+      neededFieldIds = Seq(101L)
+    )
+    val binding = ColumnBinding(
+      MilvusInputPartition(projectedTask, options.milvusFilter),
+      StructType(Seq(StructField("id", LongType)))
+    )
+
+    binding.neededColumns shouldBe Seq("101")
+  }
+
+  test("the V3 timestamp metadata column reads stored field id 1") {
+    val binding = ColumnBinding(
+      MilvusInputPartition(
+        task(SegmentLayout.Manifest("files/seg")),
+        options.milvusFilter
+      ),
+      StructType(
+        Seq(
+          StructField(MilvusOption.MilvusExtraColumnTimestamp, LongType)
+        )
+      )
+    )
+
+    binding.arrowColumnFor(
+      MilvusOption.MilvusExtraColumnTimestamp
+    ) shouldBe "1"
+    binding.neededColumns shouldBe Seq("1")
+  }
+
+  // Deletes are keyed by primary key and timestamp, so both columns have to be
+  // read even when nothing asked for them — which is what makes deletes cost
+  // column pruning.
+  test("deletes pull in the primary key and the timestamp") {
+    val plan = DeletePlan.fromLongPks(Map(1L -> 100L))
+    val narrow = StructType(Seq(StructField("vec", ArrayType(FloatType))))
+
+    val withDeletes = ColumnBinding(
+      MilvusInputPartition(
+        task(
+          SegmentLayout.Manifest("files/seg"),
+          DeleteSource.Materialized(plan)
+        ),
+        options.milvusFilter
+      ),
+      narrow
+    )
+    withDeletes.neededColumns should contain allOf ("100", "1")
+    withDeletes.appliesDeletes shouldBe true
+
+    val without = ColumnBinding(
+      MilvusInputPartition(
+        task(SegmentLayout.Manifest("files/seg")),
+        options.milvusFilter
+      ),
+      narrow
+    )
+    without.neededColumns should not contain "1"
+    without.appliesDeletes shouldBe false
+  }
+
+  test("column binding is chosen by the task layout") {
+    ColumnBinding(
+      MilvusInputPartition(
+        task(SegmentLayout.Manifest("files/seg")),
+        options.milvusFilter
+      ),
+      dataSchema
+    ) shouldBe a[V3ColumnBinding]
+  }
+
+  test("a partition with no deletes never calls the delete plan") {
+    // isDeleted has to be cheap and safe on the common path: no primary key
+    // lookup, no column lookup, no exception when neither is loaded.
+    v3().isDeleted(null, 0) shouldBe false
+  }
+
+}

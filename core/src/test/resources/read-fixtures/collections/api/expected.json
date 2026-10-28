@@ -1,0 +1,185 @@
+{
+  "dimension": 2,
+  "rowTimestamp": 100,
+  "segments": [
+    {
+      "id": 30,
+      "deletedIds": [],
+      "metric": "L2",
+      "rows": [
+        {
+          "id": 3000,
+          "vector": [
+            1.0,
+            1.0
+          ],
+          "category": 0
+        },
+        {
+          "id": 3001,
+          "vector": [
+            2.0,
+            1.0
+          ],
+          "category": 1
+        },
+        {
+          "id": 3002,
+          "vector": [
+            3.0,
+            1.0
+          ],
+          "category": 0
+        },
+        {
+          "id": 3003,
+          "vector": [
+            4.0,
+            1.0
+          ],
+          "category": 1
+        },
+        {
+          "id": 3004,
+          "vector": [
+            5.0,
+            1.0
+          ],
+          "category": 0
+        },
+        {
+          "id": 3005,
+          "vector": [
+            6.0,
+            1.0
+          ],
+          "category": 1
+        },
+        {
+          "id": 3006,
+          "vector": [
+            7.0,
+            1.0
+          ],
+          "category": 0
+        },
+        {
+          "id": 3007,
+          "vector": [
+            8.0,
+            1.0
+          ],
+          "category": 1
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "deletedIds": [],
+      "metric": "L2",
+      "rows": [
+        {
+          "id": 3100,
+          "vector": [
+            1.0,
+            2.0
+          ],
+          "category": 0
+        },
+        {
+          "id": 3101,
+          "vector": [
+            2.0,
+            2.0
+          ],
+          "category": 1
+        },
+        {
+          "id": 3102,
+          "vector": [
+            3.0,
+            2.0
+          ],
+          "category": 0
+        },
+        {
+          "id": 3103,
+          "vector": [
+            4.0,
+            2.0
+          ],
+          "category": 1
+        },
+        {
+          "id": 3104,
+          "vector": [
+            5.0,
+            2.0
+          ],
+          "category": 0
+        },
+        {
+          "id": 3105,
+          "vector": [
+            6.0,
+            2.0
+          ],
+          "category": 1
+        },
+        {
+          "id": 3106,
+          "vector": [
+            7.0,
+            2.0
+          ],
+          "category": 0
+        },
+        {
+          "id": 3107,
+          "vector": [
+            8.0,
+            2.0
+          ],
+          "category": 1
+        }
+      ]
+    }
+  ],
+  "survivingIds": [
+    3000,
+    3001,
+    3002,
+    3003,
+    3004,
+    3005,
+    3006,
+    3007,
+    3100,
+    3101,
+    3102,
+    3103,
+    3104,
+    3105,
+    3106,
+    3107
+  ],
+  "queryVector": [
+    1.0,
+    3.0
+  ],
+  "top3InnerProductIds": [
+    3107,
+    3106,
+    3105
+  ],
+  "top3SquaredL2Ids": [
+    3100,
+    3101,
+    3000
+  ],
+  "top3SquaredL2Distances": [
+    1.0,
+    2.0,
+    4.0
+  ]
+}

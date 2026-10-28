@@ -1,0 +1,63 @@
+nameOverride: ""
+fullnameOverride: ""
+
+# Defaults to the Helm release name. CI may set a separate stable identifier.
+runId: ""
+
+# Internal marker set by run.sh so it only cleans up releases it created.
+ownershipToken: ""
+
+image:
+  # Both values are required. The digest makes the executed image immutable.
+  repository: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+runner:
+  # The dedicated read-test image supplies this executable.
+  command:
+    - /opt/spark-milvus/bin/run-read-tests
+  args: []
+# Required Secret with two independently authorized V3 input option files,
+# a.json and b.json. The Job only mounts existing input configuration.
+readOptions:
+  existingSecret: ""
+
+job:
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 3600
+  annotations: {}
+
+pod:
+  annotations: {}
+  serviceAccountName: ""
+  automountServiceAccountToken: false
+  terminationGracePeriodSeconds: 30
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  requests:
+    cpu: "2"
+    memory: 4Gi
+  limits:
+    cpu: "4"
+    memory: 8Gi
+
+# The unified storage and Knowhere native bundle is validated on amd64 and
+# arm64; the selector follows the image you built.
+nodeSelector:
+  kubernetes.io/arch: amd64
+
+tolerations: []
+affinity: {}

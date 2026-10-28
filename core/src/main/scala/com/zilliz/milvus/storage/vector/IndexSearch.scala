@@ -1,0 +1,627 @@
+package com.zilliz.milvus.storage.vector
+
+import java.lang.{Float => JavaFloat}
+import java.nio.{ByteBuffer, ByteOrder}
+import java.util.concurrent.{ExecutorService, Executors, Future, ThreadFactory}
+import java.util.BitSet
+import scala.util.Try
+
+import org.apache.arrow.memory.{ArrowBuf, BufferAllocator}
+
+import com.zilliz.milvus.storage.schema.MetricType
+
+/** Searches a segment through the index the Milvus format side opened. One call
+  * answers a whole query group. A query that comes back with fewer visible hits
+  * than it asked for is retried with a wider `ef`, up to eight times, which is
+  * what section 2.4 fixes.
+  *
+  * A segment's groups go through a [[Pipeline]]: the task thread hands the
+  * index one group after another, and a second thread checks and collects each
+  * answer while the index is already searching the next group. On the P3 chunk
+  * that was profiled a group's search took 238 ms of native time and its
+  * checking and collecting 30 ms of Java time, one after the other on the task
+  * thread while the other cores waited; pipelined, the Java time hides behind
+  * the next search.
+  *
+  * At k = 10,000 the same chunk's answer holds a hundred times the candidates
+  * of the profiled k = 100 and its checking and collecting take longer than the
+  * search: 100 ms against 224 ms of search on one thread, with the other seven
+  * cores idle. The pipeline therefore cuts an answer into `threads` shards of
+  * queries and checks and collects them at once on [[SearchThreads]]; a query's
+  * candidates go to that query's heap alone, so the shards never touch the same
+  * slot of the merger (2026-09-27 decision).
+  */
+object IndexSearch {
+
+  private val MaxAttempts = 8
+
+  /** An owned index ready to search. The format adapter opens it and interprets
+    * its row mapping; a pipeline borrows it, and the source closes it only
+    * after every search and collect has drained.
+    */
+  trait Target extends AutoCloseable {
+    def segmentId: Long
+    def rows: Long
+    def dimension: Int
+    def metric: MetricType
+    def indexType: String
+    def family: String
+    def bytes: Long
+
+    /** Convert an index label to its physical input row. */
+    def rowOf(label: Long): Long
+
+    /** Convert excluded input rows to the index labels the engine masks. */
+    def labelsOf(excluded: BitSet): BitSet
+
+    /** Knowhere's search: `queryRows` queries of `dimension` values in
+      * `queries`, the top `topK` of the rows not set in `excluded` (null when
+      * no row is excluded), into `ids` (int64, -1 pads a short answer) and
+      * `scores` (float32). Safe to call from one thread at a time per buffer
+      * pair; two threads may search the same index at once.
+      */
+    def search(
+        queries: ByteBuffer,
+        queryRows: Long,
+        topK: Int,
+        excluded: ByteBuffer,
+        ids: ByteBuffer,
+        scores: ByteBuffer,
+        parameters: String
+    ): Unit
+  }
+
+  /** How wide the HNSW search is: `ef` if the caller named it, otherwise
+    * `max(64, k)`. It is the only search parameter this connector accepts, and
+    * it cannot be smaller than k.
+    */
+  def searchEf(topK: Int, parameters: Map[String, String]): Int = {
+    require(
+      parameters != null && parameters.keySet.subsetOf(Set("ef")),
+      "HNSW search supports only the ef parameter"
+    )
+    val ef = parameters
+      .get("ef")
+      .map { value =>
+        require(
+          value != null && value.matches("[0-9]+"),
+          "HNSW ef must be a positive integer"
+        )
+        val parsed = Try(value.toInt)
+          .getOrElse(
+            throw new IllegalArgumentException(
+              "HNSW ef exceeds the supported integer range"
+            )
+          )
+        require(parsed > 0, "HNSW ef must be positive")
+        parsed
+      }
+      .getOrElse(math.max(64, topK))
+    require(ef >= topK, "HNSW ef must be at least topK")
+    ef
+  }
+
+  /** One segment's index answering query groups, the search of a group
+    * overlapping the checking and collecting of the one before.
+    *
+    * The task thread calls [[Pipeline.run]] once per group: it searches into
+    * one of two buffer pairs and hands the answer to a single worker thread,
+    * which checks it (and, for a short answer, searches again wider on the same
+    * buffers before it collects), then adds the hits to that group's merger.
+    * The two buffer pairs mean a search can start while the previous answer is
+    * still being read; a third group waits for the first's worker to finish,
+    * which on the profiled chunk it never does, the worker being eight times
+    * faster than the search. Every group's merger is touched by the worker
+    * alone until [[Pipeline.finish]] returns, after which the task thread owns
+    * them again.
+    *
+    * `maxQueries` sizes the buffers once for the largest group; the exclusion
+    * mask is written once for the segment rather than once per group. `threads`
+    * is how many shards of queries an answer is checked and collected in at
+    * once; one keeps everything on the worker thread. With `rankNonFinite` a
+    * NaN or infinite score is a value like any other, ranked by
+    * `Float.compare`, as the ranking function of a nearest-by join ranks it;
+    * without it such a score fails the search.
+    */
+  /** A group's search in progress on one pipeline: handed out by
+    * [[Pipeline.begin]], run by [[Pipeline.search]] on any thread, handed to
+    * the collector by [[Pipeline.complete]] on the thread that began it.
+    */
+  sealed trait Answer
+
+  /** Native ids and scores for concurrent calls plus one collecting answer. */
+  def resultBytes(queries: Int, k: Int, callsInFlight: Int): Long = {
+    val hits = Math.multiplyExact(queries.toLong, k.toLong)
+    def allocated(width: Long): Long = {
+      val bytes = Math.multiplyExact(hits, width)
+      if (bytes <= 1L) bytes
+      else Math.multiplyExact(java.lang.Long.highestOneBit(bytes - 1L), 2L)
+    }
+    Math.multiplyExact(allocated(8L) + allocated(4L), callsInFlight.toLong + 1L)
+  }
+
+  /** Result slots belong to concurrent calls, independently of retained
+    * indexes. A shared collector serializes the use of the checking scratch
+    * arrays.
+    */
+  final class Workspace(
+      val maxQueries: Int,
+      val maxHits: Int,
+      rows: Long,
+      threads: Int,
+      slotCount: Int,
+      allocator: BufferAllocator
+  ) extends AutoCloseable {
+    final class Slot {
+      val ids: ArrowBuf = allocator.buffer(maxQueries.toLong * maxHits * 8L)
+      val scores: ArrowBuf =
+        try allocator.buffer(maxQueries.toLong * maxHits * 4L)
+        catch { case failure: Throwable => ids.close(); throw failure }
+      var pending: Option[Future[Unit]] = None
+      def close(): Unit = try scores.close()
+      finally ids.close()
+    }
+    val seen = Array.fill(threads)(new Array[Long](((rows + 63L) >>> 6).toInt))
+    val touched = Array.fill(threads)(new Array[Int](math.max(maxHits, 1)))
+    val slots: Array[Slot] = {
+      val made = scala.collection.mutable.ArrayBuffer.empty[Slot]
+      try {
+        (0 until slotCount).foreach(_ => made += new Slot)
+        made.toArray
+      } catch {
+        case failure: Throwable =>
+          made.foreach { slot =>
+            try slot.close()
+            catch { case later: Throwable => failure.addSuppressed(later) }
+          }
+          throw failure
+      }
+    }
+    private var turn = 0
+    def next(): Slot = {
+      val slot = slots(turn)
+      try slot.pending.foreach(SearchThreads.await(_))
+      finally slot.pending = None
+      turn = (turn + 1) % slots.length
+      slot
+    }
+    def finish(): Unit = {
+      try SearchThreads.awaitAll(slots.flatMap(_.pending).toSeq)
+      finally slots.foreach(_.pending = None)
+    }
+    override def close(): Unit = {
+      var failure: Throwable = null
+      try finish()
+      catch { case cause: Throwable => failure = cause }
+      slots.foreach { slot =>
+        try slot.close()
+        catch {
+          case cause: Throwable =>
+            if (failure == null) failure = cause
+            else if (failure ne cause) failure.addSuppressed(cause)
+        }
+      }
+      if (failure != null) throw failure
+    }
+  }
+
+  final class Pipeline(
+      target: Target,
+      excluded: BitSet,
+      k: Int,
+      parameters: Map[String, String],
+      allocator: BufferAllocator,
+      val maxQueries: Int,
+      val threads: Int = 1,
+      rankNonFinite: Boolean = false,
+      // The thread the answers are checked and collected on. A task whose
+      // pipelines share one (SegmentSearch.Held) keeps its collects in order
+      // behind one another while its searches go on, so one merger is never
+      // written by two collects at once; a pipeline given none makes its own.
+      collector: Option[ExecutorService] = None,
+      sharedWorkspace: Option[Workspace] = None
+  ) extends AutoCloseable {
+    require(k > 0, s"topK must be positive: $k")
+    require(
+      maxQueries > 0,
+      s"A pipeline serves at least one query: $maxQueries"
+    )
+    require(
+      threads > 0,
+      s"A pipeline collects on at least one thread: $threads"
+    )
+    private val rows = target.rows
+    require(
+      rows <= 256L * 1024 * 1024 * 8,
+      "Segment exclusion bitmap exceeds the supported size"
+    )
+    private val labels = target.labelsOf(excluded)
+    private val visible = rows - labels.cardinality()
+
+    /** Hits asked of the index per query: k, or every visible row when the
+      * segment has fewer.
+      */
+    val count: Int = math.max(0, math.min(k.toLong, visible)).toInt
+    private val maskBytes = (rows + 7L) / 8L
+    private val mask = allocator.buffer(maskBytes)
+    private val workspace =
+      try
+        sharedWorkspace.getOrElse(
+          new Workspace(maxQueries, count, rows, threads, 2, allocator)
+        )
+      catch { case failure: Throwable => mask.close(); throw failure }
+    require(
+      maxQueries <= workspace.maxQueries && count <= workspace.maxHits,
+      "The shared index workspace must fit this pipeline"
+    )
+    private type Slot = workspace.Slot
+    private val ownWorker = collector.isEmpty
+    private val worker = collector.getOrElse(
+      Executors.newSingleThreadExecutor(new ThreadFactory {
+        def newThread(runnable: Runnable): Thread = {
+          val thread =
+            new Thread(runnable, s"index-search-collect-${target.segmentId}")
+          thread.setDaemon(true)
+          thread
+        }
+      })
+    )
+    private final class Begun(
+        val slot: Slot,
+        val queries: QueryMatrix,
+        val width: Option[Int]
+    ) extends Answer {
+      @volatile var nanos: Long = 0L
+    }
+    private object Nothing extends Answer
+    private var retriedCalls = 0
+    private var retriedNanos = 0L
+    if (count > 0 && !labels.isEmpty) writeMask(labels, rows, mask)
+
+    private def bytes(buffer: ArrowBuf, length: Long): ByteBuffer =
+      buffer.nioBuffer(0, length.toInt).order(ByteOrder.nativeOrder())
+
+    private def search(
+        queries: QueryMatrix,
+        slot: Slot,
+        width: Option[Int]
+    ): Long = {
+      val started = System.nanoTime()
+      // No excluded row, no bitmap: Knowhere then searches unfiltered
+      // (IDSelectorAll), as Milvus's VectorSearchNode does with an empty
+      // BitsetView, instead of testing an all-zero bit at every visited node.
+      target.search(
+        queries.buffer,
+        queries.queries.toLong,
+        count,
+        if (labels.isEmpty) null else bytes(mask, maskBytes),
+        bytes(slot.ids, queries.queries.toLong * count * 8L),
+        bytes(slot.scores, queries.queries.toLong * count * 4L),
+        searchParameters(target, width)
+      )
+      System.nanoTime() - started
+    }
+
+    /** Searches one group and hands its answer to the worker. Progress carries
+      * the search alone; the worker's retries are reported by [[finish]].
+      */
+    def run(
+        queries: QueryMatrix,
+        merger: TopKMerger,
+        onProgress: SegmentSearch.Progress => Unit
+    ): Unit = {
+      val answer = begin(queries)
+      search(answer)
+      complete(answer, merger, onProgress)
+    }
+
+    /** Takes a buffer pair for `queries`, waiting for the collect that last
+      * used it. Called on the coordinating thread; the answer then goes to
+      * [[search]] on any thread and back to [[collect]] here. Splitting the
+      * three lets a task keep two segments' searches in flight: the tail of one
+      * call, when most of Knowhere's threads have run out of queries, is filled
+      * by the next call's queries already queued (2026-10-13, the search stage
+      * of L x 4 at k=100,000 ran 24 of 32 cores with one call at a time).
+      */
+    def begin(queries: QueryMatrix): Answer = {
+      require(
+        queries.dimension == target.dimension,
+        s"Queries have ${queries.dimension} dimensions; the index has ${target.dimension}"
+      )
+      require(
+        queries.queries <= maxQueries,
+        s"A group of ${queries.queries} queries exceeds the ${maxQueries} this pipeline was sized for"
+      )
+      if (count == 0) return Nothing
+      val slot = workspace.next()
+      new Begun(slot, queries, searchWidth(target.family, count, parameters))
+    }
+
+    /** The native search of a begun answer; any thread, one at a time per
+      * answer.
+      */
+    def search(answer: Answer): Unit = answer match {
+      case begun: Begun =>
+        begun.nanos = search(begun.queries, begun.slot, begun.width)
+      case _ => ()
+    }
+
+    /** Reports the search and hands the answer to the collector. Called on the
+      * thread that began it, after [[search]] returned.
+      */
+    def complete(
+        answer: Answer,
+        merger: TopKMerger,
+        onProgress: SegmentSearch.Progress => Unit
+    ): Unit = answer match {
+      case begun: Begun =>
+        onProgress(SegmentSearch.Progress(1, begun.nanos, 0L, 0))
+        begun.slot.pending = Some(worker.submit[Unit] { () =>
+          collectAnswer(begun.queries, begun.slot, merger, begun.width)
+        })
+      case _ => ()
+    }
+
+    /** Worker side: checks the answer, widens and searches again while any
+      * query is short, then adds the hits to the merger. Checking and
+      * collecting run over `threads` shards of the group's queries at once.
+      */
+    private def collectAnswer(
+        queries: QueryMatrix,
+        slot: Slot,
+        merger: TopKMerger,
+        initialWidth: Option[Int]
+    ): Unit = {
+      var width = initialWidth
+      var attempt = 0
+      var complete = false
+      while (!complete) {
+        val short = SearchThreads
+          .shards(queries.queries, threads) { (shard, from, until) =>
+            checked(
+              from,
+              until,
+              count,
+              slot.ids,
+              slot.scores,
+              labels,
+              rows,
+              target,
+              rankNonFinite,
+              workspace.seen(shard),
+              workspace.touched(shard)
+            )
+          }
+          .exists(identity)
+        attempt += 1
+        if (!short) complete = true
+        else if (width.exists(_.toLong < rows) && attempt < MaxAttempts) {
+          width = width.map(value =>
+            math
+              .min(rows, math.min(Int.MaxValue.toLong, value.toLong * 2L))
+              .toInt
+          )
+          val nanos = search(queries, slot, width)
+          synchronized {
+            retriedCalls += 1
+            retriedNanos += nanos
+          }
+        } else
+          throw new IllegalArgumentException(
+            s"Segment ${target.segmentId}: ${target.indexType} returned fewer than $count of $visible visible rows for a query after $attempt attempts"
+          )
+      }
+      SearchThreads.shards(queries.queries, threads) { (_, from, until) =>
+        collect(from, until, count, slot.ids, slot.scores, target, merger)
+      }
+    }
+
+    /** Waits for every answer to be collected and reports the worker's own
+      * searches. After this the mergers hold every group's hits.
+      */
+    def finish(onProgress: SegmentSearch.Progress => Unit): Unit = {
+      workspace.finish()
+      val (calls, nanos) = synchronized {
+        val out = (retriedCalls, retriedNanos)
+        retriedCalls = 0
+        retriedNanos = 0L
+        out
+      }
+      if (calls > 0) onProgress(SegmentSearch.Progress(calls, nanos, 0L, 0))
+    }
+
+    override def close(): Unit = {
+      var failure: Throwable = null
+      def complete(body: => Unit): Unit = {
+        try body
+        catch {
+          case cause: Throwable =>
+            if (failure == null) failure = cause
+            else if (failure ne cause) failure.addSuppressed(cause)
+        }
+      }
+      if (ownWorker) complete(SearchThreads.shutdown(worker))
+      // finish clears every pending future even when one failed, so a failure
+      // already reported to the task is not thrown again by its finally close.
+      complete(finish(_ => ()))
+      if (sharedWorkspace.isEmpty) complete(workspace.close())
+      complete(mask.close())
+      if (failure != null) throw failure
+    }
+  }
+
+  /** How wide the search starts: `ef` for the HNSW family, `nprobe` for the IVF
+    * family, and nothing to widen for a flat index, which already looks at
+    * every row.
+    */
+  private[vector] def searchWidth(
+      family: String,
+      topK: Int,
+      parameters: Map[String, String]
+  ): Option[Int] = family match {
+    case "HNSW" => Some(searchEf(topK, parameters))
+    case "IVF"  => Some(searchNprobe(parameters))
+    case _ =>
+      require(
+        parameters.isEmpty,
+        s"A flat index takes no search parameters: ${parameters.keySet.toSeq.sorted.mkString(", ")}"
+      )
+      None
+  }
+
+  private def searchParameters(target: Target, width: Option[Int]): String = {
+    val name = if (target.family == "HNSW") "ef" else "nprobe"
+    width match {
+      case Some(value) =>
+        s"""{"metric_type":"${target.metric.name}","$name":$value}"""
+      case None => s"""{"metric_type":"${target.metric.name}"}"""
+    }
+  }
+
+  /** How many inverted lists an IVF search visits: `nprobe` if the caller named
+    * it, otherwise 16, which is what Milvus searches by default.
+    */
+  private[vector] def searchNprobe(parameters: Map[String, String]): Int = {
+    require(
+      parameters != null && parameters.keySet.subsetOf(Set("nprobe")),
+      "IVF search supports only the nprobe parameter"
+    )
+    parameters
+      .get("nprobe")
+      .map { value =>
+        require(
+          value != null && value.matches("[0-9]+"),
+          "IVF nprobe must be a positive integer"
+        )
+        val parsed = Try(value.toInt).getOrElse(
+          throw new IllegalArgumentException(
+            "IVF nprobe exceeds the supported integer range"
+          )
+        )
+        require(parsed > 0, "IVF nprobe must be positive")
+        parsed
+      }
+      .getOrElse(16)
+  }
+
+  private def writeMask(excluded: BitSet, rows: Long, mask: ArrowBuf): Unit = {
+    mask.setZero(0, mask.capacity())
+    var row = excluded.nextSetBit(0)
+    while (row >= 0 && row < rows) {
+      val index = row.toLong / 8L
+      mask.setByte(index, mask.getByte(index) | (1 << (row % 8)))
+      row = excluded.nextSetBit(row + 1)
+    }
+  }
+
+  /** Checks what the index returned and says whether any query came back with
+    * fewer than `count` hits, without building a candidate: an answer that is
+    * short is searched again with a wider `ef`, and anything this pass built
+    * would be thrown away. Reading the buffers twice costs two passes over
+    * native memory; building the candidates first cost one object per hit and a
+    * regrouping of all of them (section 2.4).
+    */
+  private def checked(
+      fromQuery: Int,
+      untilQuery: Int,
+      count: Int,
+      ids: ArrowBuf,
+      scores: ArrowBuf,
+      excluded: BitSet,
+      rows: Long,
+      target: Target,
+      rankNonFinite: Boolean,
+      seen: Array[Long],
+      touched: Array[Int]
+  ): Boolean = {
+    val metric = target.metric
+    var short = false
+    var query = fromQuery
+    while (query < untilQuery) {
+      var slot = 0
+      var hits = 0
+      while (slot < count) {
+        val position = query.toLong * count + slot
+        val id = ids.getLong(position * 8L)
+        if (id != -1L) {
+          require(
+            id >= 0 && id < rows,
+            s"Segment ${target.segmentId}: the index returned row $id outside its $rows rows"
+          )
+          require(
+            !excluded.get(id.toInt),
+            s"Segment ${target.segmentId}: the index returned excluded row $id"
+          )
+          val score = scores.getFloat(position * 4L)
+          // A negative distance is the engine's fault whatever ranks it.
+          require(
+            (rankNonFinite || JavaFloat.isFinite(score)) &&
+              (metric != MetricType.L2 || !(score < 0)),
+            s"Segment ${target.segmentId}: the index returned an invalid score for row $id"
+          )
+          // A row the index returned twice for one query has its bit set
+          // already; the bits this query set are cleared below, so the next
+          // query starts from an empty bitmap without clearing all the rows.
+          val at = id.toInt
+          val word = at >>> 6
+          val bit = 1L << (at & 63)
+          require(
+            (seen(word) & bit) == 0L,
+            s"Segment ${target.segmentId}: the index returned row $id twice"
+          )
+          seen(word) |= bit
+          touched(hits) = at
+          hits += 1
+        }
+        slot += 1
+      }
+      var cleared = 0
+      while (cleared < hits) {
+        val at = touched(cleared)
+        seen(at >>> 6) &= ~(1L << (at & 63))
+        cleared += 1
+      }
+      if (hits < count) short = true
+      query += 1
+    }
+    short
+  }
+
+  /** Offers this segment's answer to the merger, three primitives at a time.
+    * Nothing here builds a `Candidate`: the merger keeps its runs in primitive
+    * columns, so a candidate that cannot be kept costs one comparison and no
+    * allocation. That is what most candidates of most segments are once a query
+    * has seen one segment, and on the profiled P3 chunk the object-and-heap
+    * version of this loop was 46% of the executor's Java samples. The labels
+    * the index returned go through the target's row mapping, which is what a
+    * nullable column's index needs (section 2.4). A shard collects the queries
+    * `fromQuery` until `untilQuery`; a query's candidates go to its own heap in
+    * the merger, so shards never write the same slot.
+    */
+  private def collect(
+      fromQuery: Int,
+      untilQuery: Int,
+      count: Int,
+      ids: ArrowBuf,
+      scores: ArrowBuf,
+      target: Target,
+      merger: TopKMerger
+  ): Unit = {
+    val segmentId = target.segmentId
+    var query = fromQuery
+    while (query < untilQuery) {
+      var slot = 0
+      while (slot < count) {
+        val position = query.toLong * count + slot
+        val id = ids.getLong(position * 8L)
+        if (id != -1L) {
+          val score = scores.getFloat(position * 4L)
+          if (!merger.rejectsScore(query, score))
+            merger.add(query, segmentId, target.rowOf(id), score)
+        }
+        slot += 1
+      }
+      query += 1
+    }
+  }
+}

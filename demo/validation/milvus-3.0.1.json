@@ -1,0 +1,209 @@
+{
+  "validatedOn": "2026-10-23",
+  "status": "passed",
+  "environment": {
+    "milvus": "3.0.1",
+    "milvusGitCommit": "658cbd1689",
+    "spark": "4.0.1",
+    "scala": "2.13",
+    "java": "21.0.4",
+    "platform": "linux-x86_64"
+  },
+  "snapshotLookup": {
+    "python": "passed",
+    "java": "passed",
+    "responseField": "data.s3Location",
+    "connectorOption": "milvus.snapshot.path",
+    "returnedScheme": "minio",
+    "sameLocation": true,
+    "locationRewritten": false
+  },
+  "data": {
+    "source": "Inserted through Milvus; flushed, indexed and L0-compacted before creating a new snapshot",
+    "snapshotFormatVersion": 4,
+    "dataStorageVersions": [
+      3
+    ],
+    "dataSegments": 2,
+    "physicalRows": 16,
+    "visibleRows": 14,
+    "deletedIds": [
+      3002,
+      3105
+    ],
+    "rowsMatchMilvus": true
+  },
+  "examples": [
+    {
+      "language": "python",
+      "example": "01_read_snapshot.py",
+      "exitCode": 0
+    },
+    {
+      "language": "python",
+      "example": "04_exact_search.py",
+      "exitCode": 0
+    },
+    {
+      "language": "python",
+      "example": "05_filtered_search.py",
+      "exitCode": 0
+    },
+    {
+      "language": "python",
+      "example": "06_index_search.py",
+      "exitCode": 0
+    },
+    {
+      "language": "java",
+      "example": "ReadSnapshot",
+      "exitCode": 0
+    },
+    {
+      "language": "java",
+      "example": "ExactSearch",
+      "exitCode": 0
+    },
+    {
+      "language": "java",
+      "example": "FilteredSearch",
+      "exitCode": 0
+    },
+    {
+      "language": "java",
+      "example": "IndexSearch",
+      "exitCode": 0
+    }
+  ],
+  "searches": {
+    "exactAll": {
+      "mode": "exact",
+      "k": 3,
+      "queries": [
+        {
+          "qid": 1,
+          "ids": [
+            3000,
+            3001,
+            3100
+          ],
+          "milvusSquaredL2": [
+            0.0,
+            1.0,
+            1.0625
+          ],
+          "recallAtK": 1.0
+        },
+        {
+          "qid": 2,
+          "ids": [
+            3107,
+            3106,
+            3007
+          ],
+          "milvusSquaredL2": [
+            0.0625,
+            0.5625,
+            1.0
+          ],
+          "recallAtK": 1.0
+        }
+      ],
+      "sparkDistanceSquaredMatchesMilvus": true,
+      "metrics": {
+        "indexSegments": 0,
+        "exactSegments": 2,
+        "milvus.search.index.bytes": 0,
+        "milvus.search.knowhere.calls": 4,
+        "milvus.search.exact.rescans": 0,
+        "numOutputRows": 6
+      }
+    },
+    "exactCategory1": {
+      "mode": "exact",
+      "k": 3,
+      "queries": [
+        {
+          "qid": 1,
+          "ids": [
+            3101,
+            3003,
+            3103
+          ],
+          "milvusSquaredL2": [
+            2.5625,
+            9.0,
+            11.5625
+          ],
+          "recallAtK": 1.0
+        },
+        {
+          "qid": 2,
+          "ids": [
+            3107,
+            3007,
+            3006
+          ],
+          "milvusSquaredL2": [
+            0.0625,
+            1.0,
+            2.0
+          ],
+          "recallAtK": 1.0
+        }
+      ],
+      "sparkDistanceSquaredMatchesMilvus": true,
+      "metrics": {
+        "indexSegments": 0,
+        "exactSegments": 2,
+        "milvus.search.index.bytes": 0,
+        "milvus.search.knowhere.calls": 4,
+        "milvus.search.exact.rescans": 0,
+        "numOutputRows": 6
+      }
+    },
+    "approxAll": {
+      "mode": "approx",
+      "k": 3,
+      "queries": [
+        {
+          "qid": 1,
+          "ids": [
+            3000,
+            3001,
+            3100
+          ],
+          "milvusSquaredL2": [
+            0.0,
+            1.0,
+            1.0625
+          ],
+          "recallAtK": 1.0
+        },
+        {
+          "qid": 2,
+          "ids": [
+            3107,
+            3106,
+            3007
+          ],
+          "milvusSquaredL2": [
+            0.0625,
+            0.5625,
+            1.0
+          ],
+          "recallAtK": 1.0
+        }
+      ],
+      "sparkDistanceSquaredMatchesMilvus": true,
+      "metrics": {
+        "indexSegments": 2,
+        "exactSegments": 0,
+        "milvus.search.index.bytes": 1950,
+        "milvus.search.knowhere.calls": 4,
+        "milvus.search.exact.rescans": 0,
+        "numOutputRows": 6
+      }
+    }
+  }
+}

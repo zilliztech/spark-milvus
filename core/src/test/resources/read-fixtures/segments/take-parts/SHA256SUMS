@@ -1,0 +1,7 @@
+0800d25bafdba989115beb499f8e74807f295f80a9ff02cb616c717ba3381d0d  README.md
+e6eb89ee499569a669051091d59bd3ad2a127365498295be45a1ca16c495355f  part-0/_data/0_459d7c69-dec0-4db4-8792-45473b13e8b4.parquet
+fa361ea18a0be90c347bfd5a48bfc17589860b80a3dcf35a9aef5ab6c8ae2c84  part-0/_metadata/manifest-1.avro
+c399c61d6033b6149afb42cc225a2426e5196690eb092c6371cd5fd370bdcc2e  part-1/_data/0_83f2a009-6cb4-4514-a07e-d8481ed1e454.parquet
+49eb6faa7ad061be849de0c2a22420ef906e35152d2d86baa2ba3c7afbb37714  part-1/_metadata/manifest-1.avro
+ddc01083817d7d0695a3af82c6e371ca3aae4da6a43511a0eedf99adbf1a9894  part-2/_data/0_1b0bc89b-7014-474d-86e9-72747d89ccf7.parquet
+ef3201e79bd5b4bbd57bf95aae07b4fd660ae673ede6bb4d35bf5adc516ebafb  part-2/_metadata/manifest-1.avro

@@ -1,28 +1,225 @@
 name: CI
 
-# Builds the connector and runs the unit tests on every PR. The native
-# milvus-storage libraries are not built here (that needs Conan 2 + Rust and
-# takes a long time, see Dockerfile); the JNI Scala wrapper compiles fine
-# without them, so only the two suites that load the .so are excluded.
+# Ordinary unit checks and the release candidate are independent jobs. Candidate
+# consumers exercise native operations; native-dependent unit cancellations do
+# not satisfy that release gate.
 on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: ''
+      full_validation:
+        type: boolean
+        default: true
+      native_source_run_id:
+        type: string
+        default: ''
+    outputs:
+      candidate_artifact:
+        description: Candidate that passed the build and consumer gates
+        value: ${{ jobs.artifacts.outputs.candidate_artifact }}
   pull_request:
-    branches: [main]
+    branches: [main, refactor/v2]
   push:
-    branches: [main]
+    branches: [main, refactor/v2]
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.sha }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
-  build-and-test:
-    name: Build & unit tests
-    runs-on: ubuntu-latest
+  read-matrix:
+    name: Export supported source combinations
+    runs-on: ubuntu-22.04
+    outputs:
+      shared: ${{ steps.matrix.outputs.shared }}
+      spark: ${{ steps.matrix.outputs.spark }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: sbt
+      - uses: sbt/setup-sbt@v1
+      - run: sbt 'exportBuildMatrix build-matrix.json'
+      - id: matrix
+        run: python3 scripts/ci/read_validation.py matrix --matrix build-matrix.json --github-output "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-build-matrix
+          path: build-matrix.json
+          if-no-files-found: error
+
+  shared-libraries:
+    name: Shared libraries (Scala ${{ matrix.scala }})
+    needs: read-matrix
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.read-matrix.outputs.shared) }}
+    runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
         with:
-          submodules: recursive
+          persist-credentials: false
+          submodules: false
+      - run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '${{ matrix.buildJava }}'
+          cache: sbt
+      - uses: sbt/setup-sbt@v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: source-build-matrix
+      - name: Test each shared module with its own dependency configuration
+        run: python3 scripts/ci/read_validation.py shared --matrix build-matrix.json --scala '${{ matrix.scala }}'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shared-source-${{ matrix.scala }}
+          path: |
+            target/read-ci/
+            target/read-build/
+            **/target/test-reports/
+          if-no-files-found: error
+
+  spark-sources:
+    name: Spark source and spill checks (${{ matrix.line }}, Scala ${{ matrix.scala }})
+    needs: read-matrix
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.read-matrix.outputs.spark) }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: false
+      - run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+      - uses: actions/setup-java@v5
+        id: test-java
+        with:
+          distribution: temurin
+          java-version: '${{ matrix.java }}'
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '${{ matrix.buildJava }}'
+          cache: sbt
+      - uses: sbt/setup-sbt@v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: source-build-matrix
+      - name: Compile sources and require the spill suite
+        env:
+          SPARK35_TEST_JAVA_HOME: ${{ steps.test-java.outputs.path }}
+        run: python3 scripts/ci/read_validation.py spark --matrix build-matrix.json --line '${{ matrix.line }}' --scala '${{ matrix.scala }}'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spark-source-${{ matrix.line }}-${{ matrix.scala }}
+          path: |
+            target/read-ci/
+            target/read-build/
+            **/target/test-reports/
+          if-no-files-found: error
+
+  artifacts:
+    uses: ./.github/workflows/build-artifacts.yml
+    with:
+      version: ${{ inputs.version || format('2.0.0-ci.{0}.{1}', github.run_id, github.run_attempt) }}
+      # Direct fork PRs have no workflow_call inputs. Reusable callers can
+      # request the full gate even when their originating event is a PR.
+      build_native: ${{ github.event_name != 'pull_request' || inputs.full_validation == true }}
+      native_source_run_id: ${{ inputs.native_source_run_id }}
+
+  consumer:
+    needs: artifacts
+    if: github.event_name != 'pull_request' || inputs.full_validation == true
+    uses: ./.github/workflows/integration.yml
+    with:
+      candidate_artifact: ${{ needs.artifacts.outputs.candidate_artifact }}
+
+  integration-helm:
+    name: Integration Helm tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v4.1.1
+
+      - name: Install template test dependency
+        run: python3 -m pip install PyYAML==6.0.3
+
+      - name: Lint the fixed V3 read Job
+        run: |
+          helm lint --strict deploy/helm/spark-milvus-integration -f deploy/helm/spark-milvus-integration/ci-values.read.example.yaml
+
+      - name: Test templates and release lifecycle
+        run: |
+          python3 -m unittest discover -s deploy/helm/spark-milvus-integration/tests -p 'test_*.py'
+          bash -n deploy/helm/spark-milvus-integration/run.sh
+          deploy/helm/spark-milvus-integration/tests/run-test.sh
+
+      - name: Lint the Spark demo chart
+        run: helm lint --strict deploy/helm/spark-milvus-demo
+
+      - name: Test Spark demo templates
+        run: python3 deploy/helm/spark-milvus-demo/tests/test_chart.py
+
+  # Match the image's Ubuntu Git package: newer upload-pack versions no longer
+  # perform the ownership check that can reject local submodule fetches.
+  docker-git-ownership:
+    name: Docker Git ownership regression
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    timeout-minutes: 10
+    steps:
+      - name: Install the image's Git version and Python
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends ca-certificates git python3
+          dpkg-query -W git
+
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Test local submodule fetch ownership
+        run: python3 -m unittest discover -s native/build -p 'test_git_safe_directory.py' -v
+
+  build-and-test:
+    name: Aggregate coverage and clean contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # The build needs exactly the three native source submodules; initialize
+      # them by name rather than recursively.
+      - uses: actions/checkout@v5
+        with:
+          submodules: false
+
+      - name: Initialize the native source submodules
+        run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
 
       - uses: actions/setup-java@v5
         with:
@@ -32,15 +229,181 @@ jobs:
 
       - uses: sbt/setup-sbt@v1
 
-      - name: Build milvus-storage JNI wrapper (Scala only, no native libs)
-        working-directory: milvus-storage/java
-        run: sbt package
+      - name: Check formatting
+        run: sbt scalafmtCheckAll scalafmtSbtCheck
 
-      - name: Compile main, test and integration-test sources
-        run: sbt 'compile; Test/compile; IntegrationTest/compile'
+      # The selected default line is 4.0; the exported matrix covers all other
+      # combinations. Object-storage integration stays outside the aggregate.
+      - name: Compile every module
+        run: sbt 'compile; Test/compile; integration/Test/compile'
 
-      - name: Unit tests (suites that need the native .so are excluded)
-        run: >-
-          sbt
-          'set Test / testOptions += Tests.Filter(n => !Set("com.zilliz.spark.connector.loon.MilvusStorageFFITest", "com.zilliz.spark.connector.loon.MilvusStorageMultiFileGroupTest").contains(n))'
-          test
+      # Suites that need the native library skip themselves, so no filter is
+      # needed any more: they call it once and cancel when it is absent.
+      - name: Unit tests
+        run: sbt test
+      - name: Verify cross-version source packages, POMs and generated-output cleanup
+        run: |
+          sbt 'exportBuildMatrix build-matrix.json'
+          python3 scripts/ci/read_validation.py clean --matrix build-matrix.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: source-clean-contracts
+          path: target/read-ci/
+          if-no-files-found: warn
+
+  shared-native:
+    name: Shared native reads (Scala ${{ matrix.scala }})
+    needs: [read-matrix, artifacts]
+    if: github.event_name != 'pull_request' || inputs.full_validation == true
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.read-matrix.outputs.shared) }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: false
+      - run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '${{ matrix.buildJava }}'
+          cache: sbt
+      - uses: sbt/setup-sbt@v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: source-build-matrix
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-linux-x86_64
+          path: native-input
+      - name: Require native Arrow reads and loader ownership checks
+        run: python3 scripts/ci/read_validation.py shared --matrix build-matrix.json --scala '${{ matrix.scala }}' --native-bundle native-input/milvus-native-linux-x86_64.jar
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shared-native-${{ matrix.scala }}
+          path: |
+            target/read-ci/
+            **/target/test-reports/
+          if-no-files-found: error
+
+  spark-native:
+    name: Offline reads and search (${{ matrix.line }}, Scala ${{ matrix.scala }})
+    needs: [read-matrix, artifacts]
+    if: github.event_name != 'pull_request' || inputs.full_validation == true
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.read-matrix.outputs.spark) }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+      - uses: actions/setup-java@v5
+        id: test-java
+        with:
+          distribution: temurin
+          java-version: '${{ matrix.java }}'
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '${{ matrix.buildJava }}'
+          cache: sbt
+      - uses: sbt/setup-sbt@v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: source-build-matrix
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-linux-x86_64
+          path: native-input
+      - name: Require every read/search suite without cancellations
+        env:
+          SPARK35_TEST_JAVA_HOME: ${{ steps.test-java.outputs.path }}
+        run: python3 scripts/ci/read_validation.py spark --matrix build-matrix.json --line '${{ matrix.line }}' --scala '${{ matrix.scala }}' --native-bundle native-input/milvus-native-linux-x86_64.jar
+      - name: Prepare two isolated object-storage inputs
+        if: matrix.line == '4.0'
+        run: python3 scripts/ci/read_storage.py start --directory "$RUNNER_TEMP/read-storage"
+      - name: Require real object-storage reads with both identities
+        if: matrix.line == '4.0'
+        env:
+          MILVUS_READ_IT_OPTIONS: ${{ runner.temp }}/read-storage/a.json
+          MILVUS_READ_IT_OPTIONS_B: ${{ runner.temp }}/read-storage/b.json
+        run: python3 scripts/ci/read_validation.py integration --matrix build-matrix.json --native-bundle native-input/milvus-native-linux-x86_64.jar
+      - name: Remove the isolated input store
+        if: always() && matrix.line == '4.0'
+        run: python3 scripts/ci/read_storage.py stop --directory "$RUNNER_TEMP/read-storage"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spark-native-${{ matrix.line }}-${{ matrix.scala }}
+          path: |
+            target/read-ci/
+            **/target/test-reports/
+          if-no-files-found: error
+
+  # build.py, platforms.py, stage.py, the packaging script and the Makefile are
+  # tested without building anything native, in seconds. A job of its own, so a
+  # failure here does not skip the sbt checks. patchelf lets the ELF staging
+  # tests run instead of skipping; java serves the JVM load checker's tests.
+  native-build-driver:
+    name: Native build driver tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # The build needs exactly the three native source submodules; initialize
+      # them by name rather than recursively.
+      - uses: actions/checkout@v5
+        with:
+          submodules: false
+
+      - name: Initialize the native source submodules
+        run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Prepare the isolated V3 object-storage fixture
+        run: python3 scripts/ci/read_storage.py start --directory "$RUNNER_TEMP/read-storage-preflight"
+
+      - name: Remove the object-storage preflight fixture
+        if: always()
+        run: python3 scripts/ci/read_storage.py stop --directory "$RUNNER_TEMP/read-storage-preflight"
+
+      - name: Install patchelf
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq patchelf
+
+      - name: native-build tests
+        run: python3 -m unittest discover -s native/build -p 'test_*.py'
+
+      - name: Packaging and Makefile tests
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+
+      - name: Demo input and launcher tests
+        run: python3 -m unittest discover -s demo/tests -p 'test_*.py'
+
+      - name: Fixed read samples and source packages
+        run: python3 scripts/ci/check_read_fixtures.py
+
+      - name: Release and consumer orchestration tests
+        run: |
+          python3 -m pip install PyYAML==6.0.3
+          python3 -m unittest discover -s scripts/ci -p 'test_*.py'

@@ -11,8 +11,9 @@ project/project
 project/target
 .DS_Store
 note.md
-build/
-src/main/resources/native/
+/build/
+__pycache__/
+*.pyc
 .sbt/
 
 examples/

@@ -1,0 +1,11 @@
+{
+  "milvus.snapshot.path": "s3a://your-milvus-bucket/files/snapshots/123/metadata/snapshot.json",
+  "fs.storage_type": "remote",
+  "fs.address": "s3.us-west-2.amazonaws.com",
+  "fs.bucket_name": "your-milvus-bucket",
+  "fs.root_path": "files",
+  "fs.cloud_provider": "aws",
+  "fs.region": "us-west-2",
+  "fs.use_ssl": "true",
+  "fs.use_iam": "true"
+}
