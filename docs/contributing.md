@@ -636,6 +636,18 @@ Do not apply that pin to the Spark lines. Spark ships a self-consistent jackson
 set, and pinning there drags databind *below* Spark's own jackson-module-scala,
 which throws the same way from the other direction.
 
+## Pull requests
+
+Changes reach `main` and the release branches only through pull requests, and
+pull requests come from a fork: a repository ruleset reserves branch creation on
+`zilliztech/spark-milvus` for maintainers, who use it for the `{major}.{minor}`
+release branches. Push your branch to your fork and open the pull request
+against `main`, or against a release branch for a fix that ships on that line.
+The ordinary CI checks run for a fork pull request without repository secrets;
+the native builds and consumers run once the change is pushed to the protected
+branch. A pull request needs one approving review and the required checks, and
+merges by squash; `main` merges through its merge queue.
+
 ## Commits
 
 Write the message in English, explain why rather than what, and name the
