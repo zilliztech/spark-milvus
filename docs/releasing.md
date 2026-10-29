@@ -295,7 +295,7 @@ a fixed-input read Job with an existing two-identity Secret.
 
 | Event | Required work |
 |---|---|
-| Pull request to `main` or a `{major}.{minor}` release branch such as `2.0`, and its merge queue entry | Formatting, Versions-derived five-combination source/POM/source-JAR checks, shared unit tests, selected-line aggregate coverage, clean checks, scripts and Helm; existing JVM/thin exports |
+| Pull request to `main` or a `{major}.{minor}` release branch such as `2.0`, and its merge queue entry | Formatting, Versions-derived five-combination source/POM/source-JAR checks and clean contracts, shared unit tests, the default line's Spark suite, scripts and Helm; existing JVM/thin exports |
 | Push to those branches or manual CI dispatch | The checks above, native builds, mandatory read/search/Arrow/Connect suites, isolated object-storage reads, candidate verification, all twelve consumer jobs, and the Spark 4.0 assembly with a local image build on both Linux architectures |
 | `v2.x.y-central-test.<digits>` tag | Full CI, signed `USER_MANAGED` upload, Central validation, authenticated byte verification, one consumer job and deployment deletion; no public release |
 | Other accepted `v2.*` release tag | Full CI explicitly enabled, nonempty validated candidate, controlled publication, public Central consumer check, then the Spark 4.0 image on both Linux architectures and its multi-architecture tag |

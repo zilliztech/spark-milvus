@@ -90,7 +90,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: source-build-matrix
-      - name: Test each shared module with its own dependency configuration
+      # Ends by cleaning from the default selection, which must remove this
+      # combination's products without touching a source file.
+      - name: Test each shared module with its own dependency configuration and clean it
         run: python3 scripts/ci/read_validation.py shared --matrix build-matrix.json --scala '${{ matrix.scala }}'
       - uses: actions/upload-artifact@v4
         if: always()
@@ -130,7 +132,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: source-build-matrix
-      - name: Compile sources and require the spill suite
+      # Also compiles the integration tests, then cleans from the default
+      # selection, which must remove this combination's products.
+      - name: Compile sources, require the spill suite and clean them
         env:
           SPARK35_TEST_JAVA_HOME: ${{ steps.test-java.outputs.path }}
         run: python3 scripts/ci/read_validation.py spark --matrix build-matrix.json --line '${{ matrix.line }}' --scala '${{ matrix.scala }}'
@@ -217,7 +221,7 @@ jobs:
         run: python3 -m unittest discover -s native/build -p 'test_git_safe_directory.py' -v
 
   build-and-test:
-    name: Aggregate coverage and clean contracts
+    name: Format, compile and Spark tests
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -241,25 +245,17 @@ jobs:
       - name: Check formatting
         run: sbt scalafmtCheckAll scalafmtSbtCheck
 
-      # The selected default line is 4.0; the exported matrix covers all other
-      # combinations. Object-storage integration stays outside the aggregate.
+      # The selected default line is 4.0. Object-storage integration stays
+      # outside the aggregate.
       - name: Compile every module
         run: sbt 'compile; Test/compile; integration/Test/compile'
 
-      # Suites that need the native library skip themselves, so no filter is
-      # needed any more: they call it once and cancel when it is absent.
-      - name: Unit tests
-        run: sbt test
-      - name: Verify cross-version source packages, POMs and generated-output cleanup
-        run: |
-          sbt 'exportBuildMatrix build-matrix.json'
-          python3 scripts/ci/read_validation.py clean --matrix build-matrix.json
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: source-clean-contracts
-          path: target/read-ci/
-          if-no-files-found: warn
+      # Only the default line runs the whole Spark suite. The shared modules'
+      # tests on this Scala version, every combination's source packages, POMs
+      # and clean contract belong to the exported source matrix jobs. Suites
+      # that need the native library cancel when it is absent.
+      - name: Spark unit tests
+        run: sbt spark/test
 
   shared-native:
     name: Shared native reads (Scala ${{ matrix.scala }})
