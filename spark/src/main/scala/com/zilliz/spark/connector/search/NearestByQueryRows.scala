@@ -24,14 +24,15 @@ import com.zilliz.milvus.storage.schema.{
 import com.zilliz.milvus.storage.vector.{EngineRange, QueryMatrix}
 
 /** Prepares the query rows of a nearest-by join: classifies their vectors,
-  * counts and caches computed rows, chooses whether the driver can hold them,
-  * and numbers and packs the rows the connector searches. It neither searches
-  * the base nor assembles join results.
+  * freezes computed rows, counts them, chooses whether the driver can hold
+  * them, and numbers and packs the rows the connector searches. It neither
+  * searches the base nor assembles join results.
   *
-  * Local rows exclude BySpark before numbering. Distributed rows are cached
-  * before counting and numbered before filtering, so recomputing a query side
-  * in another order cannot pair a hit with the wrong row. Numbering and packing
-  * remain explicit steps after Spark's fallback is planned by the coordinator.
+  * Local rows exclude BySpark before numbering. Computed rows are eagerly
+  * checkpointed before classification and numbered before filtering. A lost
+  * checkpoint block fails instead of reassigning ids from a recomputed source.
+  * Numbering and packing remain explicit steps after Spark's fallback is
+  * planned by the coordinator.
   */
 private[connector] object NearestByQueryRows {
 
@@ -103,10 +104,15 @@ private[connector] object NearestByQueryRows {
       }
   }
 
-  private[search] sealed trait Prepared {
+  private[search] sealed trait Prepared extends AutoCloseable {
     def counts: Counts
     def dimension: Int
     def sparkRows(spark: SparkSession): Option[RDD[InternalRow]]
+
+    /** Release only when the coordinator abandons the result before returning
+      * its RDD. Successful distributed results still depend on their rows.
+      */
+    override def close(): Unit = ()
   }
 
   /** Classified rows held on the driver. The coordinator asks for copies and
@@ -154,8 +160,9 @@ private[connector] object NearestByQueryRows {
     }
   }
 
-  /** Cached rows kept on executors. number is called once, after the fallback
-    * plan has been made; its RDD is shared by vectors and the final join.
+  /** Checkpointed rows kept on executors. number is called once, after the
+    * fallback plan has been made; its RDD is shared by vectors and the final
+    * join. Spark's context cleaner owns the successful result's cache lifetime.
     */
   private[search] final class Distributed private[NearestByQueryRows] (
       rows: RDD[InternalRow],
@@ -163,6 +170,8 @@ private[connector] object NearestByQueryRows {
       val counts: Counts,
       val dimension: Int
   ) extends Prepared {
+    override def close(): Unit = rows.unpersist(blocking = false)
+
     def sparkRows(spark: SparkSession): Option[RDD[InternalRow]] = {
       val judge = kind
       val toSpark = rows.filter(judge(_) == QueryVector.BySpark)
@@ -225,6 +234,11 @@ private[connector] object NearestByQueryRows {
         // Classification and both sides of the final join share owned rows.
         val kept = rows.map(_.copy()).persist(StorageLevel.MEMORY_AND_DISK)
         try {
+          // The first action completes the checkpoint and severs the source
+          // lineage. Compute statistics afterwards: checkpointing can itself
+          // recompute a missing partition after its triggering action finishes.
+          kept.localCheckpoint()
+          kept.count()
           val judged = countKinds(kept, types, judge, searcher.packedBytes)
           val width = dimension(judged.lengths)
           val counts = judged.at(width)

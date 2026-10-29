@@ -17,8 +17,11 @@ package com.zilliz.spark.connector
   * also owns and closes the task's bounded Arrow child allocator. Ordinary
   * scans that read their primary key expose it through
   * `SupportsRuntimeV2Filtering`; repeated runtime filters intersect a cached
-  * segment-level Bloom plan. Scans also bind `milvus.filter` fields to the
-  * fixed Snapshot and evaluate its typed core expression in both reader outlets
+  * segment-level Bloom plan. Delete and Bloom paths use the endpoint of the
+  * same Hadoop-translated storage configuration. Optional Bloom initialization
+  * and statistics failures retain segments; failures needed to resolve deletes
+  * still fail planning. Scans also bind `milvus.filter` fields to the fixed
+  * Snapshot and evaluate its typed core expression in both reader outlets
   * without adding hidden fields to output.
   *
   * A NEAREST BY over a Milvus table searches the partitions this scan plans,

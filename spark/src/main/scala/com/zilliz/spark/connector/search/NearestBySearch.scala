@@ -71,27 +71,34 @@ private[connector] object NearestBySearch {
       queryVector,
       searcher
     )
-    val join = new Join(
-      spark,
-      searcher,
-      outer,
-      outputTypes.toArray,
-      outputTypes.size - queryTypes.size,
-      metrics
-    )
-    val joinedBySpark = prepared.sparkRows(spark).map(bySpark)
-    val searched = prepared match {
-      case local: NearestByQueryRows.Local => join.held(local)
-      case distributed: NearestByQueryRows.Distributed =>
-        join.numbered(distributed)
-    }
-    val result = joinedBySpark.fold(searched)(searched.union(_))
-    val outputRows = metrics(NearestByMetrics.OutputRows)
-    result.mapPartitions { rows =>
-      rows.map { row =>
-        outputRows.add(1L)
-        row
+    try {
+      val join = new Join(
+        spark,
+        searcher,
+        outer,
+        outputTypes.toArray,
+        outputTypes.size - queryTypes.size,
+        metrics
+      )
+      val joinedBySpark = prepared.sparkRows(spark).map(bySpark)
+      val searched = prepared match {
+        case local: NearestByQueryRows.Local => join.held(local)
+        case distributed: NearestByQueryRows.Distributed =>
+          join.numbered(distributed)
       }
+      val result = joinedBySpark.fold(searched)(searched.union(_))
+      val outputRows = metrics(NearestByMetrics.OutputRows)
+      result.mapPartitions { rows =>
+        rows.map { row =>
+          outputRows.add(1L)
+          row
+        }
+      }
+    } catch {
+      case failure: Throwable =>
+        try prepared.close()
+        catch { case later: Throwable => failure.addSuppressed(later) }
+        throw failure
     }
   }
 
@@ -139,9 +146,8 @@ private[connector] object NearestBySearch {
       }
     }
 
-    /** Rows kept and numbered on the executors, joined to their hits after the
-      * last stage, so that a query side computed again in another order cannot
-      * pair a hit with the wrong row.
+    /** Frozen rows numbered on the executors, joined to their hits after the
+      * last stage. Both sides read the same completed checkpoint.
       */
     def numbered(rows: NearestByQueryRows.Distributed): RDD[InternalRow] = {
       val counts = rows.counts

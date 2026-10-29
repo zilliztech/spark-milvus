@@ -9,12 +9,18 @@ package com.zilliz.spark.connector
   * `NearestBySearch` coordinates the join and assembles its output.
   * `NearestByInput` adapts the base's fields, layout, options and search entry,
   * then returns each query id with its requested base columns;
-  * `NearestByQueryRows` classifies, caches, numbers and packs query rows.
-  * Executor query vectors travel directly as numbered arrays. Their stable ids
-  * identify join rows; dense packing positions only address query groups.
-  * Queries outside Knowhere's range go to Spark's execution. Each hit gets its
-  * query row back by number: from a broadcast when the driver holds the rows,
-  * by a join after the take when they stay on the executors.
+  * `NearestByQueryRows` materializes computed query rows in a local checkpoint
+  * before classifying, numbering and packing them. All query branches read the
+  * same frozen rows; losing checkpoint blocks fails instead of recomputing a
+  * source whose order or values may have changed. Result RDD dependencies keep
+  * the checkpoint alive for repeated actions, and Spark's context cleaner
+  * releases it when the plan is no longer referenced. Driver-held rows and
+  * failed planning release their preparation caches immediately. Executor query
+  * vectors travel directly as numbered arrays. Their stable ids identify join
+  * rows; dense packing positions only address query groups. Queries outside
+  * Knowhere's range go to Spark's execution. Each hit gets its query row back
+  * by number: from a broadcast when the driver holds the rows, by a join after
+  * the take when they stay on the executors.
   *
   * `MilvusSearch` runs the search over the segments of a Milvus table input:
   * the partitions of the Milvus scan the optimizer left, with the predicate

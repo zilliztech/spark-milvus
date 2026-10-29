@@ -191,10 +191,10 @@ class FrameSearchTest
       eventually(timeout(Span(10, Seconds))) {
         context.statusTracker.getJobIdsForGroup(collection) should not be empty
       }
-      // Classification and dense group positions need one job each; stable
-      // association ids must not count the cached query rows a third time.
+      // Freeze query rows before classification; dense group positions need
+      // another job. Association ids do not add a counting job.
       context.statusTracker.getJobIdsForGroup(preparation).length shouldBe
-        (if (held) 0 else 2)
+        (if (held) 0 else 3)
       rows shouldBe bruteForce(k, outer)
       metrics(SearchMetrics.Candidates).value shouldBe
         queryVectors.size.toLong * 4L * k

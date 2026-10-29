@@ -5,6 +5,7 @@ import java.io.IOException
 import java.nio.file.{Files, Path}
 import java.util.Comparator
 
+import org.apache.hadoop.conf.Configuration
 import org.apache.spark.sql.types.{
   ArrayType,
   BinaryType,
@@ -22,9 +23,16 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.delete.DeletePlan
+import com.zilliz.milvus.storage.expr.{
+  Comparison,
+  ComparisonOperator,
+  FieldRef,
+  Literal
+}
 import com.zilliz.milvus.storage.io.{
   FailingObjectStore,
   FileInfo,
+  LocalObjectStore,
   ObjectStore,
   ReadFixtures
 }
@@ -54,6 +62,11 @@ import com.zilliz.milvus.storage.stats.PrimaryKeyStats
 import com.zilliz.spark.connector.options.{MilvusOption, StorageOptions}
 import com.zilliz.spark.connector.table.MilvusTable
 import com.zilliz.spark.connector.table.OptionStringsSnapshotSource
+import io.milvus.grpc.schema.{
+  CollectionSchema => ProtoSchema,
+  DataType => MilvusDataType,
+  FieldSchema
+}
 
 class MilvusScanSnapshotTest extends AnyFunSuite {
   private val emptySchemaBytes = java.util.Base64.getEncoder.encodeToString(
@@ -1349,6 +1362,164 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
     val cached = scan.planInputPartitions()
     scan.filter(Array(in(202L, 303L)))
     assert(scan.planInputPartitions() eq cached)
+  }
+
+  test(
+    "Bloom paths use the store endpoint from global, bucket and explicit configuration"
+  ) {
+    val primaryKey = FieldSchema(
+      fieldID = 100L,
+      name = "id",
+      dataType = MilvusDataType.Int64,
+      isPrimaryKey = true
+    )
+    val collection = ProtoSchema(name = "t", fields = Seq(primaryKey))
+    val directory = Files.createTempDirectory("scan-bloom-endpoint-")
+    try {
+      ReadFixtures.copyTo("stats/primary-key", directory.resolve("stats"))
+      ReadFixtures.copyTo("segments/take-10", directory.resolve("v3"))
+      val predicate = Comparison(
+        FieldRef(100L, MilvusDataType.Int64),
+        ComparisonOperator.EqualTo,
+        Literal.IntegerValue(202L)
+      )
+      val configurations = Seq(
+        (
+          "global.example",
+          Map("fs.s3a.endpoint" -> "global.example"),
+          Map.empty[String, String]
+        ),
+        (
+          "bucket.example",
+          Map(
+            "fs.s3a.endpoint" -> "other.example",
+            "fs.s3a.bucket.test-bucket.endpoint" -> "bucket.example"
+          ),
+          Map.empty[String, String]
+        ),
+        (
+          "explicit.example",
+          Map(
+            "fs.s3a.endpoint" -> "other.example",
+            "fs.s3a.bucket.test-bucket.endpoint" -> "bucket.example"
+          ),
+          Map(StorageProperties.Address -> "explicit.example")
+        )
+      )
+      configurations.foreach { case (endpoint, hadoop, declared) =>
+        Seq(false, true).foreach { applyDeletes =>
+          val segments = Seq(101L, 202L).zipWithIndex.map {
+            case (value, index) =>
+              plannedSegment(
+                30L + index,
+                20L,
+                10L,
+                SegmentStatistics.Listed(
+                  Map(
+                    100L -> Seq(
+                      s"https://$endpoint/test-bucket/stats/long-$value.json"
+                    )
+                  )
+                )
+              ).copy(layout = SegmentLayout.Manifest("v3/segment", 1L))
+          }
+          val snapshot = snapshotOf(
+            segments = segments,
+            bucket = "test-bucket",
+            schemaBytes = collection.toByteArray
+          )
+          val raw = new ju.HashMap[String, String]()
+          raw.put(StorageProperties.UseIam, "true")
+          raw.put(MilvusOption.ReadApplyDeletes, applyDeletes.toString)
+          declared.foreach { case (key, value) => raw.put(key, value) }
+          val options = new CaseInsensitiveStringMap(raw)
+          val schema =
+            MilvusTable(snapshot, MilvusOption(options), None).schema()
+          val scan =
+            new MilvusScan(schema, options, snapshot, Some(predicate)) {
+              override private[read] def hadoopConfFor(
+                  path: String
+              ): Configuration = {
+                val conf = new Configuration(false)
+                hadoop.foreach { case (key, value) => conf.set(key, value) }
+                conf
+              }
+              override private[read] def openPlanningStore(): ObjectStore =
+                new LocalObjectStore(directory.toString)
+            }
+          assert(
+            scan
+              .planInputPartitions()
+              .map(
+                _.asInstanceOf[MilvusInputPartition].task.segmentId
+              )
+              .toSeq == Seq(31L),
+            s"endpoint=$endpoint, applyDeletes=$applyDeletes"
+          )
+        }
+      }
+    } finally {
+      val paths = Files.walk(directory)
+      try
+        paths
+          .sorted(Comparator.reverseOrder[Path]())
+          .forEach(path => Files.delete(path))
+      finally paths.close()
+    }
+  }
+
+  test(
+    "planning-store initialization failures are optional only when deletes need no store"
+  ) {
+    val primaryKey = FieldSchema(
+      fieldID = 100L,
+      name = "id",
+      dataType = MilvusDataType.Int64,
+      isPrimaryKey = true
+    )
+    val collection = ProtoSchema(name = "t", fields = Seq(primaryKey))
+    val snapshot = snapshotOf(
+      segments = Seq(plannedSegment(30L, 20L, 1L)),
+      schemaBytes = collection.toByteArray
+    )
+    Seq(false, true).foreach { applyDeletes =>
+      Seq(
+        new IOException("planning store unavailable"),
+        new IllegalArgumentException("planning storage configuration invalid")
+      ).foreach { failure =>
+        val raw = new ju.HashMap[String, String]()
+        raw.put(MilvusOption.ReadApplyDeletes, applyDeletes.toString)
+        val options = new CaseInsensitiveStringMap(raw)
+        val schema = MilvusTable(snapshot, MilvusOption(options), None).schema()
+        val scan = new MilvusScan(
+          schema,
+          options,
+          snapshot,
+          Some(
+            Comparison(
+              FieldRef(100L, MilvusDataType.Int64),
+              ComparisonOperator.EqualTo,
+              Literal.IntegerValue(1L)
+            )
+          )
+        ) {
+          override private[read] def openPlanningStore(): ObjectStore =
+            throw failure
+        }
+        if (applyDeletes) {
+          assert(intercept[Exception](scan.planInputPartitions()) eq failure)
+        } else {
+          assert(
+            scan
+              .planInputPartitions()
+              .map(
+                _.asInstanceOf[MilvusInputPartition].task.segmentId
+              )
+              .toSeq == Seq(30L)
+          )
+        }
+      }
+    }
   }
 
   test("optional Bloom loading cannot hide a V3 delete-manifest failure") {

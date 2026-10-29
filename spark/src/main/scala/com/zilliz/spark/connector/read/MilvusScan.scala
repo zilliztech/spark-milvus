@@ -187,7 +187,8 @@ class MilvusScan(
     // at the snapshot's bucket.
     val applyDeletes = MilvusOption.readApplyDeletes(options)
     def listDeletes(
-        store: ObjectStore
+        store: ObjectStore,
+        endpoint: String = ""
     ): DeleteFileListing =
       DeleteFileListing
         .of(
@@ -195,11 +196,7 @@ class MilvusScan(
           applyDeletes,
           bucket.getOrElse(""),
           store,
-          StorageOptions.storeEndpoint(
-            hadoopConf,
-            bucket.getOrElse(""),
-            milvusOption.options
-          )
+          endpoint
         )
         .fold(
           e =>
@@ -216,14 +213,14 @@ class MilvusScan(
       cachedDeleteListing == null &&
         DeleteFileListing.requiresStore(snapshot, applyDeletes)
 
-    // Explicit delete metadata is already in the snapshot. Resolve and validate it
-    // before opening a store only for Bloom statistics, so a delete-contract
-    // failure cannot be mistaken for an optional pruning failure.
+    // Validate metadata that needs no storage before optional Bloom loading.
+    // There are no delete paths to normalize in this case, so resolving an
+    // endpoint must not move optional initialization outside its failure policy.
     if (cachedDeleteListing == null && !needsDeleteStore) {
       cachedDeleteListing = listDeletes(null)
     }
 
-    def loadBloom(store: ObjectStore): Unit =
+    def loadBloom(store: ObjectStore, endpoint: String): Unit =
       if (needsBloomStore) {
         cachedBloomPruner = PrimaryKeyBloomPruner.load(
           snapshot,
@@ -232,19 +229,24 @@ class MilvusScan(
             .map(_.v3ReadVersions)
             .getOrElse(Map.empty),
           bucket.getOrElse(""),
-          StorageOptions.effectiveEndpoint(milvusOption.options).getOrElse(""),
+          endpoint,
           store
         )
       }
 
     if (needsDeleteStore || needsBloomStore) {
       try {
+        val endpoint = StorageOptions.storeEndpoint(
+          hadoopConf,
+          bucket.getOrElse(""),
+          milvusOption.options
+        )
         StorageOptions.withStore(
           openPlanningStore()
         ) { store =>
           if (needsDeleteStore)
-            cachedDeleteListing = listDeletes(store)
-          loadBloom(store)
+            cachedDeleteListing = listDeletes(store, endpoint)
+          loadBloom(store, endpoint)
         }
       } catch {
         case NonFatal(e) if !needsDeleteStore && needsBloomStore =>
