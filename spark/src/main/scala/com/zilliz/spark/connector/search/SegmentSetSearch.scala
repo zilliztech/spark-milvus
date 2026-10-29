@@ -142,7 +142,7 @@ private[search] object SegmentSetSearch extends Logging {
           case Some(kept) =>
             kept.search(
               _,
-              request.k,
+              execution.topK,
               request.metric,
               request.parameters,
               allocator.allocator,
@@ -154,7 +154,7 @@ private[search] object SegmentSetSearch extends Logging {
               segments,
               open,
               _,
-              request.k,
+              execution.topK,
               request.metric,
               request.parameters,
               allocator.allocator,
@@ -289,7 +289,7 @@ private[search] object SegmentSetSearch extends Logging {
         segments,
         open,
         matrices.toSeq,
-        request.k,
+        execution.topK,
         request.metric,
         request.parameters,
         allocator,

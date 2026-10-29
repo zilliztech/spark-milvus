@@ -373,6 +373,18 @@ query. The `Search budget` log line reports the resulting query count. At
 targets 256 queries per call; an explicit 512 MiB holds 74 with overlap
 reserved, compared with 111 under the serial estimate.
 
+For a Milvus snapshot with proven physical row counts, planning caps K in
+these estimates at the total number of physical rows. Each search task retains
+at most the requested K or the sum of rows across its segment set, whichever
+is smaller; the global merge uses the sum across all segments. A single
+segment's row count does not cap the combined answer. If any participating
+segment has an unknown physical row count, that capacity remains K. Index row
+counts and other planning estimates do not establish this bound.
+Native result buffers use the largest single-segment row bound instead of the
+combined candidate capacity: each Knowhere call searches only one segment.
+This bound also sizes the automatic direct-memory group limit and the result
+buffers reserved while prefetching indexes.
+
 Milvus candidate records use a fixed 12-byte encoding: a UInt32 segment
 ordinal, a UInt32 physical row offset and a Float32 score. One dictionary for
 all segments in the search sorts their original signed Long ids and is

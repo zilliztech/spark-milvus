@@ -290,6 +290,100 @@ class V3ReadContractTest
   }
 
   test(
+    "large requested top-k respects task capacity across native search traversals"
+  ) {
+    fixture { (_, options) =>
+      val session = spark
+      import session.implicits._
+      val queries = (0 until 8)
+        .map(query => (query, Seq(query.toFloat / 10f, 0f)))
+        .toDF("qid", "qv")
+      // Spark 4.2 validates its own upper bound before connector planning.
+      val largeK =
+        if (org.apache.spark.SPARK_VERSION.startsWith("4.2.")) 10000
+        else Int.MaxValue
+      val configured = options ++ Map(
+        // Four queries per group at the global physical bound of 16 rows.
+        // Every group must contain multiple queries so the old unbounded
+        // merger fails its capacity guard before attempting a huge allocation.
+        MilvusOption.SearchGroupMaxBytes -> "3104",
+        MilvusOption.SearchQueryRanges -> "1"
+      )
+      val fractionKey = "spark.memory.fraction"
+      // Simulate the connector's planning budget through SQLConf; the running
+      // Spark memory manager keeps the configuration it started with.
+      val plannerConf = spark.sessionState.conf
+      val previous = plannerConf.getAllConfs.get(fractionKey)
+      // Leave 4 KiB per local task: one group fits, but keeping all eight
+      // queries' mergers does not. The normal setting keeps the queries.
+      val limitedFraction = 1.0 - 8192.0 /
+        (Runtime.getRuntime.maxMemory() - (300L << 20)).toDouble
+
+      def run(mode: String, k: Int, segmentBytes: Long): (Long, Long) = {
+        val base = read(
+          configured + (MilvusOption.SearchSegmentsMaxBytes -> segmentBytes.toString)
+        )
+        val result = queries
+          .nearestByJoin(
+            base,
+            call_function("vector_l2_distance", queries("qv"), base("vector")),
+            k,
+            mode,
+            "distance"
+          )
+          .select("qid", "id")
+        val found = result.collect().toSeq.groupBy(_.getInt(0))
+        assert(found.keySet == (0 until 8).toSet)
+        found.values.foreach { rows =>
+          val matches = rows.map(_.getLong(1)).sorted
+          if (k == largeK) assert(matches == liveIds)
+          else {
+            assert(matches.distinct.size == k)
+            assert(matches.forall(liveIds.contains))
+          }
+        }
+        val execution = collectFirst(result.queryExecution.executedPlan) {
+          case node: MilvusNearestByJoinExec => node
+        }.getOrElse(fail("native search must use the connector's operator"))
+        assert(
+          execution.metrics(NearestByMetrics.IndexSegments).value ==
+            (if (mode == "approx") 2L else 0L)
+        )
+        assert(execution.metrics(SearchMetrics.KnowhereCalls).value > 0L)
+        (
+          execution.metrics(SearchMetrics.ReadBytes).value,
+          execution.metrics(SearchMetrics.IndexBytes).value
+        )
+      }
+
+      try {
+        Seq("exact", "approx").foreach { mode =>
+          withClue(s"$mode: ") {
+            plannerConf.setConfString(fractionKey, "0.6")
+            val queriesKept = run(mode, largeK, 128L << 20)
+            // Ten exceeds either segment's eight physical rows and must not
+            // be truncated to the per-segment bound by the global merge.
+            run(mode, 10, 128L << 20)
+            plannerConf.setConfString(fractionKey, limitedFraction.toString)
+            val segmentsKept = run(mode, largeK, 128L << 20)
+            val streamed = run(mode, largeK, 1L)
+            if (mode == "approx") {
+              assert(segmentsKept._2 == queriesKept._2)
+              assert(streamed._2 == 2L * segmentsKept._2)
+            } else {
+              assert(streamed._1 > segmentsKept._1)
+            }
+          }
+        }
+      } finally
+        previous match {
+          case Some(value) => plannerConf.setConfString(fractionKey, value)
+          case None        => plannerConf.unsetConf(fractionKey)
+        }
+    }
+  }
+
+  test(
     "L0 deletes respect partition and channel scope across native reads and narrowed searches"
   ) {
     for (

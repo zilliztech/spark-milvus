@@ -46,7 +46,14 @@ package com.zilliz.spark.connector
   * resources, query delivery, retention, concurrency, prefetch and partition
   * counts for both inputs; the merge stage's tasks per executor follow what one
   * query's planned state needs, and a k no executor's heap can merge fails at
-  * planning. `SearchResources` holds the resource formulas and
+  * planning. Proven physical row counts bound each set's candidate capacity by
+  * the sum of its segments and the global merge by the sum of all segments,
+  * each capped at the requested k. Unknown counts retain the requested k. Query
+  * grouping budgets for the global bound before sets are formed; tasks allocate
+  * their mergers with the capacity recorded in the execution plan. Native
+  * result buffers, direct-memory group limits and index prefetch reserve only
+  * the largest per-segment answer, because each engine call searches one
+  * segment. `SearchResources` holds the resource formulas and
   * `core.vector.SearchPlan` the format-independent grouping algorithm.
   * Executors consume the plan and check actual retained bytes as data loads.
   * `SearchGroupPipeline` overlaps one held-set group search with the current
