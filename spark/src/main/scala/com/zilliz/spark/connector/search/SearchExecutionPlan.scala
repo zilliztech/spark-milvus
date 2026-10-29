@@ -133,7 +133,7 @@ private[connector] object SearchExecutionPlan {
       .reduceOption(_ max _)
       .getOrElse(1)
     val budget =
-      Budget.of(spark, limits, index, layout, totalK, queries.count)
+      Budget.of(spark, limits, index, layout, totalK, segmentK, queries.count)
     val delivery = queryDelivery(queries, layout, limits.queriesMaxBytes)
     val batch = SearchResources.exactScanBatch(configuredBatch)
     val descriptors =
@@ -170,7 +170,7 @@ private[connector] object SearchExecutionPlan {
       rangesWanted = limits.queryRanges,
       workingBytes = groupQueries =>
         if (index)
-          IndexSearch.resultBytes(groupQueries, totalK, limits.callsInFlight)
+          IndexSearch.resultBytes(groupQueries, segmentK, limits.callsInFlight)
         else 0L
     )
     val threads =
@@ -203,7 +203,7 @@ private[connector] object SearchExecutionPlan {
               .sum * layout.rowBytes.toLong,
             IndexSearch.resultBytes(
               range.map(i => plan.groups(i).queries).max,
-              totalK,
+              segmentK,
               1
             )
           ),
@@ -683,12 +683,15 @@ private[connector] object SearchExecutionPlan {
 
   object Budget {
 
+    /** Heap candidates may span segments; each native call answers one segment.
+      */
     def of(
         spark: SparkSession,
         limits: SearchLimits,
         index: Boolean,
         layout: VectorLayout,
-        k: Int,
+        totalK: Int,
+        segmentK: Int,
         queryCount: Long
     ): Budget = {
       val resources = TaskResources.of(spark)
@@ -706,7 +709,7 @@ private[connector] object SearchExecutionPlan {
           queryCount > 1L && limits.groupMaxBytes.forall(
             _ >= SearchResources.groupBytesPerQuery(
               layout,
-              k,
+              totalK,
               pipelineGroups = true
             )
           )
@@ -730,14 +733,14 @@ private[connector] object SearchExecutionPlan {
           limits.groupMaxBytes,
           queries.bytes,
           cores,
-          SearchResources.groupBytesPerQuery(layout, k, pipelineGroups),
+          SearchResources.groupBytesPerQuery(layout, totalK, pipelineGroups),
           SearchResources.directGroupCap(
             SearchResources.directMemoryBytes(spark, heap),
             slots,
             limits.callsInFlight,
             layout,
-            k,
-            SearchResources.groupBytesPerQuery(layout, k, pipelineGroups)
+            segmentK,
+            SearchResources.groupBytesPerQuery(layout, totalK, pipelineGroups)
           )
         ),
         pipelineGroups

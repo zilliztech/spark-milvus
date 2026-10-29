@@ -50,14 +50,16 @@ package com.zilliz.spark.connector
   * the sum of its segments and the global merge by the sum of all segments,
   * each capped at the requested k. Unknown counts retain the requested k. Query
   * grouping budgets for the global bound before sets are formed; tasks allocate
-  * their mergers with the capacity recorded in the execution plan.
-  * `SearchResources` holds the resource formulas and `core.vector.SearchPlan`
-  * the format-independent grouping algorithm. Executors consume the plan and
-  * check actual retained bytes as data loads. `SearchGroupPipeline` overlaps
-  * one held-set group search with the current group's packing and output when
-  * the task holds every executor core. The task thread consumes input and
-  * output; close drains the worker before releasing its borrowed native
-  * resources.
+  * their mergers with the capacity recorded in the execution plan. Native
+  * result buffers, direct-memory group limits and index prefetch reserve only
+  * the largest per-segment answer, because each engine call searches one
+  * segment. `SearchResources` holds the resource formulas and
+  * `core.vector.SearchPlan` the format-independent grouping algorithm.
+  * Executors consume the plan and check actual retained bytes as data loads.
+  * `SearchGroupPipeline` overlaps one held-set group search with the current
+  * group's packing and output when the task holds every executor core. The task
+  * thread consumes input and output; close drains the worker before releasing
+  * its borrowed native resources.
   *
   * The search evaluates `milvus.filter` on a Milvus table base (R7) and holds
   * the take stage's Arrow child allocators (G3).
