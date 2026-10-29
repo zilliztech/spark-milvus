@@ -4,6 +4,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest import mock
@@ -233,48 +234,106 @@ class MatrixTest(unittest.TestCase):
             self.assertEqual(validation.report_directory(project),
                              validation.ROOT / directory / "target/test-reports")
 
-    def test_clean_build_reloads_selectors_and_removes_all_products(self):
-        root = Path(self.temporary.name)
+    def source_matrix(self):
         matrix = copy.deepcopy(self.matrix)
         matrix["shared"] = [
-            {"scala": "2.12.20", "scalaBinary": "2.12", "modules": ["core"]},
+            {"scala": "2.12.20", "scalaBinary": "2.12", "modules": ["native-storage", "core"]},
             {"scala": "2.13.16", "scalaBinary": "2.13", "modules": ["core"]},
         ]
         matrix["spark"].insert(0, {"line": "3.5", "project": "spark", "scala": "2.12.20",
                                    "scalaBinary": "2.12", "spark": "3.5.5"})
+        return matrix
+
+    def run_source_check(self, check, *, clean_removes=True, hashes=("unchanged", "unchanged")):
+        """Run one source check against an sbt double that builds and cleans products."""
+        root = Path(self.temporary.name)
         products = []
 
-        def sbt_outputs(name, commands, *, line="4.0", scala="2.13.16"):
-            if name == "clean-restored":
-                for product in products:
-                    product.unlink()
-                return
+        def sbt(name, commands, *, bundle=None, environment=None, line="4.0", scala="2.13.16"):
+            if name.endswith("-clean"):
+                if clean_removes:
+                    for product in products:
+                        shutil.rmtree(product)
+                    for directory in root.glob("**/target/test-reports"):
+                        shutil.rmtree(directory)
+                return ""
+            binary = ".".join(scala.split(".")[:2])
             for command in commands:
+                project = command.split("/")[0]
                 if command.endswith("/checkReadBuild"):
-                    project = command.split("/")[0]
-                    binary = ".".join(scala.split(".")[:2])
-                    product = root / (project + "-" + binary + ".jar")
-                    product.touch()
+                    product = root / project / "target" / ("classes-" + binary)
+                    product.mkdir(parents=True)
                     products.append(product)
                     metadata = root / "target/read-build" / (project + "-" + binary + ".json")
                     metadata.parent.mkdir(parents=True, exist_ok=True)
                     metadata.write_text(json.dumps({"cleanOutputs": [str(product)]}))
+                    reports = validation.report_directory(project)
+                    reports.mkdir(parents=True, exist_ok=True)
+                    (reports / "TEST-suite.xml").write_text("<testsuite/>")
+                elif command == "integration/Test/compile":
+                    product = root / "integration/target" / ("scala-" + binary) / "test-classes"
+                    product.mkdir(parents=True)
+                    products.append(product)
+            return ""
 
+        sources = iter({"source.scala": value} for value in hashes)
         with mock.patch.object(validation, "ROOT", root), \
-                mock.patch.object(validation, "source_hashes", return_value={"source.scala": "unchanged"}), \
+                mock.patch.object(validation, "source_hashes", side_effect=lambda: next(sources)), \
+                mock.patch.object(validation, "check_reports", return_value=[]), \
+                mock.patch.object(validation, "xml_evidence", return_value=[]), \
+                mock.patch.object(validation, "check_execution",
+                                  side_effect=lambda log, items, **_: {name: {} for name, _ in items}), \
                 mock.patch.object(validation, "save_report") as saved, \
-                mock.patch.object(validation, "run_sbt", side_effect=sbt_outputs) as sbt:
-            validation.clean_checks(matrix)
-        self.assertEqual(sbt.call_count, 5)
-        selected = [(call.kwargs.get("line"), call.kwargs.get("scala"))
-                    for call in sbt.call_args_list[:-1]]
-        self.assertEqual(selected, [("3.5", "2.12.20"), ("4.0", "2.13.16"),
-                                    ("3.5", "2.12.20"), ("4.0", "2.13.16")])
-        self.assertEqual(sbt.call_args_list[-1].args[1], validation.MODULE_CLEAN)
-        for call in sbt.call_args_list[:-1]:
-            self.assertEqual(call.args[1][:len(validation.MODULE_CLEAN)], validation.MODULE_CLEAN)
-        self.assertTrue(all(not product.exists() for product in products))
-        self.assertEqual(saved.call_args.args[1]["result"], "passed")
+                mock.patch.object(validation, "run_sbt", side_effect=sbt) as runs:
+            check()
+        return root, products, runs, saved
+
+    def test_source_checks_clean_their_combination_from_the_default_selection(self):
+        matrix = self.source_matrix()
+        for label, check, projects in (
+                ("spark-source-3.5-2.12.20",
+                 lambda: validation.spark_checks(matrix, "3.5", "2.12.20", None), ["spark"]),
+                ("shared-source-2.12.20",
+                 lambda: validation.shared_checks(matrix, "2.12.20", None), ["native-storage", "core"])):
+            with self.subTest(check=label):
+                self.temporary.cleanup()
+                Path(self.temporary.name).mkdir()
+                root, products, runs, saved = self.run_source_check(check)
+                build, clean = runs.call_args_list
+                self.assertEqual((build.kwargs["line"], build.kwargs["scala"]), ("3.5", "2.12.20"))
+                self.assertEqual(build.args[1][:len(validation.MODULE_CLEAN)], validation.MODULE_CLEAN)
+                self.assertEqual("integration/Test/compile" in build.args[1], projects == ["spark"])
+                self.assertEqual(clean.args, (label + "-clean", validation.MODULE_CLEAN))
+                self.assertNotIn("line", clean.kwargs)
+                self.assertNotIn("scala", clean.kwargs)
+                self.assertTrue(products)
+                self.assertTrue(all(not product.exists() for product in products))
+                for project in projects:
+                    self.assertTrue((root / "target/read-ci/test-reports" / label / project /
+                                     "TEST-suite.xml").is_file())
+                report = saved.call_args.args[1]
+                self.assertEqual(report["clean"]["result"], "passed")
+                self.assertEqual(len(report["clean"]["records"]),
+                                 len(projects) + (1 if projects == ["spark"] else 0))
+
+    def test_retained_products_and_changed_sources_fail_the_source_check(self):
+        matrix = self.source_matrix()
+        for options in ({"clean_removes": False}, {"hashes": ("before", "after")}):
+            with self.subTest(options=options):
+                self.temporary.cleanup()
+                Path(self.temporary.name).mkdir()
+                with self.assertRaises(ValueError):
+                    self.run_source_check(lambda: validation.spark_checks(matrix, "3.5", "2.12.20", None),
+                                          **options)
+
+    def test_native_checks_leave_cleaning_to_the_source_jobs(self):
+        matrix = self.source_matrix()
+        bundle = Path(self.temporary.name) / "bundle.jar"
+        _, _, runs, saved = self.run_source_check(
+            lambda: validation.spark_checks(matrix, "3.5", "2.12.20", bundle))
+        self.assertEqual(runs.call_count, 1)
+        self.assertNotIn("integration/Test/compile", runs.call_args.args[1])
+        self.assertNotIn("clean", saved.call_args.args[1])
 
 
 if __name__ == "__main__":

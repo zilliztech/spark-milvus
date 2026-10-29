@@ -222,13 +222,22 @@ def spark_checks(matrix, line, scala, bundle):
     project = row["project"]
     suites = SPARK_SUITES + ((CONNECT_SUITE,) if line != "3.5" else ()) if bundle else (SPARK_SUITES[3],)
     name = ("spark-native-" if bundle else "spark-source-") + line + "-" + scala
+    before = None if bundle else source_hashes()
     reset_reports((project,))
-    log = run_sbt(name, MODULE_CLEAN + [project + "/checkReadBuild", project + "/Test/compile",
-                        project + "/Test/testOnly " + " ".join(suites)], bundle=bundle, line=line, scala=scala)
+    commands = MODULE_CLEAN + [project + "/checkReadBuild", project + "/Test/compile"]
+    if not bundle:
+        commands.append("integration/Test/compile")
+    commands.append(project + "/Test/testOnly " + " ".join(suites))
+    log = run_sbt(name, commands, bundle=bundle, line=line, scala=scala)
     reports = check_reports(report_directory(project), suites)
     counts = check_execution(log, [(project, reports)])[project]
-    save_report(name, {"selection": row, "native": bool(bundle),
-                       "xmlSuites": xml_evidence(reports), "execution": counts})
+    report = {"selection": row, "native": bool(bundle),
+              "xmlSuites": xml_evidence(reports), "execution": counts}
+    if not bundle:
+        integration = ROOT / "integration/target" / ("scala-" + row["scalaBinary"]) / "test-classes"
+        report["clean"] = clean_contract(name, [project], [build_record(project, row["scalaBinary"]),
+                                                           {"cleanOutputs": [str(integration)]}], before)
+    save_report(name, report)
 
 
 def shared_checks(matrix, scala, bundle):
@@ -236,6 +245,7 @@ def shared_checks(matrix, scala, bundle):
     modules = row["modules"]
     name = ("shared-native-" if bundle else "shared-source-") + scala
     projects = ["core"] + (["native-runtime"] if "native-runtime" in modules else []) if bundle else modules
+    before = None if bundle else source_hashes()
     reset_reports(projects)
     commands = list(MODULE_CLEAN)
     if bundle:
@@ -254,9 +264,13 @@ def shared_checks(matrix, scala, bundle):
             (RUNTIME_SUITE,) if project == "native-runtime" else ())
         results[project] = check_reports(report_directory(project), required, allow_skipped=not bundle)
     counts = check_execution(log, list(results.items()), allow_skipped=not bundle)
-    save_report(name, {"selection": row, "native": bool(bundle), "modules": {
+    report = {"selection": row, "native": bool(bundle), "modules": {
         project: {"xmlSuites": xml_evidence(reports), "execution": counts[project]}
-        for project, reports in results.items()}})
+        for project, reports in results.items()}}
+    if not bundle:
+        report["clean"] = clean_contract(name, projects, [build_record(project, row["scalaBinary"])
+                                                          for project in projects], before)
+    save_report(name, report)
 
 
 def integration_checks(bundle):
@@ -287,37 +301,38 @@ def assert_clean_outputs(records):
         raise ValueError("Clean retained generated products: " + ", ".join(remaining))
 
 
-def clean_checks(matrix):
-    before = source_hashes()
-    records = []
-    for row in matrix["shared"]:
-        commands = list(MODULE_CLEAN)
-        for project in row["modules"]:
-            commands.extend((project + "/checkReadBuild", project + "/Test/compile"))
-        selector = "3.5" if row["scala"].startswith("2.12.") else "4.0"
-        run_sbt("clean-shared-" + row["scala"], commands, line=selector, scala=row["scala"])
-        records.extend(json.loads((ROOT / "target/read-build" /
-                                  (project + "-" + row["scalaBinary"] + ".json")).read_text())
-                       for project in row["modules"])
-    for row in matrix["spark"]:
-        commands = MODULE_CLEAN + ["spark/checkReadBuild", "spark/Test/compile",
-                    "integration/Test/compile"]
-        run_sbt("clean-spark-" + row["line"] + "-" + row["scala"], commands,
-                line=row["line"], scala=row["scala"])
-        records.append(json.loads((ROOT / "target/read-build" /
-                                   ("spark-" + row["scalaBinary"] + ".json")).read_text()))
-        integration_target = ROOT / "integration/target" / ("scala-" + row["scalaBinary"])
-        records.append({"cleanOutputs": [str(integration_target / "test-classes")]})
-    run_sbt("clean-restored", MODULE_CLEAN)
+def build_record(project, scala_binary):
+    return json.loads((ROOT / "target/read-build" / (project + "-" + scala_binary + ".json")).read_text())
+
+
+def preserve_reports(name, projects):
+    """Copy test reports under the root target, which no module clean touches."""
+    for project in projects:
+        source = report_directory(project)
+        if source.is_dir():
+            shutil.copytree(source, ROOT / "target/read-ci/test-reports" / name / project,
+                            dirs_exist_ok=True)
+
+
+def clean_contract(name, projects, records, before):
+    """Clean from the default selection must remove this combination's products.
+
+    Each source matrix job builds one Spark/Scala combination; switching
+    combinations relies on the default build's clean removing what another
+    selection produced, and neither cleaning nor cross compiling may touch a
+    source file.
+    """
+    preserve_reports(name, projects)
+    run_sbt(name + "-clean", MODULE_CLEAN)
     assert_clean_outputs(records)
     if source_hashes() != before:
         raise ValueError("Clean or cross compilation changed source files")
-    save_report("clean", {"records": records, "sourceHashes": before, "result": "passed"})
+    return {"records": records, "result": "passed"}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("matrix", "shared", "spark", "integration", "clean"))
+    parser.add_argument("action", choices=("matrix", "shared", "spark", "integration"))
     parser.add_argument("--matrix", type=Path, required=True)
     parser.add_argument("--scala")
     parser.add_argument("--line")
@@ -335,10 +350,8 @@ def main():
         shared_checks(matrix, args.scala, args.native_bundle)
     elif args.action == "spark":
         spark_checks(matrix, args.line, args.scala, args.native_bundle)
-    elif args.action == "integration":
-        integration_checks(args.native_bundle)
     else:
-        clean_checks(matrix)
+        integration_checks(args.native_bundle)
 
 
 if __name__ == "__main__":

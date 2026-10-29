@@ -46,9 +46,15 @@ class WorkflowGateTest(unittest.TestCase):
                 else:
                     self.assertNotIn("if", job)
         aggregate = jobs["build-and-test"]
-        self.assertTrue(any(step.get("run") == "sbt test" for step in aggregate["steps"]))
-        self.assertTrue(any("read_validation.py clean" in step.get("run", "")
-                            for step in aggregate["steps"]))
+        runs = [step.get("run", "") for step in aggregate["steps"]]
+        # The shared modules' tests run once, in the matrix; the aggregate keeps
+        # the default line's whole Spark suite.
+        self.assertIn("sbt spark/test", runs)
+        self.assertNotIn("sbt test", runs)
+        # Each source matrix job holds its own combination to the clean
+        # contract, so no job recompiles the whole matrix to clean it.
+        self.assertFalse(any("read_validation.py clean" in step.get("run", "")
+                             for job in jobs.values() for step in job.get("steps", [])))
 
     def test_real_storage_reads_run_with_two_identities_and_always_clean_up(self):
         steps = workflow("ci.yml")["jobs"]["spark-native"]["steps"]
