@@ -354,6 +354,15 @@ which a task reads one group at a time, holding at most two; the hits then
 meet their query rows in a join after the last stage. Every way gives the same
 result. Read by group, a job reads the query vectors once per segment set in
 total, and the executors' local disks need room for about two copies of them.
+
+Computed query rows are first materialized in a Spark local checkpoint, then
+classified and numbered. Search, Spark fallback and result assembly all read
+that fixed input. If an executor loses checkpoint data, the query fails rather
+than rerunning the source and pairing hits with different rows. Local
+checkpoints do not provide recovery from executor loss. The result plan keeps
+its checkpoint for repeated actions; Spark reclaims it when the plan is no
+longer referenced. Driver collection and planning failures release it earlier.
+
 `milvus.search.group.max.bytes` limits one task's query-group heap estimate.
 Serial search counts each query's vector row plus K × 48 bytes for primitive
 and packed candidates. An index search holding every core of a multicore

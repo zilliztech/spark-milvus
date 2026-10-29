@@ -1,8 +1,10 @@
 package com.zilliz.spark.connector.search
 
 import java.lang.{Float => JavaFloat}
+import java.nio.file.{Files, Path, Paths}
 import scala.collection.mutable
 
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{
   BoundReference,
   GenericInternalRow,
@@ -12,12 +14,16 @@ import org.apache.spark.sql.catalyst.util.GenericArrayData
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types.{ArrayType, DataType, FloatType, LongType}
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.storage.RDDBlockId
+import org.apache.spark.util.LongAccumulator
+import org.apache.spark.SparkEnv
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.storage.schema.MetricType
 import com.zilliz.milvus.storage.vector.RankingFunction
+import com.zilliz.spark.connector.metrics.NearestByMetrics
 import com.zilliz.spark.connector.options.SearchLimits
 
 class NearestByQueryRowsTest
@@ -148,6 +154,7 @@ class NearestByQueryRowsTest
     "computed query collection includes row and packed bytes at its exact limit"
   ) {
     val rows = Seq(query(0L, vector(1f, 2f)), query(1L, null))
+    val before = spark.sparkContext.getPersistentRDDs.keySet
     // 48 row bytes plus 8 packed bytes for the vector, and 24 for the NULL row.
     withPrepared(rows, 80L) { prepared =>
       prepared shouldBe a[Local]
@@ -155,12 +162,159 @@ class NearestByQueryRowsTest
       prepared.counts shouldBe Counts(1L, 1L, 0L, 0L, Map.empty)
       prepared.asInstanceOf[Local].keptRows.map(_.getLong(0)).toSeq shouldBe
         Seq(0L, 1L)
+      spark.sparkContext.getPersistentRDDs.keySet shouldBe before
     }
     withPrepared(rows, 79L) { prepared =>
       prepared shouldBe a[Distributed]
       prepared.dimension shouldBe 2
       prepared.counts shouldBe Counts(1L, 1L, 0L, 80L, Map(2 -> 1L))
       prepared.sparkRows(spark) shouldBe None
+    }
+  }
+
+  test(
+    "distributed queries retain associations and fallback across repeated actions"
+  ) {
+    withChangingRows { (source, changed, evaluations) =>
+      val prepared = prepare(
+        Computed(source),
+        types,
+        vectorExpression,
+        frameSearcher(1L)
+      ).asInstanceOf[Distributed]
+      val numbered = prepared.number()
+      val vectors = prepared.vectors(numbered).selected
+      val original = vectors
+        .collect()
+        .map { case (id, values) =>
+          id -> values.toSeq
+        }
+        .toMap
+      original.values.toSet shouldBe Set(Seq(1f), Seq(9f), Seq(5f))
+      evaluations.value shouldBe 2L
+      Files.createFile(changed)
+
+      for (_ <- 0 until 2) {
+        val associated = vectors.join(prepared.kept(numbered)).collect()
+        associated.length shouldBe 3
+        associated.foreach { case (id, (values, row)) =>
+          values.toSeq shouldBe original(id)
+          row.getArray(1).toFloatArray().toSeq shouldBe original(id)
+        }
+        prepared.sparkRows(spark).get.map(_.getLong(0)).collect().toSeq shouldBe
+          Seq(40L)
+      }
+      evaluations.value shouldBe 2L
+    }
+  }
+
+  test(
+    "losing one query checkpoint block fails instead of reassigning query ids"
+  ) {
+    withChangingRows { (source, changed, evaluations) =>
+      val before = spark.sparkContext.getPersistentRDDs.keySet
+      val prepared = prepare(
+        Computed(source),
+        types,
+        vectorExpression,
+        frameSearcher(1L)
+      ).asInstanceOf[Distributed]
+      val numbered = prepared.number()
+      // Search has already consumed these ids and vectors before the row join.
+      val searched = prepared.vectors(numbered).selected.collect().toMap
+      searched(0L).toSeq shouldBe Seq(1f)
+      searched(2L).toSeq shouldBe Seq(9f)
+      val cached = spark.sparkContext.getPersistentRDDs
+        .filterNot { case (id, _) => before(id) }
+        .values
+        .toSeq
+      cached.size shouldBe 1
+      val lost = RDDBlockId(cached.head.id, 0)
+      val retained = RDDBlockId(cached.head.id, 1)
+      val blocks = SparkEnv.get.blockManager
+      blocks.getStatus(lost) should not be empty
+      blocks.getStatus(retained) should not be empty
+      Files.createFile(changed)
+      blocks.removeBlock(lost, tellMaster = true)
+      blocks.getStatus(lost) shouldBe None
+      blocks.getStatus(retained) should not be empty
+
+      val failure = intercept[Exception] {
+        prepared.kept(numbered).collect()
+      }
+      Iterator
+        .iterate[Throwable](failure)(_.getCause)
+        .takeWhile(_ != null)
+        .exists(cause =>
+          Option(cause.getMessage).exists(message =>
+            message.contains(lost.name) &&
+              message.toLowerCase.contains("checkpoint")
+          )
+        ) shouldBe true
+      // Recomputing partition 0 would reverse its rows and silently swap ids.
+      evaluations.value shouldBe 2L
+    }
+  }
+
+  test(
+    "Spark fallback keeps its query checkpoint for repeated result actions"
+  ) {
+    withChangingRows { (source, changed, evaluations) =>
+      val before = spark.sparkContext.getPersistentRDDs.keySet
+      val result = NearestBySearch.run(
+        spark,
+        Computed(source.map(row => query(row.getLong(0), vector()))),
+        types.toSeq,
+        vectorExpression,
+        frameInput(1L),
+        outer = false,
+        approx = false,
+        k = 1,
+        metric = MetricType.L2,
+        outputTypes = types.toSeq,
+        function = UnusedRanking,
+        bySpark = rows => rows,
+        metrics = NearestByMetrics.create(spark.sparkContext)
+      )
+      val cached = spark.sparkContext.getPersistentRDDs.keySet -- before
+      cached.size shouldBe 1
+      result.map(_.getLong(0)).collect().toSeq shouldBe
+        Seq(10L, 20L, 30L, 40L)
+      Files.createFile(changed)
+      for (_ <- 0 until 2) {
+        result.map(_.getLong(0)).collect().toSeq shouldBe
+          Seq(10L, 20L, 30L, 40L)
+        spark.sparkContext.getPersistentRDDs.keySet should contain allElementsOf cached
+      }
+      evaluations.value shouldBe 2L
+    }
+  }
+
+  test(
+    "Spark fallback planning failures release the prepared query checkpoint"
+  ) {
+    withChangingRows { (source, _, _) =>
+      val before = spark.sparkContext.getPersistentRDDs.keySet
+      val failure = new IllegalArgumentException("fallback planning failed")
+      val caught = intercept[IllegalArgumentException] {
+        NearestBySearch.run(
+          spark,
+          Computed(source),
+          types.toSeq,
+          vectorExpression,
+          frameInput(1L),
+          outer = false,
+          approx = false,
+          k = 1,
+          metric = MetricType.L2,
+          outputTypes = types.toSeq,
+          function = UnusedRanking,
+          bySpark = _ => throw failure,
+          metrics = NearestByMetrics.create(spark.sparkContext)
+        )
+      }
+      caught should be theSameInstanceAs failure
+      spark.sparkContext.getPersistentRDDs.keySet shouldBe before
     }
   }
 
@@ -259,20 +413,52 @@ class NearestByQueryRowsTest
   private def frameSearcher(limit: Long): NearestByInput.Searcher =
     NearestByInput.searcher(
       spark,
-      NearestByInput.Frame(
-        FrameSearch.Base(
-          spark.sparkContext.emptyRDD[InternalRow],
-          Seq(BoundReference(0, LongType, nullable = false)),
-          vectorExpression
-        ),
-        SearchLimits(limit, None, None)
-      ),
+      frameInput(limit),
       approx = false,
       k = 1,
       metric = MetricType.L2,
       function = UnusedRanking,
       metrics = Map.empty
     )
+
+  private def frameInput(limit: Long): NearestByInput.Frame =
+    NearestByInput.Frame(
+      FrameSearch.Base(
+        spark.sparkContext.emptyRDD[InternalRow],
+        Seq(BoundReference(0, LongType, nullable = false)),
+        vectorExpression
+      ),
+      SearchLimits(limit, None, None)
+    )
+
+  private def withChangingRows(
+      check: (RDD[InternalRow], Path, LongAccumulator) => Unit
+  ): Unit = {
+    val context = spark.sparkContext
+    val before = context.getPersistentRDDs.keySet
+    val directory = Files.createTempDirectory("nearest-by-query-order")
+    val changed = directory.resolve("reverse")
+    val marker = changed.toString
+    val evaluations = context.longAccumulator("query source evaluations")
+    val source = context.parallelize(Seq(0, 1), 2).mapPartitions { partitions =>
+      evaluations.add(1L)
+      val rows = partitions.flatMap {
+        case 0 => Iterator(query(10L, vector(1f)), query(20L, vector(9f)))
+        case 1 => Iterator(query(30L, vector(5f)), query(40L, vector()))
+      }.toVector
+      if (Files.exists(Paths.get(marker))) rows.reverseIterator
+      else rows.iterator
+    }
+    try check(source, changed, evaluations)
+    finally {
+      context.getPersistentRDDs
+        .filterNot { case (id, _) => before(id) }
+        .values
+        .foreach(_.unpersist(blocking = true))
+      Files.deleteIfExists(changed)
+      Files.delete(directory)
+    }
+  }
 
   private def withPrepared(rows: Seq[InternalRow], limit: Long)(
       check: Prepared => Unit
