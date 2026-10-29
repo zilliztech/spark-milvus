@@ -277,7 +277,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
           )
         ).replace(
           "\"manifest_list\": []",
-          s"\"manifest_list\": [\"$avroKey\",\"$l0Key\"]"
+          s""""manifest_list": ["$avroKey","$l0Key"]"""
         )
       )
       val snapshot = catalog(dir).read("snapshot.json")
