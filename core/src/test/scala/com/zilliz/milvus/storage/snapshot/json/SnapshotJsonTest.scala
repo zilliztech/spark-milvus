@@ -16,6 +16,62 @@ import io.milvus.grpc.schema.{
   */
 class SnapshotJsonTest extends AnyFunSuite with Matchers {
 
+  test("manifest versions preserve int64 values and default to zero") {
+    Seq(0L, Int.MaxValue.toLong + 1L, Long.MaxValue).foreach { version =>
+      ManifestContentJson.parse(
+        s"""{"ver":$version,"base_path":"segment"}"""
+      ) shouldBe Right(ManifestContentJson(version, "segment"))
+    }
+    Seq(
+      """{"base_path":"segment"}""",
+      """{"ver":null,"base_path":"segment"}"""
+    ).foreach { json =>
+      ManifestContentJson.parse(json) shouldBe Right(
+        ManifestContentJson(0L, "segment")
+      )
+    }
+  }
+
+  test("manifest versions reject coercion and int64 overflow") {
+    Seq(
+      "1.5",
+      "1.0",
+      "1e2",
+      "\"7\"",
+      "true",
+      "[]",
+      "{}",
+      "9223372036854775808",
+      "-9223372036854775809"
+    ).foreach { version =>
+      withClue(version) {
+        ManifestContentJson
+          .parse(
+            s"""{"ver":$version,"base_path":"segment"}"""
+          )
+          .isLeft shouldBe true
+      }
+    }
+  }
+
+  test(
+    "manifest references require a JSON object and reject trailing content"
+  ) {
+    Seq(
+      "segment",
+      "null",
+      "[]",
+      """{"ver":7,"base_path":"segment"""",
+      """{"ver":7,"base_path":"segment"} {}""",
+      """{"ver":7,"base_path":"segment"} trailing""",
+      """{"ver":7,"base_path":42}"""
+    ).foreach { json =>
+      withClue(json) {
+        ManifestContentJson.parse(json).isLeft shouldBe true
+      }
+    }
+  }
+
   test("missing indexes and build ids are distinct from explicit empty lists") {
     val prefix =
       """{"snapshot_info":{"name":"s"},"collection":{"schema":{"name":"c","fields":[]}}"""

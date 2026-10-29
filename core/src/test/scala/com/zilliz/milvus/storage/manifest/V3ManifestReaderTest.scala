@@ -10,7 +10,7 @@ import org.apache.avro.Schema
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.io.LocalObjectStore
+import com.zilliz.milvus.storage.io.{FailingObjectStore, LocalObjectStore}
 import com.zilliz.milvus.storage.snapshot.DeltaLogFile
 
 class V3ManifestReaderTest extends AnyFunSuite with Matchers {
@@ -217,6 +217,62 @@ class V3ManifestReaderTest extends AnyFunSuite with Matchers {
       "files/insert_log/10/20/30",
       7L
     ) shouldBe "files/insert_log/10/20/30/_metadata/manifest-7.avro"
+  }
+
+  test(
+    "version zero supplies empty facts and statistics without storage access"
+  ) {
+    val store =
+      new FailingObjectStore(new IllegalStateException("must not be opened"))
+    V3ManifestReader.load("segment", 0L, "", store) shouldBe Right(
+      ManifestFacts(Seq.empty, Some(0L))
+    )
+    V3ManifestReader.loadStatistics("segment", 0L, "", store) shouldBe Right(
+      Map.empty
+    )
+  }
+
+  test(
+    "version zero stays empty when a later manifest contains data and statistics"
+  ) {
+    val base = Files.createTempDirectory("milvus-v3-initial-manifest-test")
+    val metadata = Files.createDirectory(base.resolve("_metadata"))
+    val later = metadata.resolve("manifest-1.avro")
+    try {
+      Files.write(
+        later,
+        writeManifest(
+          Seq(("delete-1", 0, 1L)),
+          stats = Map(
+            "bloom_filter.100" -> (Seq("bloom-1"), Map.empty[String, String])
+          ),
+          groups = Seq(Seq((0L, 5L)))
+        )
+      )
+      val store = new LocalObjectStore()
+      V3ManifestReader
+        .load(base.toString, 1L, "", store)
+        .toOption
+        .get
+        .rows shouldBe Some(5L)
+      V3ManifestReader
+        .loadStatistics(base.toString, 1L, "", store)
+        .toOption
+        .get should not be empty
+      V3ManifestReader.load(base.toString, 0L, "", store) shouldBe Right(
+        ManifestFacts(Seq.empty, Some(0L))
+      )
+      V3ManifestReader.loadStatistics(
+        base.toString,
+        0L,
+        "",
+        store
+      ) shouldBe Right(Map.empty)
+    } finally {
+      Files.deleteIfExists(later)
+      Files.deleteIfExists(metadata)
+      Files.deleteIfExists(base)
+    }
   }
 
   test("parseStatistics resolves relative paths and keeps metadata") {

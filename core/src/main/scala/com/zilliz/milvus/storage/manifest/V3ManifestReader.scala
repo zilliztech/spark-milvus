@@ -37,6 +37,7 @@ object V3ManifestReader {
       bucket: String,
       store: ObjectStore
   ): Either[Throwable, ManifestFacts] = {
+    if (readVersion == 0L) return Right(ManifestFacts(Seq.empty, Some(0L)))
     try {
       val at =
         StoragePath.parse(manifestFilePath(basePath, readVersion), bucket)
@@ -53,6 +54,7 @@ object V3ManifestReader {
       bucket: String,
       store: ObjectStore
   ): Either[Throwable, Map[String, ManifestStatistic]] = {
+    if (readVersion == 0L) return Right(Map.empty)
     try {
       val at =
         StoragePath.parse(manifestFilePath(basePath, readVersion), bucket)

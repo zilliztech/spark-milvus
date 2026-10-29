@@ -110,7 +110,8 @@ object SnapshotSources {
   }
 }
 
-/** A fixed V3 snapshot described by explicit schema and manifest options. */
+/** A schema-only empty snapshot. Nonempty inputs require a full snapshot file.
+  */
 final class OptionStringsSnapshotSource(milvusOption: MilvusOption)
     extends SnapshotSource {
 
@@ -138,6 +139,11 @@ final class OptionStringsSnapshotSource(milvusOption: MilvusOption)
         }
       }
       .getOrElse(Seq.empty)
+    require(
+      v3Items.isEmpty,
+      s"Nonempty ${MilvusOption.SnapshotManifests} is not supported; use ${MilvusOption.SnapshotPath} " +
+        "so segment roles and L0 deletes come from the complete Milvus snapshot"
+    )
     val partitionIds = OptionParsing.nonNegativeLongList(
       rawOption,
       MilvusOption.SnapshotPartitionIds

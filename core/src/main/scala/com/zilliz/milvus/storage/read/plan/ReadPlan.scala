@@ -27,9 +27,9 @@ final case class ReadPlan(specs: Seq[SegmentReadTask]) extends Serializable {
   def partitionsApplyingDeletes: Int = specs.count(_.appliesDeletes)
 }
 
-/** How a snapshot becomes a plan: one task per data segment, in the order the
-  * snapshot lists them, V3 first. This is the driver's part of a read; the task
-  * is what an executor opens.
+/** How a snapshot becomes a plan: one task per data segment beyond the initial
+  * empty state, in snapshot order. This is the driver's part of a read; the
+  * task is what an executor opens.
   */
 object ReadPlan extends Logging {
 
@@ -60,7 +60,7 @@ object ReadPlan extends Logging {
     }
     val schemaBytes = snapshot.schemaBytes
 
-    val v3Tasks = snapshot.v3Segments.filter(_.hasData).map { seg =>
+    val v3Tasks = snapshot.v3Segments.filter(_.hasData).flatMap { seg =>
       val (basePath, listedVersion) = seg.layout match {
         case SegmentLayout.Manifest(path, version) => (path, version)
         case _ =>
@@ -69,29 +69,40 @@ object ReadPlan extends Logging {
           )
       }
       val readVersion = deletes.v3ReadVersions.getOrElse(seg.id, listedVersion)
-      if (readVersion <= 0L) {
+      if (readVersion < 0L) {
         throw new IllegalStateException(
-          s"cannot plan V3 segment ${seg.id} at $basePath without a positive manifest version; " +
+          s"cannot plan V3 segment ${seg.id} at $basePath without a pinned manifest version; " +
             "resolve and pin the version before building the read plan"
         )
       }
-      logInfo(
-        s"Planning segment ${seg.id} of partition ${seg.partitionId}: manifest $basePath at version $readVersion"
-      )
-      SegmentReadTask(
-        segmentId = seg.id,
-        partitionId = seg.partitionId,
-        layout = SegmentLayout.Manifest(basePath, readVersion),
-        schemaBytes = schemaBytes,
-        properties = propertiesFor(3),
-        neededFieldIds = neededFieldIds,
-        deletes = deleteSourceFor(seg.id),
-        indexes = seg.indexes,
-        // A snapshot that lists manifests alone states no row count; the
-        // manifest read for the delete files states one.
-        snapshotRows = seg.rows.orElse(deletes.v3Rows.get(seg.id)),
-        limits = limits
-      )
+      if (readVersion == 0L) {
+        require(
+          !seg.rows
+            .exists(_ > 0L) && !deletes.v3Rows.get(seg.id).exists(_ > 0L),
+          s"V3 segment ${seg.id} at $basePath has manifest version 0 but a positive row count"
+        )
+        None
+      } else {
+        logInfo(
+          s"Planning segment ${seg.id} of partition ${seg.partitionId}: manifest $basePath at version $readVersion"
+        )
+        Some(
+          SegmentReadTask(
+            segmentId = seg.id,
+            partitionId = seg.partitionId,
+            layout = SegmentLayout.Manifest(basePath, readVersion),
+            schemaBytes = schemaBytes,
+            properties = propertiesFor(3),
+            neededFieldIds = neededFieldIds,
+            deletes = deleteSourceFor(seg.id),
+            indexes = seg.indexes,
+            // A snapshot that lists manifests alone states no row count; the
+            // manifest read for the delete files states one.
+            snapshotRows = seg.rows.orElse(deletes.v3Rows.get(seg.id)),
+            limits = limits
+          )
+        )
+      }
     }
 
     logInfo(s"Planned ${v3Tasks.size} V3 task(s) of ${snapshot.name}")

@@ -1796,9 +1796,41 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
     assert(err.getMessage.contains("Failed to parse snapshot manifests"))
   }
 
-  test("snapshot planner tags V3 partitions with partition ID string") {
-    val manifestJson = SegmentListJson.encodeManifestItems(
-      Seq(
+  test(
+    "nonempty explicit V3 options require a snapshot path before storage access"
+  ) {
+    val options = Map(
+      MilvusOption.SnapshotMode -> "true",
+      MilvusOption.SnapshotSchemaBytes -> emptySchemaBytes,
+      MilvusOption.SnapshotManifests -> SegmentListJson.encodeManifestItems(
+        Seq(
+          ManifestItemJson(
+            30L,
+            """{"ver":7,"base_path":"files/insert_log/10/20/30"}"""
+          )
+        )
+      )
+    )
+    // No storage configuration is supplied: the incomplete snapshot must be
+    // rejected before opening the store or loading native libraries.
+    val result =
+      new OptionStringsSnapshotSource(MilvusOption(options)).snapshot()
+    assert(result.isLeft)
+    val error = result.left.toOption.get
+    assert(error.isInstanceOf[IllegalArgumentException])
+    assert(
+      error.getMessage.contains(
+        s"Nonempty ${MilvusOption.SnapshotManifests} is not supported"
+      )
+    )
+    assert(error.getMessage.contains(s"use ${MilvusOption.SnapshotPath}"))
+  }
+
+  test(
+    "internal snapshot planning tags V3 partitions with partition ID string"
+  ) {
+    val snapshot = snapshotOf(
+      v3 = Seq(
         ManifestItemJson(
           30L,
           "{\"ver\":7,\"base_path\":\"files/insert_log/10/20/30\"}"
@@ -1807,14 +1839,11 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
           31L,
           "{\"ver\":8,\"base_path\":\"files/insert_log/10/21/31\"}"
         )
-      )
+      ),
+      partitionIds = Seq(20L, 21L)
     )
-    val rawOptions = new ju.HashMap[String, String]()
-    rawOptions.put(MilvusOption.SnapshotMode, "true")
-    rawOptions.put(MilvusOption.SnapshotManifests, manifestJson)
-    rawOptions.put(MilvusOption.SnapshotPartitionIds, "20,21")
-    rawOptions.put(MilvusOption.SnapshotSchemaBytes, emptySchemaBytes)
-    val partitions = scanFromOptions(rawOptions).planInputPartitions()
+    val partitions = scanWithOptions(new ju.HashMap[String, String]())
+      .inputPartitions(snapshot)
     assert(partitions.length == 2)
     val first = partitions(0).asInstanceOf[MilvusInputPartition]
     val second = partitions(1).asInstanceOf[MilvusInputPartition]
@@ -1827,22 +1856,19 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
   }
 
   test(
-    "snapshot planner falls back to default partition ID for unexpected V3 paths"
+    "internal snapshot planning falls back to default partition ID for unexpected V3 paths"
   ) {
-    val manifestJson = SegmentListJson.encodeManifestItems(
-      Seq(
+    val snapshot = snapshotOf(
+      v3 = Seq(
         ManifestItemJson(
           30L,
           "{\"ver\":7,\"base_path\":\"files/unexpected/10/20/30\"}"
         )
-      )
+      ),
+      partitionIds = Seq(20L, 21L)
     )
-    val rawOptions = new ju.HashMap[String, String]()
-    rawOptions.put(MilvusOption.SnapshotMode, "true")
-    rawOptions.put(MilvusOption.SnapshotManifests, manifestJson)
-    rawOptions.put(MilvusOption.SnapshotPartitionIds, "20,21")
-    rawOptions.put(MilvusOption.SnapshotSchemaBytes, emptySchemaBytes)
-    val partitions = scanFromOptions(rawOptions).planInputPartitions()
+    val partitions = scanWithOptions(new ju.HashMap[String, String]())
+      .inputPartitions(snapshot)
     assert(partitions.length == 1)
     val partition = partitions.head.asInstanceOf[MilvusInputPartition]
     assert(partition.task.partitionId == 20L)
@@ -1874,19 +1900,27 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
   }
 
   test(
-    "snapshot planner pins StorageV3 raw manifest path to resolved version"
+    "internal snapshot planning pins an unresolved StorageV3 manifest version"
   ) {
     val scan = scanWithOptions(new ju.HashMap[String, String]())
-    val partitions = scan.inputPartitions(
-      snapshotOf(
-        v3 = Seq(
-          ManifestItemJson(
-            30L,
-            "files/insert_log/10/20/30"
-          )
-        ),
-        partitionIds = Seq(20L)
+    val initial = snapshotOf(
+      v3 = Seq(
+        ManifestItemJson(
+          30L,
+          """{"ver":7,"base_path":"files/insert_log/10/20/30"}"""
+        )
       ),
+      partitionIds = Seq(20L)
+    )
+    val snapshot = initial.copy(segments =
+      initial.segments.map(
+        _.copy(
+          layout = SegmentLayout.Manifest("files/insert_log/10/20/30", -1L)
+        )
+      )
+    )
+    val partitions = scan.inputPartitions(
+      snapshot,
       DeleteFileListing.empty.copy(v3ReadVersions = Map(30L -> 11L))
     )
 

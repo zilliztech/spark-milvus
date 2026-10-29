@@ -6,7 +6,6 @@ import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.manifest.{ManifestFacts, V3ManifestReader}
 import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.snapshot.{
-  DeleteFiles,
   DeltaLogFile,
   SegmentLayout,
   Snapshot
@@ -28,9 +27,10 @@ import com.zilliz.milvus.storage.snapshot.{
 final case class DeleteFileListing(
     v3BySegment: Map[Long, Seq[DeltaLogFile]],
     v3ReadVersions: Map[Long, Long],
-    /** Rows of the V3 segments whose manifest was opened, by segment id. A
-      * snapshot that states its own row counts does not need these; a snapshot
-      * that lists manifests alone has no other source for them.
+    /** Rows of the V3 segments whose manifest was opened or whose version is
+      * the initial empty state, by segment id. A snapshot that states its own
+      * row counts does not need these; a snapshot that lists manifests alone
+      * has no other source for them.
       */
     v3Rows: Map[Long, Long] = Map.empty,
     /** L0 files resolved by source channel and partition for each data segment.
@@ -57,7 +57,8 @@ object DeleteFileListing {
 
   /** Whether listing has to open object storage. Data segments need their
     * unpinned versions resolved; enabled deletes also need the data and L0
-    * manifests. Disabled deletes never inspect an L0 manifest.
+    * manifests. Version zero requires no storage access. Disabled deletes never
+    * inspect an L0 manifest.
     */
   def requiresStore(snapshot: Snapshot, applyDeletes: Boolean): Boolean = {
     val listsV3Deletes = applyDeletes && snapshot.primaryKeyField.nonEmpty
@@ -66,7 +67,8 @@ object DeleteFileListing {
         case SegmentLayout.Manifest(_, readVersion) => readVersion
         case _                                      => -1L
       }
-      (segment.hasData || listsV3Deletes) && (version <= 0L || listsV3Deletes)
+      (segment.hasData || listsV3Deletes) &&
+      (version < 0L || (version > 0L && listsV3Deletes))
     }
   }
 
@@ -121,7 +123,7 @@ object DeleteFileListing {
           )
       }
       val readVersion =
-        if (listedVersion > 0L) listedVersion
+        if (listedVersion >= 0L) listedVersion
         else
           V3ManifestReader
             .latestManifestVersion(basePath, bucket, store)
@@ -133,7 +135,7 @@ object DeleteFileListing {
                 ),
               identity
             )
-      if (readVersion <= 0L) {
+      if (listedVersion < 0L && readVersion <= 0L) {
         throw new IllegalStateException(
           s"cannot pin V3 segment ${seg.id} at $basePath: " +
             s"latest manifest version must be positive, got $readVersion"
@@ -142,10 +144,11 @@ object DeleteFileListing {
       // The manifest is read for the delete files; the segment's rows come
       // out of the same record, so a snapshot that did not carry a row count
       // has one here at no further cost. A read that lists no delete files
-      // opens no manifest and learns nothing, which is why the row count is
-      // an Option all the way up.
+      // opens no manifest and learns nothing, except that version zero is
+      // already known to be empty.
       val files =
-        if (!listDeleteFiles) ManifestFacts(Seq.empty, scala.None)
+        if (!listDeleteFiles && readVersion != 0L)
+          ManifestFacts(Seq.empty, scala.None)
         else
           V3ManifestReader
             .load(basePath, readVersion, bucket, store)

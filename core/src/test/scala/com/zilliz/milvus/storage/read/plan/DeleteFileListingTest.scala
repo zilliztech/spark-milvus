@@ -63,6 +63,23 @@ class DeleteFileListingTest extends AnyFunSuite with Matchers {
       )
       .fold(e => throw e, identity)
 
+  private def unpinnedSnapshot(
+      basePath: String,
+      collectionSchema: CollectionSchema = schema
+  ): Snapshot =
+    snapshotOf(collectionSchema = collectionSchema).copy(segments =
+      Seq(
+        Segment(
+          id = 30L,
+          partitionId = 20L,
+          storageVersion = 3,
+          rows = None,
+          layout = SegmentLayout.Manifest(basePath, -1L),
+          deletes = DeleteFiles.InManifest
+        )
+      )
+    )
+
   private def withDir(f: Path => Unit): Unit = {
     val dir = Files.createTempDirectory("delete-listing")
     try f(dir)
@@ -147,7 +164,7 @@ class DeleteFileListingTest extends AnyFunSuite with Matchers {
 
       val latest = DeleteFileListing
         .of(
-          snapshotOf(v3 = Seq(ManifestItemJson(30L, base))),
+          unpinnedSnapshot(base),
           applyDeletes = true,
           "",
           store
@@ -223,11 +240,53 @@ class DeleteFileListingTest extends AnyFunSuite with Matchers {
       ManifestItemJson(
         30L,
         """{"ver":3,"base_path":"files/insert_log/10/20/30"}"""
-      ),
-      ManifestItemJson(41L, "files/insert_log/10/-1/41")
+      )
     )
     Seq((schema, false), (schemaWithoutPrimaryKey, true)).foreach {
       case (collection, applyDeletes) =>
+        val initial = snapshotOf(v3 = items, collectionSchema = collection)
+        val snapshot = initial.copy(segments =
+          initial.segments.map(_.copy(channelName = "source")) :+
+            Segment(
+              id = 41L,
+              partitionId = -1L,
+              storageVersion = 3,
+              rows = None,
+              layout = SegmentLayout.Manifest("files/insert_log/10/-1/41", -1L),
+              deletes = DeleteFiles.InManifest,
+              isDeleteOnly = true,
+              channelName = "source"
+            )
+        )
+        DeleteFileListing.requiresStore(snapshot, applyDeletes) shouldBe false
+        val listing = DeleteFileListing
+          .of(
+            snapshot,
+            applyDeletes,
+            "",
+            new FailingObjectStore(
+              new IllegalStateException("must not be opened")
+            )
+          )
+          .fold(throw _, identity)
+        listing.v3ReadVersions shouldBe Map(30L -> 3L)
+        listing.inheritedBySegment shouldBe empty
+        val plan =
+          ReadPlan.of(snapshot, _ => Map.empty, applyDeletes, deletes = listing)
+        plan.specs.map(_.segmentId) shouldBe Seq(30L)
+        plan.specs.head.readVersionOrLatest shouldBe 3L
+    }
+  }
+
+  test("version zero data and L0 segments require no storage access") {
+    val items = Seq(30L, 41L).map { id =>
+      ManifestItemJson(
+        id,
+        s"""{"ver":0,"base_path":"files/insert_log/10/20/$id"}"""
+      )
+    }
+    Seq((schema, true), (schema, false), (schemaWithoutPrimaryKey, true))
+      .foreach { case (collection, applyDeletes) =>
         val initial = snapshotOf(v3 = items, collectionSchema = collection)
         val snapshot = initial.copy(segments =
           initial.segments.map(segment =>
@@ -248,12 +307,55 @@ class DeleteFileListingTest extends AnyFunSuite with Matchers {
             )
           )
           .fold(throw _, identity)
-        listing.v3ReadVersions shouldBe Map(30L -> 3L)
+        val listedIds =
+          if (applyDeletes && collection == schema) Set(30L, 41L) else Set(30L)
+        listing.v3ReadVersions shouldBe listedIds.map(_ -> 0L).toMap
+        listing.v3Rows shouldBe listedIds.map(_ -> 0L).toMap
+        listing.v3BySegment shouldBe empty
         listing.inheritedBySegment shouldBe empty
-        val plan =
-          ReadPlan.of(snapshot, _ => Map.empty, applyDeletes, deletes = listing)
-        plan.specs.map(_.segmentId) shouldBe Seq(30L)
-        plan.specs.head.readVersionOrLatest shouldBe 3L
+        ReadPlan
+          .of(snapshot, _ => Map.empty, applyDeletes, deletes = listing)
+          .isEmpty shouldBe true
+      }
+  }
+
+  test("version zero ignores later data and L0 manifests in a mixed snapshot") {
+    withDir { dir =>
+      val items = Seq((30L, 0L), (31L, 1L), (41L, 0L)).map {
+        case (id, version) =>
+          val base = s"files/insert_log/10/20/$id"
+          writeManifest(dir, base, 1L, Seq((s"delete-$id", 0, 1L)))
+          ManifestItemJson(id, s"""{"ver":$version,"base_path":"$base"}""")
+      }
+      val initial = snapshotOf(v3 = items)
+      val snapshot = initial.copy(segments =
+        initial.segments.map(segment =>
+          segment.copy(isDeleteOnly = segment.id == 41L, channelName = "source")
+        )
+      )
+      val listing = DeleteFileListing
+        .of(
+          snapshot,
+          true,
+          "",
+          new LocalObjectStore(dir.toString)
+        )
+        .fold(throw _, identity)
+      listing.v3ReadVersions shouldBe Map(30L -> 0L, 31L -> 1L, 41L -> 0L)
+      listing.v3Rows shouldBe Map(30L -> 0L, 41L -> 0L)
+      listing.inheritedBySegment shouldBe empty
+      listing.filesFor(30L) shouldBe empty
+      listing.filesFor(31L).map(_.logPath) shouldBe Seq(
+        "files/insert_log/10/20/31/_delta/delete-31"
+      )
+      val plan = ReadPlan.of(
+        snapshot,
+        _ => Map.empty,
+        applyDeletes = true,
+        deletes = listing
+      )
+      plan.specs.map(_.segmentId) shouldBe Seq(31L)
+      plan.specs.head.deletes shouldBe DeleteSource.Files(listing.filesFor(31L))
     }
   }
 
@@ -297,7 +399,7 @@ class DeleteFileListingTest extends AnyFunSuite with Matchers {
       val base = "files/insert_log/10/20/30"
       Seq(true, false).foreach { applyDeletes =>
         val result = DeleteFileListing.of(
-          snapshotOf(v3 = Seq(ManifestItemJson(30L, base))),
+          unpinnedSnapshot(base),
           applyDeletes,
           "",
           new LocalObjectStore(dir.toString)
@@ -332,16 +434,14 @@ class DeleteFileListingTest extends AnyFunSuite with Matchers {
   }
 
   test(
-    "a missing V3 version is pinned without parsing its manifest when deletes are disabled"
+    "an internal unpinned V3 version is pinned without parsing its manifest when deletes are disabled"
   ) {
     withDir { dir =>
       val base = "files/insert_log/10/20/30"
       writeUnparseableManifest(dir, base, 4L)
       val listing = DeleteFileListing
         .of(
-          snapshotOf(
-            v3 = Seq(ManifestItemJson(30L, base))
-          ),
+          unpinnedSnapshot(base),
           applyDeletes = false,
           "",
           new LocalObjectStore(dir.toString)
@@ -362,10 +462,7 @@ class DeleteFileListingTest extends AnyFunSuite with Matchers {
       writeUnparseableManifest(dir, base, 5L)
       val listing = DeleteFileListing
         .of(
-          snapshotOf(
-            v3 = Seq(ManifestItemJson(30L, base)),
-            collectionSchema = schemaWithoutPrimaryKey
-          ),
+          unpinnedSnapshot(base, collectionSchema = schemaWithoutPrimaryKey),
           applyDeletes = true,
           "",
           new LocalObjectStore(dir.toString)

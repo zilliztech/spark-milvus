@@ -10,6 +10,9 @@ package com.zilliz.milvus.storage.snapshot
   * `internal/datacoord/snapshot.go`); `ManifestContentJson` is the small
   * document inside each `storagev2_manifest_list` entry; `SegmentListJson` is
   * encoding of explicit Storage V3 manifest entries supplied by a reader.
+  * Manifest references are JSON objects with an integer version in the signed
+  * 64-bit range; an omitted or null version defaults to zero as in Milvus.
+  * Malformed objects, trailing content and numeric coercion are rejected.
   *
   * Everything here is a description of bytes on disk. Nothing is computed:
   * `SnapshotCatalog` turns a `SnapshotJson` into a `Snapshot`. External format

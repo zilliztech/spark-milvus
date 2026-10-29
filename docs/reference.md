@@ -1,7 +1,7 @@
 # Milvus Spark Connector Parameter Reference
 
 The public `milvus` data source reads fixed **Storage V3** snapshot files or
-explicit V3 schema/manifest metadata and supports vector search over those
+schema-only empty inputs and supports vector search over those
 inputs. It opens storage files directly and does not call the Milvus service.
 Snapshot preparation, selection and retention belong to the caller.
 
@@ -104,15 +104,15 @@ happen inside milvus-storage.
 
 ### 2.1 Fixed snapshot inputs
 
-Use a snapshot path for normal reads. Explicit schema/manifest options are for
-callers that already possess complete V3 metadata.
+Use `milvus.snapshot.path` for every nonempty snapshot. Explicit schema options
+can describe an empty snapshot only.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `milvus.snapshot.path` | unset | Fixed snapshot JSON location: a standard object-store URI, bucket-relative key, or local path for a local backend. Schema, partitions, deletes, indexes and segments come from this file. |
 | `milvus.snapshot.mode` | inferred | Inferred as `true` from a nonblank path or manifest list. Set `true` explicitly for a schema-only empty snapshot. `false` does not enable a different input mode. |
-| `milvus.snapshot.manifests` | unset | JSON array of V3 manifest entries; mutually exclusive with `milvus.snapshot.path`. Requires schema bytes or schema JSON below. |
-| `milvus.snapshot.schema.bytes` | unset | Base64-encoded protobuf `CollectionSchema` bytes for explicit metadata. Takes precedence over schema JSON when both are supplied. |
+| `milvus.snapshot.manifests` | unset | Only the empty JSON array `[]` is accepted, with schema bytes or schema JSON below. Nonempty lists are rejected: use `milvus.snapshot.path`. Mutually exclusive with `milvus.snapshot.path`. |
+| `milvus.snapshot.schema.bytes` | unset | Base64-encoded protobuf `CollectionSchema` bytes for an empty snapshot. Takes precedence over schema JSON when both are supplied. |
 | `milvus.snapshot.schema.json` | unset | Raw snapshot JSON containing the collection schema, used when schema bytes are absent. This is not Spark `StructType` JSON. |
 | `milvus.snapshot.collection.id` | 0 when absent | Collection ID for explicit metadata; a supplied value must be a positive Long. |
 | `milvus.snapshot.partition.ids` | unset | Comma-separated nonnegative partition IDs for explicit metadata. Use `milvus.partitions` below to select among a resolved snapshot's partitions. |
@@ -130,10 +130,21 @@ Unsupported schemes and cross-bucket references fail during planning.
 A manifest entry has a numeric `segmentID` (or `segmentIDLong`) and a `manifest`
 string containing JSON with `ver` and `base_path`. This is the V3 manifest
 representation named `storagev2_manifest_list` in Milvus snapshot JSON; that
-wire name does not mean Storage V2 support. Explicit metadata has only the
-information supplied by the caller; use the full snapshot input when you need
-its delete/index metadata. Supplying Spark `.schema()` does not replace the
-Milvus schema: field names, types and selection must match the fixed input.
+wire name does not mean Storage V2 support. Invalid manifest JSON, empty base
+paths and negative versions fail during planning; a bare path does not select
+the latest version. Version `0` is Milvus Storage's initial empty state and
+requires no manifest file. Positive versions read the exact file named by the
+snapshot. An Avro manifest with no records is invalid; one record with empty
+fields is valid, including an L0 manifest with no column groups.
+
+The snapshot file supplies segment Avro records for the segment level,
+partition, source channel, row count and persisted index metadata. Missing,
+duplicate or unmatched segment records fail during planning, before segment
+selection can hide an L0 record. Existing callers using a nonempty explicit
+manifest list must switch to `milvus.snapshot.path`: a list of storage
+manifests alone cannot identify L0 segments or their delete scope.
+Supplying Spark `.schema()` does not replace the Milvus schema: field names,
+types and selection must match the fixed input.
 
 Options not listed in this reference are not read. The generic Spark `path`
 argument is not an input: provide `milvus.snapshot.path`. Use the canonical

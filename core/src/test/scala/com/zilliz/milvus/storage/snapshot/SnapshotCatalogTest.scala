@@ -2,7 +2,11 @@ package com.zilliz.milvus.storage.snapshot
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
+import java.util.ArrayList
 
+import org.apache.avro.file.DataFileWriter
+import org.apache.avro.generic.{GenericData, GenericDatumWriter, GenericRecord}
+import org.apache.avro.Schema
 import org.scalatest.funsuite.AnyFunSuite
 
 import com.zilliz.milvus.storage.io.{LocalObjectStore, ObjectStore}
@@ -10,10 +14,11 @@ import com.zilliz.milvus.storage.manifest.{
   SnapshotSegmentEntry,
   SnapshotSegmentFixture
 }
-import com.zilliz.milvus.storage.read.plan.ReadPlan
+import com.zilliz.milvus.storage.read.plan.{DeleteFileListing, ReadPlan}
 import com.zilliz.milvus.storage.snapshot.json.{
   CollectionJson,
   CollectionSchemaJson,
+  ManifestItemJson,
   SnapshotInfoJson,
   SnapshotJson
 }
@@ -161,6 +166,22 @@ class SnapshotCatalogTest extends AnyFunSuite {
     val path = dir.resolve(key)
     Files.createDirectories(path.getParent)
     Files.write(path, bytes)
+  }
+
+  private def writeSingleSegmentSnapshot(
+      dir: Path,
+      key: String,
+      json: String
+  ): Unit = {
+    writeAvro(dir, avroKey, SnapshotSegmentFixture.encode())
+    write(
+      dir,
+      key,
+      json.replace(
+        "\"manifest_list\": []",
+        "\"manifest_list\": [\"" + avroKey + "\"]"
+      )
+    )
   }
 
   test("snapshot index definitions and exact segment builds reach read tasks") {
@@ -333,21 +354,167 @@ class SnapshotCatalogTest extends AnyFunSuite {
   }
 
   test(
-    "absent segment metadata stays unknown and an empty Avro index list is unindexed"
+    "Avro partitions govern L0 inheritance regardless of manifest directory layout"
   ) {
     withDir { dir =>
-      write(dir, "snapshot.json", snapshotJson("plain", 100L))
-      assert(
-        catalog(dir)
-          .read("snapshot.json")
-          .segments
-          .head
-          .indexes == SegmentIndexes.Unknown
+      val sources = Seq(
+        (30L, 21L, "files/insert_log/10/20/30", false),
+        (41L, -1L, "archive/l0/41", true),
+        (42L, 21L, "archive/l0/42", true)
       )
+      val manifestSchema = new Schema.Parser().parse("""
+        {"type":"record","name":"Manifest","fields":[
+          {"name":"delta_logs","type":{"type":"array","items":{
+            "type":"record","name":"DeltaLog","fields":[
+              {"name":"path","type":"string"},{"name":"type","type":"int"},
+              {"name":"num_entries","type":"long"}]}}}]}
+      """)
+      val paths = sources.map { case (id, partition, base, l0) =>
+        val key = s"files/snapshots/10/manifests/1/$id.avro"
+        writeAvro(
+          dir,
+          key,
+          SnapshotSegmentFixture.encode(
+            segmentId = id,
+            partitionId = partition,
+            rows = if (l0) 0L else 2L,
+            segmentLevel = if (l0) 1L else 2L,
+            channelName = "source"
+          )
+        )
+        val record = new GenericData.Record(manifestSchema)
+        val logs = new ArrayList[GenericRecord]()
+        if (l0) {
+          val log = new GenericData.Record(
+            manifestSchema.getField("delta_logs").schema().getElementType
+          )
+          log.put("path", s"delete-$id")
+          log.put("type", 0)
+          log.put("num_entries", 1L)
+          logs.add(log)
+        }
+        record.put("delta_logs", logs)
+        val file = dir.resolve(s"$base/_metadata/manifest-7.avro")
+        Files.createDirectories(file.getParent)
+        val writer = new DataFileWriter[GenericRecord](
+          new GenericDatumWriter[GenericRecord]()
+        )
+        writer.create(manifestSchema, file.toFile)
+        try writer.append(record)
+        finally writer.close()
+        key
+      }
+      val metadata = SnapshotJson
+        .parse(
+          snapshotJson(
+            "relocated",
+            100L,
+            sources.map { case (id, _, base, _) => id -> base }
+          ).replace("\"partition_ids\": [20]", "\"partition_ids\": [21]")
+        )
+        .fold(throw _, identity)
+        .copy(manifestList = paths)
+      val store = new LocalObjectStore(dir.toString)
+      val snapshot = SnapshotCatalog
+        .fromMetadata(
+          metadata,
+          SnapshotOrigin.Catalog("snapshot.json"),
+          store,
+          ""
+        )
+        .fold(throw _, identity)
+      assert(
+        snapshot.segments.map(s => s.id -> s.partitionId).toMap == Map(
+          30L -> 21L,
+          41L -> -1L,
+          42L -> 21L
+        )
+      )
+      val narrowed = snapshot.narrow(Seq(21L), Seq(30L))
+      assert(narrowed.segments.map(_.id) == Seq(30L, 41L, 42L))
+      val deletes = DeleteFileListing
+        .of(narrowed, true, "", store)
+        .fold(throw _, identity)
+      assert(
+        deletes.filesFor(30L).map(_.logPath).toSet == Set(
+          "archive/l0/41/_delta/delete-41",
+          "archive/l0/42/_delta/delete-42"
+        )
+      )
+    }
+  }
+
+  test("complete snapshots require an Avro record for every V3 location") {
+    withDir { dir =>
+      Seq(4, 6).foreach { version =>
+        write(
+          dir,
+          "snapshot.json",
+          snapshotJson("plain", 100L)
+            .replace("\"format_version\": 4", s""""format_version": $version""")
+        )
+        val error = intercept[IllegalArgumentException](
+          catalog(dir).read("snapshot.json")
+        )
+        assert(
+          error.getMessage.contains("no snapshot segment Avro records: 30")
+        )
+      }
+    }
+  }
+
+  test("an empty Avro index list is unindexed") {
+    withDir { dir =>
       writeAvro(dir, avroKey, SnapshotSegmentFixture.encode())
       write(dir, "snapshot.json", indexedSnapshotJson)
       val snapshot = catalog(dir).read("snapshot.json")
       assert(snapshot.segments.head.indexes == SegmentIndexes.Unindexed)
+    }
+  }
+
+  test("segment_ids and Avro records must describe the same unique segments") {
+    withDir { dir =>
+      val secondKey = "files/snapshots/10/manifests/1/31.avro"
+      writeAvro(dir, avroKey, SnapshotSegmentFixture.encode())
+      writeAvro(dir, secondKey, SnapshotSegmentFixture.encode(segmentId = 31L))
+      val json = snapshotJson(
+        "declared",
+        100L,
+        Seq(
+          30L -> "files/insert_log/10/20/30",
+          31L -> "files/insert_log/10/20/31"
+        )
+      )
+      def metadata(ids: String) = SnapshotJson
+        .parse(
+          json.replace(
+            "\"indexes\": []",
+            s""""indexes": [], "segment_ids": $ids"""
+          )
+        )
+        .fold(throw _, identity)
+        .copy(manifestList = Seq(avroKey, secondKey))
+      def resolve(value: SnapshotJson) = SnapshotCatalog.fromMetadata(
+        value,
+        SnapshotOrigin.Catalog("snapshot.json"),
+        new LocalObjectStore(dir.toString),
+        ""
+      )
+      Seq("[]", "[30,31]", "[31,30]").foreach { ids =>
+        assert(resolve(metadata(ids)).isRight, ids)
+      }
+      Seq(
+        "[30,30,31]" -> "duplicate segment ids",
+        "[30]" -> "unexpected [31]",
+        "[30,31,32]" -> "missing [32]"
+      ).foreach { case (ids, message) =>
+        val error = resolve(metadata(ids)).swap.toOption.get
+        assert(error.getMessage.contains(message), error.getMessage)
+      }
+      val duplicate = resolve(
+        metadata("[]").copy(manifestList = Seq(avroKey, avroKey, secondKey))
+      ).swap.toOption.get
+      assert(duplicate.getMessage.contains("duplicate segment Avro records"))
     }
   }
 
@@ -385,10 +552,14 @@ class SnapshotCatalogTest extends AnyFunSuite {
   }
 
   test(
-    "reads a V3 snapshot: segment id, partition from the path, version pinned"
+    "reads a V3 snapshot with segment metadata and a pinned version"
   ) {
     withDir { dir =>
-      write(dir, "files/snapshots/10/metadata/1.json", snapshotJson("s1", 100L))
+      writeSingleSegmentSnapshot(
+        dir,
+        "files/snapshots/10/metadata/1.json",
+        snapshotJson("s1", 100L)
+      )
       val snapshot = catalog(dir).read("files/snapshots/10/metadata/1.json")
       assert(snapshot.name == "s1")
       assert(snapshot.collectionId == 10L)
@@ -404,7 +575,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
       assert(seg.id == 30L)
       assert(seg.partitionId == 20L)
       assert(seg.storageVersion == 3)
-      assert(seg.rows.isEmpty)
+      assert(seg.rows.contains(2L))
       assert(
         seg.layout == SegmentLayout.Manifest("files/insert_log/10/20/30", 7L)
       )
@@ -414,10 +585,10 @@ class SnapshotCatalogTest extends AnyFunSuite {
   }
 
   test(
-    "a V3 path outside the insert_log layout falls back to the snapshot's first partition"
+    "segment Avro supplies the partition for a nonstandard V3 path"
   ) {
     withDir { dir =>
-      write(
+      writeSingleSegmentSnapshot(
         dir,
         "files/snapshots/10/metadata/1.json",
         snapshotJson("s1", 100L, Seq((30L, "files/unexpected/10/20/30")))
@@ -485,7 +656,11 @@ class SnapshotCatalogTest extends AnyFunSuite {
 
   test("a snapshot in another bucket than the catalog's is refused") {
     withDir { dir =>
-      write(dir, "files/snapshots/10/metadata/1.json", snapshotJson("s1", 100L))
+      writeSingleSegmentSnapshot(
+        dir,
+        "files/snapshots/10/metadata/1.json",
+        snapshotJson("s1", 100L)
+      )
       val c = new SnapshotCatalog(
         new LocalObjectStore(dir.toString),
         "a"
@@ -502,7 +677,11 @@ class SnapshotCatalogTest extends AnyFunSuite {
   // the bucket check and read the location's key from the local root.
   test("a store with no bucket refuses a location that names one") {
     withDir { dir =>
-      write(dir, "files/snapshots/10/metadata/1.json", snapshotJson("s1", 100L))
+      writeSingleSegmentSnapshot(
+        dir,
+        "files/snapshots/10/metadata/1.json",
+        snapshotJson("s1", 100L)
+      )
       val c = new SnapshotCatalog(
         new LocalObjectStore(dir.toString),
         ""
@@ -521,7 +700,11 @@ class SnapshotCatalogTest extends AnyFunSuite {
     "the endpoint form Milvus prints is read when the host is the catalog's"
   ) {
     withDir { dir =>
-      write(dir, "files/snapshots/10/metadata/1.json", snapshotJson("s1", 100L))
+      writeSingleSegmentSnapshot(
+        dir,
+        "files/snapshots/10/metadata/1.json",
+        snapshotJson("s1", 100L)
+      )
       val c = new SnapshotCatalog(
         new LocalObjectStore(dir.toString),
         "a",
@@ -546,7 +729,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
   test("minio snapshot locations preserve the catalog's bucket binding") {
     withDir { dir =>
       val key = "files/snapshots/10/metadata/1.json"
-      write(dir, key, snapshotJson("s1", 100L))
+      writeSingleSegmentSnapshot(dir, key, snapshotJson("s1", 100L))
       val c = new SnapshotCatalog(
         new LocalObjectStore(dir.toString),
         "spark-demo-live",
@@ -589,6 +772,62 @@ class SnapshotCatalogTest extends AnyFunSuite {
     )
     assert(result.isLeft)
     assert(result.left.get.getMessage.contains("bucket 'other'"))
+  }
+
+  test(
+    "V3 manifest references require fixed int64 versions and a base path"
+  ) {
+    val schemaBytes = SnapshotJson
+      .parse(snapshotJson("fixed", 100L))
+      .toOption
+      .get
+      .collection
+      .schema
+      .toProtobufBytes
+    def resolve(reference: String) = SnapshotCatalog.fromLists(
+      "fixed",
+      10L,
+      None,
+      Seq(20L),
+      schemaBytes,
+      Seq(ManifestItemJson(30L, reference)),
+      "",
+      SnapshotOrigin.Options
+    )
+    Seq(
+      "files/insert_log/10/20/30",
+      """{"ver":7,"base_path":"segment"""",
+      """{"ver":7}""",
+      """{"ver":7,"base_path":" "}""",
+      """{"ver":-1,"base_path":"segment"}""",
+      """{"ver":-2,"base_path":"segment"}""",
+      """{"ver":9223372036854775808,"base_path":"segment"}"""
+    ).foreach { reference =>
+      val failure = resolve(reference).swap.toOption.get
+      assert(
+        failure.getMessage.contains("manifest reference for segment 30"),
+        failure.getMessage
+      )
+    }
+    Seq(0L, Int.MaxValue.toLong + 1L, Long.MaxValue).foreach { version =>
+      val snapshot =
+        resolve(s"""{"ver":$version,"base_path":"files/insert_log/10/20/30"}""")
+          .fold(throw _, identity)
+      assert(
+        snapshot.segments.head.layout == SegmentLayout.Manifest(
+          "files/insert_log/10/20/30",
+          version
+        )
+      )
+    }
+    val initial = resolve("""{"base_path":"files/insert_log/10/20/30"}""")
+      .fold(throw _, identity)
+    assert(
+      initial.segments.head.layout == SegmentLayout.Manifest(
+        "files/insert_log/10/20/30",
+        0L
+      )
+    )
   }
 
   test("dynamic snapshots require the authoritative $meta field schema") {

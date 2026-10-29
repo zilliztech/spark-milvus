@@ -35,6 +35,7 @@ import com.zilliz.spark.connector.extensions.{
 }
 import com.zilliz.spark.connector.implicits._
 import com.zilliz.spark.connector.metrics.{NearestByMetrics, SearchMetrics}
+import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.testkit.LocalMilvusCollection
 
 /** Public file reads and searches against frozen V3 data. Every destructive
@@ -210,6 +211,23 @@ class V3ReadContractTest
     assert(messages(failure).contains(key), messages(failure))
   }
 
+  private def failsReadAndSearchPlanning(
+      options: Map[String, String],
+      clues: String*
+  ): Unit = {
+    def fails(frame: => DataFrame): Unit = {
+      val failure = intercept[Exception](frame.queryExecution.toRdd)
+      val detail = messages(failure)
+      clues.foreach(clue => assert(detail.contains(clue), detail))
+    }
+    Seq(true, false).foreach { columnar =>
+      fails(read(options + ("milvus.read.columnar" -> columnar.toString)))
+    }
+    Seq("exact", "approx").foreach { mode =>
+      fails(search(read(options).filter("id IN (3000, 3002)"), mode))
+    }
+  }
+
   private def search(base: DataFrame, mode: String): DataFrame = {
     val session = spark
     import session.implicits._
@@ -320,6 +338,27 @@ class V3ReadContractTest
     }
   }
 
+  test(
+    "nonempty explicit metadata requires a snapshot path to retain L0 deletes"
+  ) {
+    fixture { (root, options) =>
+      addL0(root, -1L, "source-channel")
+      val json =
+        mapper.readTree(Files.readAllBytes(root.resolve("snapshot.json")))
+      val explicit = (options - MilvusOption.SnapshotPath) ++ Map(
+        MilvusOption.SnapshotSchemaJson -> json.toString,
+        MilvusOption.SnapshotCollectionId -> "10",
+        MilvusOption.SnapshotPartitionIds -> "20",
+        MilvusOption.SnapshotManifests -> json
+          .get("storagev2_manifest_list")
+          .toString,
+        "milvus.partitions" -> "20",
+        "milvus.segments" -> "30"
+      )
+      failsReadAndSearchPlanning(explicit, MilvusOption.SnapshotPath)
+    }
+  }
+
   test("a zero-record L0 manifest fails read and search planning") {
     fixture { (root, options) =>
       val l0Manifest = addL0(root, -1L, "source-channel")
@@ -340,19 +379,57 @@ class V3ReadContractTest
         "milvus.partitions" -> "20",
         "milvus.segments" -> "30"
       )
-      def failsPlanning(frame: => DataFrame): Unit = {
-        val failure = intercept[Exception](frame.queryExecution.toRdd)
-        val detail = messages(failure)
-        assert(detail.contains("files/insert_log/10/-1/41"), detail)
-        assert(detail.contains("no record"), detail)
+      failsReadAndSearchPlanning(
+        narrowed,
+        "files/insert_log/10/-1/41",
+        "no record"
+      )
+    }
+  }
+
+  test(
+    "an L0 manifest without its snapshot segment record fails before narrowing"
+  ) {
+    fixture { (root, options) =>
+      addL0(root, -1L, "source-channel")
+      metadata(root) { json =>
+        val retained = json
+          .get("manifest_list")
+          .elements()
+          .asScala
+          .map(_.asText())
+          .filterNot(_.endsWith("/41.avro"))
+          .toVector
+        val items = json.putArray("manifest_list")
+        retained.foreach(items.add)
       }
-      Seq(true, false).foreach { columnar =>
-        failsPlanning(
-          read(narrowed + ("milvus.read.columnar" -> columnar.toString))
-        )
-      }
-      Seq("exact", "approx").foreach { mode =>
-        failsPlanning(search(read(narrowed).filter("id IN (3000, 3002)"), mode))
+      // Segment 30 has no local delete for PK 3002. Losing the L0 role must
+      // fail before selection could discard that delete source as data.
+      failsReadAndSearchPlanning(
+        options ++ Map("milvus.partitions" -> "20", "milvus.segments" -> "30"),
+        "41",
+        "snapshot segment Avro"
+      )
+    }
+  }
+
+  test("invalid L0 manifest references never fall back to the latest version") {
+    val base = "files/insert_log/10/-1/41"
+    val malformed = s"""{"ver":1,"base_path":"$base"}""".dropRight(1)
+    for (reference <- Seq(base, malformed)) {
+      fixture { (root, options) =>
+        addL0(root, -1L, "source-channel")
+        metadata(root) { json =>
+          json
+            .get("storagev2_manifest_list")
+            .elements()
+            .asScala
+            .find(_.get("segmentID").asLong() == 41L)
+            .get
+            .asInstanceOf[ObjectNode]
+            .put("manifest", reference)
+        }
+        failsReadAndSearchPlanning(options, "segment 41", "manifest reference")
       }
     }
   }
