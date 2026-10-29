@@ -30,13 +30,13 @@ that in Scala is the stovepipe AGENTS.md forbids.
   layer unchanged. It is the only place that parses credentials. Translating
   `spark.hadoop.fs.s3a.*` and `fs.oss.*` into `fs.*` is the layer-3 shim
   `HadoopStorageKeys` in `spark.options`, not core. The key-name table is
-  section 3.3 of the design.
+  `HadoopStorageKeys` itself, pinned by its tests.
 - `core.io` owns the upstream `MilvusStorageFileSystem` and exposes `readAll`,
   `readAt`, `size`, `list` and `exists` through the read-only `ObjectStore`.
-  `core.write.io.NativeWritableObjectStore` adds `write`, `createDir` and
-  `delete` to the same session through `NativeObjectStore.withFileSystem`.
-  This public boundary supplies a normalized key and a borrowed filesystem;
-  the adapter must not open a second backend or resolve credentials itself.
+  Writing is outside this repository; an external adapter borrows the same
+  session through `NativeObjectStore.withFileSystem`, which supplies a
+  normalized key and a borrowed filesystem. Such an adapter must not open a
+  second backend or resolve credentials itself.
 
 A format package asks for bytes at a path and gets bytes. If the words
 credential, endpoint, or FileSystem appear in a format package's signature, the
@@ -62,8 +62,8 @@ translation belongs either to whoever produces the configuration (the managed
 platform can emit `fs.*` directly) or to a layer-3 shim that exists only so
 current deployments keep working and carries a written end condition. Putting it
 in core hands back the very job Hadoop's per-scheme dispatch used to do for us,
-and does it per-cloud. Section 3.3 of the design has the mapping table and says
-who owns it.
+and does it per-cloud. `HadoopStorageKeys` holds the mapping table and its
+package statement says who owns it.
 
 The values themselves are reusable: the platform passes a role ARN, a session
 name and an endpoint — never an access key, secret or session token — and the
@@ -75,9 +75,8 @@ not make it core's job to go read them.
 
 Use `extfs.<name>.<property>` to register one configuration per bucket and let
 `loon_filesystem_get(properties, path)` match on address plus bucket. Never back
-up, overwrite and restore global keys — that is what backfill does today against
-`hadoop-aliyun`, it is unsafe under concurrency, and it is the pattern this
-design exists to remove.
+up, overwrite and restore global keys: that is unsafe under concurrency, and it
+is the pattern this layout exists to remove.
 
 ## Gaps in the C layer
 
@@ -119,9 +118,9 @@ only `VortexFormatReader` overrides it and Vortex is out of scope, so a
 predicate over parquet column groups silently does nothing. That is a defect in
 the C layer — the base should return `NotImplemented` — and it is worth
 reporting upstream, but fixing it would not change this design: `core.expr`
-evaluates predicates because R7 replicates Milvus's own `Plan.g4` semantics,
-which the C layer does not carry. I/O is saved by statistics-based pruning
-(R10), not by this entry point.
+evaluates predicates because the connector replicates Milvus's own `Plan.g4`
+semantics, which the C layer does not carry. I/O is saved by statistics-based
+pruning, not by this entry point.
 
 ## Row-group pruning can only happen in C
 
@@ -138,8 +137,8 @@ Do not reach for `Manifest.stats` expecting min/max. It maps a stat name
 (`"bloom_filter.100"`) to `{paths, metadata}` — paths to auxiliary files.
 `ColumnGroupFile` carries `path`, `start_index`, `end_index` and a free-form
 `properties`; `LoonChunkMetadata` carries `number_of_rows` and
-`estimated_memsz`. Table row count and byte size (what R13 actually asks for)
-come from those, and work today.
+`estimated_memsz`. Table row count and byte size come from those, and work
+today.
 
 ## Long jobs
 
@@ -153,6 +152,6 @@ that is the one shape this design rejects.
 ## Verifying a change
 
 Compilation proves nothing here. A credential or filesystem change is done when
-it has run against the real backend. Section 8 of the design lists the three
-checks that have not been run yet — if your change depends on one of them, say
-so rather than calling it verified.
+it has run against the real backend. If your change depends on a backend or
+credential path you could not run against, say so rather than calling it
+verified.

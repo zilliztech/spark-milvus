@@ -54,7 +54,7 @@ The build runs on Java 21. Spark 3.5 native Arrow tests fork Java 17 via
 `SPARK35_TEST_JAVA_HOME`. The published release matrix remains Spark 4.0/4.2;
 source compilation of another line does not expand that release commitment.
 
-Four git submodules sit in the repository. `milvus-proto` supplies the
+Three git submodules sit in the repository. `milvus-proto` supplies the
 protobuf definitions: `common.proto` and `schema.proto` are generated into
 `core` because the storage format itself is defined in protobuf. No service
 protocols or gRPC clients are generated. `milvus-storage`
