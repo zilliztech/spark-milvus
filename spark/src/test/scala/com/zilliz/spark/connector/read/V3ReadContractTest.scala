@@ -134,6 +134,65 @@ class V3ReadContractTest
     Files.write(path, bytes.toByteArray)
   }
 
+  private def addL0(root: Path, partition: Long, channel: String): Path = {
+    val l0Base = s"files/insert_log/10/$partition/41"
+    val l0Avro = "files/snapshots/10/manifests/1/41.avro"
+    val l0Manifest = root.resolve(s"$l0Base/_metadata/manifest-1.avro")
+    Files.createDirectories(l0Manifest.getParent)
+    val reader = new DataFileStream[GenericRecord](
+      new ByteArrayInputStream(Files.readAllBytes(root.resolve(manifest))),
+      new GenericDatumReader[GenericRecord]()
+    )
+    val record =
+      try reader.next()
+      finally reader.close()
+    // Reuse the frozen delta, with no column groups in the L0 manifest.
+    record.put("column_groups", Collections.emptyList[GenericRecord]())
+    val writer = new DataFileWriter[GenericRecord](
+      new GenericDatumWriter[GenericRecord](record.getSchema)
+    )
+    writer.create(record.getSchema, l0Manifest.toFile)
+    try writer.append(record)
+    finally writer.close()
+    val l0Delete = root.resolve(s"$l0Base/_delta/delete.parquet")
+    Files.createDirectories(l0Delete.getParent)
+    Files.copy(root.resolve(delete), l0Delete)
+    Files.write(
+      root.resolve(l0Avro),
+      SnapshotSegmentFixture.encode(
+        segmentId = 41L,
+        partitionId = partition,
+        rows = 0L,
+        segmentLevel = 1L,
+        channelName = channel
+      )
+    )
+    Seq(30L, 31L).foreach { segment =>
+      segmentMetadata(root, segment)(
+        _.put("channel_name", "source-channel")
+      )
+    }
+    metadata(root) { json =>
+      val items = json.withArray("storagev2_manifest_list")
+      items.elements().asScala.foreach { item =>
+        if (item.get("segmentID").asLong() == 30L) {
+          // Version 1 has no deletes: only a matching L0 removes PK 3002.
+          val value = item.asInstanceOf[ObjectNode]
+          value.put(
+            "manifest",
+            value.get("manifest").asText().replace("\"ver\":2", "\"ver\":1")
+          )
+        }
+      }
+      items
+        .addObject()
+        .put("segmentID", 41L)
+        .put("manifest", s"""{"ver":1,"base_path":"$l0Base"}""")
+      json.withArray("manifest_list").add(l0Avro)
+    }
+    l0Manifest
+  }
+
   private def damage(root: Path, key: String, missing: Boolean): Unit =
     if (missing) Files.delete(root.resolve(key))
     else
@@ -224,61 +283,7 @@ class V3ReadContractTest
       )
     ) withClue(s"L0 partition=$partition channel=$channel: ") {
       fixture { (root, options) =>
-        val l0Base = s"files/insert_log/10/$partition/41"
-        val l0Avro = "files/snapshots/10/manifests/1/41.avro"
-        val l0Manifest = root.resolve(s"$l0Base/_metadata/manifest-1.avro")
-        Files.createDirectories(l0Manifest.getParent)
-        val reader = new DataFileStream[GenericRecord](
-          new ByteArrayInputStream(Files.readAllBytes(root.resolve(manifest))),
-          new GenericDatumReader[GenericRecord]()
-        )
-        val record =
-          try reader.next()
-          finally reader.close()
-        // Reuse the frozen delta, with no column groups in the L0 manifest.
-        record.put("column_groups", Collections.emptyList[GenericRecord]())
-        val writer = new DataFileWriter[GenericRecord](
-          new GenericDatumWriter[GenericRecord](record.getSchema)
-        )
-        writer.create(record.getSchema, l0Manifest.toFile)
-        try writer.append(record)
-        finally writer.close()
-        val l0Delete = root.resolve(s"$l0Base/_delta/delete.parquet")
-        Files.createDirectories(l0Delete.getParent)
-        Files.copy(root.resolve(delete), l0Delete)
-        Files.write(
-          root.resolve(l0Avro),
-          SnapshotSegmentFixture.encode(
-            segmentId = 41L,
-            partitionId = partition,
-            rows = 0L,
-            segmentLevel = 1L,
-            channelName = channel
-          )
-        )
-        Seq(30L, 31L).foreach { segment =>
-          segmentMetadata(root, segment)(
-            _.put("channel_name", "source-channel")
-          )
-        }
-        metadata(root) { json =>
-          val items = json.withArray("storagev2_manifest_list")
-          items.elements().asScala.foreach { item =>
-            if (item.get("segmentID").asLong() == 30L) {
-              // Version 1 has no deletes: only a matching L0 removes PK 3002.
-              val value = item.asInstanceOf[ObjectNode]
-              value.put(
-                "manifest",
-                value.get("manifest").asText().replace("\"ver\":2", "\"ver\":1")
-              )
-            }
-          }
-          items
-            .addObject()
-            .put("segmentID", 41L)
-            .put("manifest", s"""{"ver":1,"base_path":"$l0Base"}""")
-          json.withArray("manifest_list").add(l0Avro)
-        }
+        addL0(root, partition, channel)
         assert(
           ids(read(options + ("milvus.read.apply.deletes" -> "false"))) ==
             ((3000L until 3008L) ++ (3100L until 3108L))
@@ -311,6 +316,43 @@ class V3ReadContractTest
             )
           }
         }
+      }
+    }
+  }
+
+  test("a zero-record L0 manifest fails read and search planning") {
+    fixture { (root, options) =>
+      val l0Manifest = addL0(root, -1L, "source-channel")
+      val reader = new DataFileStream[GenericRecord](
+        new ByteArrayInputStream(Files.readAllBytes(l0Manifest)),
+        new GenericDatumReader[GenericRecord]()
+      )
+      val schema =
+        try reader.getSchema
+        finally reader.close()
+      val writer = new DataFileWriter[GenericRecord](
+        new GenericDatumWriter[GenericRecord](schema)
+      )
+      // Keep the Avro container header and schema, but omit its manifest record.
+      writer.create(schema, l0Manifest.toFile)
+      writer.close()
+      val narrowed = options ++ Map(
+        "milvus.partitions" -> "20",
+        "milvus.segments" -> "30"
+      )
+      def failsPlanning(frame: => DataFrame): Unit = {
+        val failure = intercept[Exception](frame.queryExecution.toRdd)
+        val detail = messages(failure)
+        assert(detail.contains("files/insert_log/10/-1/41"), detail)
+        assert(detail.contains("no record"), detail)
+      }
+      Seq(true, false).foreach { columnar =>
+        failsPlanning(
+          read(narrowed + ("milvus.read.columnar" -> columnar.toString))
+        )
+      }
+      Seq("exact", "approx").foreach { mode =>
+        failsPlanning(search(read(narrowed).filter("id IN (3000, 3002)"), mode))
       }
     }
   }

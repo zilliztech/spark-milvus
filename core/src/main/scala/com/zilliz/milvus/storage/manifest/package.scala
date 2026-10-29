@@ -19,7 +19,10 @@ package com.zilliz.milvus.storage
   * designed Manifest, ColumnGroup and ManifestReader are not written yet. The
   * reader takes the prefix of the schema it needs. External writers share the
   * full schema because Avro binary is positional and Milvus reads every field.
-  * Snapshot format 4 uses the writer schema defined as a Scala string in
+  * A physical V3 manifest must contain a record; empty field lists, including
+  * an L0 manifest's empty column groups, remain valid. Facts and statistics
+  * readers reject a container with no record, as milvus-storage does. Snapshot
+  * format 4 uses the writer schema defined as a Scala string in
   * SnapshotSegmentSchema. Version 6 uses an Avro object container with its
   * embedded writer schema. These cover stable Milvus tags v3.0.0 through v3.0.3
   * (format 4) and v3.0.4 (format 6 with the V4 writer schema). The snapshot

@@ -112,14 +112,11 @@ object V3ManifestReader {
         new GenericDatumReader[GenericRecord]()
       )
       try {
-        if (!reader.hasNext) {
-          Right(ManifestFacts(Seq.empty, scala.None))
-        } else {
-          val rec = reader.next()
-          Right(
-            ManifestFacts(projectDeltaLogs(rec, basePath), projectRows(rec))
-          )
-        }
+        require(reader.hasNext, "StorageV3 manifest has no record in Avro file")
+        val rec = reader.next()
+        Right(
+          ManifestFacts(projectDeltaLogs(rec, basePath), projectRows(rec))
+        )
       } finally {
         reader.close()
       }
@@ -138,8 +135,8 @@ object V3ManifestReader {
         new GenericDatumReader[GenericRecord]()
       )
       try {
-        if (!reader.hasNext) Right(Map.empty)
-        else Right(projectStatistics(reader.next(), basePath))
+        require(reader.hasNext, "StorageV3 manifest has no record in Avro file")
+        Right(projectStatistics(reader.next(), basePath))
       } finally {
         reader.close()
       }
