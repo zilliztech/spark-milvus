@@ -39,7 +39,8 @@ final case class Snapshot(
   def dataSegments: Seq[Segment] = segments.filter(_.hasData)
 
   /** Segments that carry only deletes (Milvus L0 segments): their delete files
-    * apply to every data segment of the same partition.
+    * apply to data segments in the same source channel and partition (partition
+    * -1 applies across that channel's partitions).
     */
   def deleteOnlySegments: Seq[Segment] =
     segments.filter(s => !s.hasData && s.deletes != DeleteFiles.Empty)

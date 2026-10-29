@@ -70,17 +70,11 @@ object ReadOnlyConsumerSmoke extends AdaptiveSparkPlanHelper {
         .sum
     )
 
-  private def offlineEntries(spark: SparkSession, directory: Path): Unit = {
+  private def pathEntries(spark: SparkSession, directory: Path): Unit = {
     val json =
       mapper.readTree(Files.readAllBytes(directory.resolve("snapshot.json")))
-    val options = storage(directory) ++ Map(
-      MilvusOption.SnapshotSchemaJson -> json.toString,
-      MilvusOption.SnapshotCollectionId -> "10",
-      MilvusOption.SnapshotPartitionIds -> "20",
-      MilvusOption.SnapshotManifests -> json
-        .get("storagev2_manifest_list")
-        .toString
-    )
+    val options = storage(directory) +
+      (MilvusOption.SnapshotPath -> "snapshot.json")
     val frame = read(spark, options).select("id", "category").orderBy("id")
     val wanted = live.sortBy(_.id).map(row => row.id -> row.category)
     def rows = frame
@@ -100,7 +94,13 @@ object ReadOnlyConsumerSmoke extends AdaptiveSparkPlanHelper {
       "repeated actions changed the fixed relation"
     )
     passed("repeated-actions")
-    val empty = read(spark, options + (MilvusOption.SnapshotManifests -> "[]"))
+    val empty = read(
+      spark,
+      storage(directory) ++ Map(
+        MilvusOption.SnapshotSchemaJson -> json.toString,
+        MilvusOption.SnapshotManifests -> "[]"
+      )
+    )
     assert(
       empty.schema == read(spark, options).schema,
       "empty V3 input lost its schema"
@@ -271,7 +271,7 @@ object ReadOnlyConsumerSmoke extends AdaptiveSparkPlanHelper {
         passed("independent-executor")
       }
       indexedReads(spark, root.resolve("nearest"))
-      offlineEntries(spark, root.resolve("nearest"))
+      pathEntries(spark, root.resolve("nearest"))
       println("ALL PASS")
     } finally {
       if (spark != null) spark.stop()

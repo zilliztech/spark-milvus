@@ -5,6 +5,7 @@ import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.read.exec.PhysicalColumnGroup
 import com.zilliz.milvus.storage.snapshot.{
+  DeleteFiles,
   DeltaLogFile,
   Segment,
   SegmentLayout,
@@ -58,6 +59,18 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
 
   private def log(id: Long) = DeltaLogFile(id, s"files/delta/$id", 5L)
 
+  private def snapshotAt(version: Long, rows: Option[Long] = None): Snapshot = {
+    val initial = snapshotOf(v3 = Seq(v3Item))
+    initial.copy(segments =
+      initial.segments.map(
+        _.copy(
+          layout = SegmentLayout.Manifest("files/insert_log/10/20/30", version),
+          rows = rows
+        )
+      )
+    )
+  }
+
   test("a V3 segment becomes a manifest task with the raw properties") {
     val plan = ReadPlan.of(
       snapshotOf(v3 = Seq(v3Item)),
@@ -77,7 +90,7 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
     "a read version resolved by the listing overrides the one the snapshot lists"
   ) {
     val plan = ReadPlan.of(
-      snapshotOf(v3 = Seq(ManifestItemJson(30L, "files/insert_log/10/20/30"))),
+      snapshotAt(-1L),
       properties,
       applyDeletes = true,
       deletes = DeleteFileListing.empty.copy(v3ReadVersions = Map(30L -> 11L))
@@ -89,25 +102,71 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
     val base = "files/insert_log/10/20/30"
     val error = intercept[IllegalStateException] {
       ReadPlan.of(
-        snapshotOf(v3 = Seq(ManifestItemJson(30L, base))),
+        snapshotAt(-1L),
         properties,
         applyDeletes = false
       )
     }
     error.getMessage should include("segment 30")
     error.getMessage should include(base)
-    error.getMessage should include("positive manifest version")
+    error.getMessage should include("pinned manifest version")
+  }
+
+  test("version zero data segments produce no task or storage properties") {
+    Seq(None, Some(0L)).foreach { rows =>
+      val snapshot = snapshotAt(0L, rows)
+      snapshot.dataSegments.map(_.id) shouldBe Seq(30L)
+      val plan = ReadPlan.of(
+        snapshot,
+        _ => fail("version zero must not request storage properties"),
+        applyDeletes = true
+      )
+      plan.isEmpty shouldBe true
+      plan.totalRows shouldBe Some(0L)
+    }
+  }
+
+  test("version zero skips only the initial empty data segment") {
+    val snapshot = snapshotAt(0L)
+    val populated = snapshotOf(v3 = Seq(v3Item)).segments.head.copy(id = 31L)
+    val plan = ReadPlan.of(
+      snapshot.copy(segments = snapshot.segments :+ populated),
+      properties,
+      applyDeletes = true
+    )
+    plan.specs.map(_.segmentId) shouldBe Seq(31L)
+    plan.specs.head.readVersionOrLatest shouldBe 7L
+  }
+
+  test("version zero rejects a positive snapshot or listed row count") {
+    Seq(
+      (snapshotAt(0L, Some(1L)), DeleteFileListing.empty),
+      (snapshotAt(0L), DeleteFileListing.empty.copy(v3Rows = Map(30L -> 1L)))
+    ).foreach { case (snapshot, listing) =>
+      val error = intercept[IllegalArgumentException] {
+        ReadPlan.of(
+          snapshot,
+          properties,
+          applyDeletes = true,
+          deletes = listing
+        )
+      }
+      error.getMessage should include("segment 30")
+      error.getMessage should include(
+        "manifest version 0 but a positive row count"
+      )
+    }
   }
 
   test(
-    "a task names the delete files it applies: the collection's L0 files, its partition's, then its own"
+    "a task carries its resolved L0 files followed by its own delete files"
   ) {
     val listing = DeleteFileListing(
       v3BySegment = Map(30L -> Seq(log(3)), 31L -> Seq(log(4))),
-      inheritedByPartition = Map(
-        -1L -> Seq(log(1)),
-        20L -> Seq(log(2)),
-        21L -> Seq(log(9))
+      inheritedBySegment = Map(
+        30L -> Seq(log(1), log(2)),
+        31L -> Seq(log(1), log(2)),
+        99L -> Seq(log(9))
       ),
       v3ReadVersions = Map.empty
     )
@@ -135,7 +194,7 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
   test("a segment with no delete file of any kind carries DeleteSource.None") {
     val listing = DeleteFileListing(
       v3BySegment = Map.empty,
-      inheritedByPartition = Map(21L -> Seq(log(9))), // another partition
+      inheritedBySegment = Map(99L -> Seq(log(9))), // another segment
       v3ReadVersions = Map.empty
     )
     val plan = ReadPlan.of(
@@ -150,7 +209,7 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
   test("applyDeletes=false ships no delete file") {
     val listing = DeleteFileListing(
       v3BySegment = Map(30L -> Seq(log(3)), 31L -> Seq(log(4))),
-      inheritedByPartition = Map(20L -> Seq(log(2))),
+      inheritedBySegment = Map(30L -> Seq(log(2)), 31L -> Seq(log(2))),
       v3ReadVersions = Map.empty
     )
     val plan = ReadPlan.of(
@@ -249,7 +308,7 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
         Map(100L -> "100"),
         Map.empty
       ),
-      deletes = com.zilliz.milvus.storage.snapshot.DeleteFiles.Listed(Seq.empty)
+      deletes = DeleteFiles.Empty
     )
     val snapshot = snapshotOf().copy(segments = Seq(wrong))
     val e = intercept[IllegalStateException](

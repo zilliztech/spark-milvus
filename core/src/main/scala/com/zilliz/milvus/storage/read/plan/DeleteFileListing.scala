@@ -6,7 +6,6 @@ import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.manifest.{ManifestFacts, V3ManifestReader}
 import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.snapshot.{
-  DeleteFiles,
   DeltaLogFile,
   SegmentLayout,
   Snapshot
@@ -19,32 +18,31 @@ import com.zilliz.milvus.storage.snapshot.{
   * listing means opening that manifest, and resolving the version first when
   * the snapshot entry carries none; the versions resolved that way are returned
   * so the tasks are pinned to them. An L0 segment holds only delete files,
-  * which apply to every segment of its partition (partition `-1` meaning all).
+  * which apply within the same source channel and partition (partition `-1`
+  * meaning all partitions of that channel).
   *
   * The files themselves are read on the executor by
   * `core.read.exec.DeletePlans`; the driver never holds a primary-key map.
   */
 final case class DeleteFileListing(
     v3BySegment: Map[Long, Seq[DeltaLogFile]],
-    inheritedByPartition: Map[Long, Seq[DeltaLogFile]],
     v3ReadVersions: Map[Long, Long],
-    /** Rows of the V3 segments whose manifest was opened, by segment id. A
-      * snapshot that states its own row counts does not need these; a snapshot
-      * that lists manifests alone has no other source for them.
+    /** Rows of the V3 segments whose manifest was opened or whose version is
+      * the initial empty state, by segment id. A snapshot that states its own
+      * row counts does not need these; a snapshot that lists manifests alone
+      * has no other source for them.
       */
-    v3Rows: Map[Long, Long] = Map.empty
+    v3Rows: Map[Long, Long] = Map.empty,
+    /** L0 files resolved by source channel and partition for each data segment.
+      */
+    inheritedBySegment: Map[Long, Seq[DeltaLogFile]] = Map.empty
 ) {
 
-  /** Every file a segment has to apply: the collection-wide L0 files, then its
-    * partition's, then its own.
-    */
-  def filesFor(segmentId: Long, partitionId: Long): Seq[DeltaLogFile] =
-    inheritedByPartition.getOrElse(
-      DeleteFileListing.AllPartitions,
-      Seq.empty
-    ) ++
-      inheritedByPartition.getOrElse(partitionId, Seq.empty) ++
+  /** Every file a segment has to apply: its resolved L0 files, then its own. */
+  def filesFor(segmentId: Long): Seq[DeltaLogFile] =
+    inheritedBySegment.getOrElse(segmentId, Seq.empty) ++
       v3BySegment.getOrElse(segmentId, Seq.empty)
+
 }
 
 object DeleteFileListing {
@@ -55,10 +53,12 @@ object DeleteFileListing {
   val AllPartitions: Long = -1L
 
   val empty: DeleteFileListing =
-    DeleteFileListing(Map.empty, Map.empty, Map.empty)
+    DeleteFileListing(Map.empty, Map.empty)
 
-  /** Whether listing has to open object storage. V3 needs its manifest to
-    * resolve an unpinned version or to list enabled delete files.
+  /** Whether listing has to open object storage. Data segments need their
+    * unpinned versions resolved; enabled deletes also need the data and L0
+    * manifests. Version zero requires no storage access. Disabled deletes never
+    * inspect an L0 manifest.
     */
   def requiresStore(snapshot: Snapshot, applyDeletes: Boolean): Boolean = {
     val listsV3Deletes = applyDeletes && snapshot.primaryKeyField.nonEmpty
@@ -67,19 +67,20 @@ object DeleteFileListing {
         case SegmentLayout.Manifest(_, readVersion) => readVersion
         case _                                      => -1L
       }
-      version <= 0L || listsV3Deletes
+      (segment.hasData || listsV3Deletes) &&
+      (version < 0L || (version > 0L && listsV3Deletes))
     }
   }
 
-  /** Resolves every V3 manifest version and lists the applicable delete files
+  /** Resolves V3 data manifest versions and lists the applicable delete files
     * of `snapshot`.
     *
-    * Version resolution is unconditional: a task with an unpinned manifest
+    * Data version resolution is unconditional: a task with an unpinned manifest
     * would otherwise choose whatever is latest when the executor opens it,
-    * which is no longer the snapshot the driver planned. Delta logs are read
-    * from a manifest only when deletes are enabled and the schema has a primary
-    * key. A manifest that has to be read and cannot be is the read's failure,
-    * not an empty list.
+    * which is no longer the snapshot the driver planned. L0 versions and delta
+    * logs are resolved only when deletes are enabled and the schema has a
+    * primary key. A required manifest that cannot be read is the read's
+    * failure, not an empty list.
     */
   def of(
       snapshot: Snapshot,
@@ -111,7 +112,9 @@ object DeleteFileListing {
       store: ObjectStore,
       endpoint: String
   ): DeleteFileListing = {
-    val v3 = snapshot.v3Segments.map { seg =>
+    val segments =
+      snapshot.v3Segments.filter(seg => listDeleteFiles || seg.hasData)
+    val v3 = segments.map { seg =>
       val (basePath, listedVersion) = seg.layout match {
         case SegmentLayout.Manifest(path, version) => (path, version)
         case _ =>
@@ -120,7 +123,7 @@ object DeleteFileListing {
           )
       }
       val readVersion =
-        if (listedVersion > 0L) listedVersion
+        if (listedVersion >= 0L) listedVersion
         else
           V3ManifestReader
             .latestManifestVersion(basePath, bucket, store)
@@ -132,7 +135,7 @@ object DeleteFileListing {
                 ),
               identity
             )
-      if (readVersion <= 0L) {
+      if (listedVersion < 0L && readVersion <= 0L) {
         throw new IllegalStateException(
           s"cannot pin V3 segment ${seg.id} at $basePath: " +
             s"latest manifest version must be positive, got $readVersion"
@@ -141,10 +144,11 @@ object DeleteFileListing {
       // The manifest is read for the delete files; the segment's rows come
       // out of the same record, so a snapshot that did not carry a row count
       // has one here at no further cost. A read that lists no delete files
-      // opens no manifest and learns nothing, which is why the row count is
-      // an Option all the way up.
+      // opens no manifest and learns nothing, except that version zero is
+      // already known to be empty.
       val files =
-        if (!listDeleteFiles) ManifestFacts(Seq.empty, scala.None)
+        if (!listDeleteFiles && readVersion != 0L)
+          ManifestFacts(Seq.empty, scala.None)
         else
           V3ManifestReader
             .load(basePath, readVersion, bucket, store)
@@ -161,23 +165,39 @@ object DeleteFileListing {
       )
       (seg.id, readVersion, deltaLogs, files.rows)
     }
+    val manifestFiles = v3.map { case (id, _, files, _) => id -> files }.toMap
+    val deleteSegments = snapshot.deleteOnlySegments
     val inherited =
       if (!listDeleteFiles) Map.empty[Long, Seq[DeltaLogFile]]
       else
-        snapshot.deleteOnlySegments
-          .groupBy(_.partitionId)
-          .map { case (partitionId, segs) =>
-            partitionId -> segs.flatMap(_.deltaLogs)
+        snapshot.dataSegments
+          .map { data =>
+            val applicable = deleteSegments.filter { delta =>
+              val samePartition = delta.partitionId == AllPartitions ||
+                delta.partitionId == data.partitionId
+              if (samePartition) {
+                require(
+                  data.channelName.nonEmpty && delta.channelName.nonEmpty,
+                  s"L0 delete matching requires source channels for segments ${data.id} and ${delta.id}"
+                )
+              }
+              samePartition && data.channelName == delta.channelName
+            }
+            data.id -> applicable
+              .flatMap(delta => manifestFiles(delta.id))
+              .distinct
           }
+          .toMap
+          .filter(_._2.nonEmpty)
     DeleteFileListing(
       v3BySegment = v3.collect {
         case (id, _, files, _) if files.nonEmpty => id -> files
       }.toMap,
-      inheritedByPartition = inherited.filter(_._2.nonEmpty),
       v3ReadVersions = v3.map { case (id, version, _, _) =>
         id -> version
       }.toMap,
-      v3Rows = v3.collect { case (id, _, _, Some(rows)) => id -> rows }.toMap
+      v3Rows = v3.collect { case (id, _, _, Some(rows)) => id -> rows }.toMap,
+      inheritedBySegment = inherited
     )
   }
 

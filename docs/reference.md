@@ -1,7 +1,7 @@
 # Milvus Spark Connector Parameter Reference
 
 The public `milvus` data source reads fixed **Storage V3** snapshot files or
-explicit V3 schema/manifest metadata and supports vector search over those
+schema-only empty inputs and supports vector search over those
 inputs. It opens storage files directly and does not call the Milvus service.
 Snapshot preparation, selection and retention belong to the caller.
 
@@ -104,15 +104,15 @@ happen inside milvus-storage.
 
 ### 2.1 Fixed snapshot inputs
 
-Use a snapshot path for normal reads. Explicit schema/manifest options are for
-callers that already possess complete V3 metadata.
+Use `milvus.snapshot.path` for every nonempty snapshot. Explicit schema options
+can describe an empty snapshot only.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `milvus.snapshot.path` | unset | Fixed snapshot JSON location: a standard object-store URI, bucket-relative key, or local path for a local backend. Schema, partitions, deletes, indexes and segments come from this file. |
 | `milvus.snapshot.mode` | inferred | Inferred as `true` from a nonblank path or manifest list. Set `true` explicitly for a schema-only empty snapshot. `false` does not enable a different input mode. |
-| `milvus.snapshot.manifests` | unset | JSON array of V3 manifest entries; mutually exclusive with `milvus.snapshot.path`. Requires schema bytes or schema JSON below. |
-| `milvus.snapshot.schema.bytes` | unset | Base64-encoded protobuf `CollectionSchema` bytes for explicit metadata. Takes precedence over schema JSON when both are supplied. |
+| `milvus.snapshot.manifests` | unset | Only the empty JSON array `[]` is accepted, with schema bytes or schema JSON below. Nonempty lists are rejected: use `milvus.snapshot.path`. Mutually exclusive with `milvus.snapshot.path`. |
+| `milvus.snapshot.schema.bytes` | unset | Base64-encoded protobuf `CollectionSchema` bytes for an empty snapshot. Takes precedence over schema JSON when both are supplied. |
 | `milvus.snapshot.schema.json` | unset | Raw snapshot JSON containing the collection schema, used when schema bytes are absent. This is not Spark `StructType` JSON. |
 | `milvus.snapshot.collection.id` | 0 when absent | Collection ID for explicit metadata; a supplied value must be a positive Long. |
 | `milvus.snapshot.partition.ids` | unset | Comma-separated nonnegative partition IDs for explicit metadata. Use `milvus.partitions` below to select among a resolved snapshot's partitions. |
@@ -130,10 +130,21 @@ Unsupported schemes and cross-bucket references fail during planning.
 A manifest entry has a numeric `segmentID` (or `segmentIDLong`) and a `manifest`
 string containing JSON with `ver` and `base_path`. This is the V3 manifest
 representation named `storagev2_manifest_list` in Milvus snapshot JSON; that
-wire name does not mean Storage V2 support. Explicit metadata has only the
-information supplied by the caller; use the full snapshot input when you need
-its delete/index metadata. Supplying Spark `.schema()` does not replace the
-Milvus schema: field names, types and selection must match the fixed input.
+wire name does not mean Storage V2 support. Invalid manifest JSON, empty base
+paths and negative versions fail during planning; a bare path does not select
+the latest version. Version `0` is Milvus Storage's initial empty state and
+requires no manifest file. Positive versions read the exact file named by the
+snapshot. An Avro manifest with no records is invalid; one record with empty
+fields is valid, including an L0 manifest with no column groups.
+
+The snapshot file supplies segment Avro records for the segment level,
+partition, source channel, row count and persisted index metadata. Missing,
+duplicate or unmatched segment records fail during planning, before segment
+selection can hide an L0 record. Existing callers using a nonempty explicit
+manifest list must switch to `milvus.snapshot.path`: a list of storage
+manifests alone cannot identify L0 segments or their delete scope.
+Supplying Spark `.schema()` does not replace the Milvus schema: field names,
+types and selection must match the fixed input.
 
 Options not listed in this reference are not read. The generic Spark `path`
 argument is not an input: provide `milvus.snapshot.path`. Use the canonical
@@ -224,7 +235,7 @@ fails during planning.
 | `MilvusOption.ReaderFieldIDs` (`fieldIDs`) | String | No | unset | Comma-separated numeric field IDs, applied during both schema inference and table creation. Each requested ID must exist in the snapshot schema; Spark projection can further prune this set. With an external `.schema()`, its non-metadata fields must select exactly these IDs and their names and Spark types must match the snapshot. |
 | `MilvusOption.MilvusExtraColumns` (`milvus.extra.columns`) | String | No | "" | Comma-separated metadata columns. The supported names are `_segment_id`, `_row_offset`, and `_timestamp`; see [Output schema](#output-schema). |
 | `MilvusOption.MilvusFilter` (`milvus.filter`) | String | No | unset | Milvus scalar expression for an ordinary table read. It is parsed and validated against the fixed snapshot during planning, evaluated in both row and columnar readers, and combined with Spark predicates and deletes before Limit. On the base of a NEAREST BY the connector executes, it excludes rows before the top k. |
-| `MilvusOption.ReadApplyDeletes` (`milvus.read.apply.deletes`) | Boolean | No | true | Apply all segment-local, partition-level L0, and collection-level L0 deletes visible in the fixed snapshot. Setting this to `false` is explicit opt-out; any provided value besides `true` or `false`, including a blank value, is rejected. |
+| `MilvusOption.ReadApplyDeletes` (`milvus.read.apply.deletes`) | Boolean | No | true | Apply all segment-local and applicable L0 deletes visible in the fixed snapshot. L0 deletes apply within the same source channel and partition; partition `-1` covers all partitions of that channel. Setting this to `false` is explicit opt-out; any provided value besides `true` or `false`, including a blank value, is rejected. |
 | `milvus.read.vector.raw` | Boolean | No | false | Output type for vector columns. With the default `false`, vectors are converted to native Spark types (`FloatVector`/`Float16Vector`/`BFloat16Vector` to `ArrayType(FloatType)`, `Int8Vector` to `ArrayType(ShortType)`, `SparseFloatVector` to `MapType(LongType, FloatType)`). Set to `true` and vector columns come out as `BinaryType`, the bytes exactly as stored, for the caller to decode using `dim` and the element type. That path does no per-element conversion, which suits batch jobs that hand the bytes straight to a native library |
 | `milvus.read.columnar` | Boolean | No | true | How the scan delivers rows. With the default `true` Spark gets whole Arrow batches (`ColumnarBatch`) that wrap the native buffers without copying, with vector columns typed as `milvus.read.vector.raw` decides; a batch with deleted rows is delivered through a position map over the surviving rows, still without copying. `false` delivers one row at a time. Row and columnar readers use the same expected-row guard. |
 | `milvus.read.batch.max.rows` | Int | No | 8192 | Positive maximum rows requested from milvus-storage for one record batch; delivered as `reader.record_batch_max_rows`. |

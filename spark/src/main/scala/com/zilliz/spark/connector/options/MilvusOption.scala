@@ -77,7 +77,7 @@ object MilvusOption {
   val FsRegion = "fs.region"
 
   val SnapshotMode = "milvus.snapshot.mode" // "true" to enable snapshot mode
-  // JSON array of ManifestItemJson describing Storage V3 manifests.
+  // Only an empty manifest list is accepted; nonempty snapshots use SnapshotPath.
   val SnapshotManifests = "milvus.snapshot.manifests"
 
   /** A snapshot JSON in the snapshot directory, as an `s3a://` URI or a key

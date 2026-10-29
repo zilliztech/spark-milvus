@@ -1,8 +1,10 @@
 package com.zilliz.milvus.storage.snapshot.json
 
+import scala.util.control.NonFatal
+
 import com.fasterxml.jackson.annotation.{JsonAlias, JsonProperty}
+import com.fasterxml.jackson.databind.{DeserializationFeature, JsonNode}
 import com.fasterxml.jackson.databind.node.LongNode
-import com.fasterxml.jackson.databind.JsonNode
 
 import com.zilliz.milvus.storage.snapshot.CollectionIndex
 
@@ -30,13 +32,41 @@ case class SnapshotInfoJson(
   * the manifest version and the segment's base path.
   */
 case class ManifestContentJson(
-    @JsonProperty("ver") ver: Int,
+    @JsonProperty("ver") ver: Long,
     @JsonProperty("base_path") basePath: String
 )
 
 object ManifestContentJson {
+  private val reader = Mapper.mapper
+    .readerFor(classOf[JsonNode])
+    .withFeatures(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+
   def parse(json: String): Either[Throwable, ManifestContentJson] =
-    Mapper.read[ManifestContentJson](json)
+    try {
+      val value = reader.readValue[JsonNode](json)
+      require(
+        value != null && value.isObject,
+        "manifest reference must be a JSON object"
+      )
+      val rawVersion = value.get("ver")
+      val version =
+        if (rawVersion == null || rawVersion.isNull) 0L
+        else {
+          require(
+            rawVersion.isIntegralNumber && rawVersion.canConvertToLong,
+            "manifest version must be a signed 64-bit integer"
+          )
+          rawVersion.longValue()
+        }
+      val rawPath = value.get("base_path")
+      require(
+        rawPath == null || rawPath.isNull || rawPath.isTextual,
+        "manifest base_path must be a string"
+      )
+      val basePath =
+        if (rawPath == null || rawPath.isNull) "" else rawPath.textValue()
+      Right(ManifestContentJson(version, basePath))
+    } catch { case NonFatal(error) => Left(error) }
 }
 
 /** One entry of `storagev2_manifest_list`: a `storage_version = 3` segment.

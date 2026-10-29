@@ -13,23 +13,17 @@ final case class Segment(
     layout: SegmentLayout,
     deletes: DeleteFiles,
     indexes: SegmentIndexes = SegmentIndexes.Unknown,
-    statistics: SegmentStatistics = SegmentStatistics.Unknown
+    statistics: SegmentStatistics = SegmentStatistics.Unknown,
+    isDeleteOnly: Boolean = false,
+    channelName: String = ""
 ) {
 
-  /** False for a delete-only (L0) segment, which has no column groups. */
-  def hasData: Boolean = layout match {
+  /** L0 segments carry only deletes, including when they have a V3 manifest. */
+  def hasData: Boolean = !isDeleteOnly && (layout match {
     case SegmentLayout.Manifest(_, _) => true
     case physical: SegmentLayout.PhysicalColumnGroups =>
       physical.groups.nonEmpty
-  }
-
-  /** The delete files a source listed; empty when there are none or when they
-    * are inside the manifest.
-    */
-  def deltaLogs: Seq[DeltaLogFile] = deletes match {
-    case DeleteFiles.Listed(files) => files
-    case _                         => Seq.empty
-  }
+  })
 
 }
 
@@ -62,9 +56,10 @@ object SegmentLayout {
     * manifest at `basePath`.
     *
     * @param readVersion
-    *   the manifest version to read, or -1 for the latest. A planner that
-    *   resolved a version pins it, so every task in the job reads the same one
-    *   even if a compaction commits a newer manifest meanwhile.
+    *   the manifest version to read, zero for the initial empty state, or -1
+    *   for the latest. A planner that resolved a version pins it, so every task
+    *   in the job reads the same one even if a compaction commits a newer
+    *   manifest meanwhile.
     */
   final case class Manifest(basePath: String, readVersion: Long = -1L)
       extends SegmentLayout
@@ -101,7 +96,7 @@ object SegmentLayout {
   }
 }
 
-/** Where a segment's delete files are. Three of the four states carry
+/** Where a segment's delete files are. Two of the three states carry
   * information; `Unknown` is the state a source that cannot say must use, so
   * that a read with deletes on fails at planning instead of returning deleted
   * rows.
@@ -112,9 +107,6 @@ object DeleteFiles {
 
   /** The source confirmed there are no deletes. */
   case object Empty extends DeleteFiles
-
-  /** An input explicitly lists its delete files. */
-  final case class Listed(files: Seq[DeltaLogFile]) extends DeleteFiles
 
   /** V3: the manifest at the segment's read version lists them. */
   case object InManifest extends DeleteFiles

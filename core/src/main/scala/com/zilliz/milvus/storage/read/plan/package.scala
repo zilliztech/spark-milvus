@@ -16,12 +16,20 @@ package com.zilliz.milvus.storage.read
   * decoder; `DeletePlans` supplies its borrowed store on the executor.
   *
   * `ReadPlan.of` is the planning itself: one fixed `Snapshot` becomes one task
-  * per V3 data segment, each with its `fs.*` map, pinned manifest version,
-  * needed field ids, snapshot row count, exact persisted index builds and
-  * applicable delete-file descriptors. `DeleteFileListing.of` opens V3
-  * manifests on the driver only to list files; it never decodes delete rows.
-  * The executor does that through `core.read.exec.DeletePlans`. What only Spark
-  * knows stays in `spark.read`.
+  * per V3 data segment beyond the initial empty state, each with its `fs.*`
+  * map, pinned manifest version, needed field ids, snapshot row count, exact
+  * persisted index builds and applicable delete-file descriptors.
+  * `DeleteFileListing.of` opens V3 manifests on the driver only to list files;
+  * it never decodes delete rows. The executor does that through
+  * `core.read.exec.DeletePlans`. What only Spark knows stays in `spark.read`.
+  * L0 manifests contribute deletes to data segments of the same source channel
+  * and partition (or all partitions), never data tasks. The resolved overlay is
+  * keyed by each data segment. Disabled deletes leave L0 manifests unopened and
+  * pin only the data segments. A pinned version zero describes the initial
+  * empty state: listing requires no storage access and planning produces no
+  * data task. A positive snapshot row count contradicting that state fails
+  * explicitly. Internal unpinned versions must be resolved before data tasks
+  * are built.
   *
   * `Partitioner` is not here. One segment per partition is the only strategy,
   * and a trait with a single implementation and no second caller would be

@@ -10,7 +10,7 @@ import org.apache.avro.Schema
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.io.LocalObjectStore
+import com.zilliz.milvus.storage.io.{FailingObjectStore, LocalObjectStore}
 import com.zilliz.milvus.storage.snapshot.DeltaLogFile
 
 class V3ManifestReaderTest extends AnyFunSuite with Matchers {
@@ -81,7 +81,9 @@ class V3ManifestReaderTest extends AnyFunSuite with Matchers {
       }
     """)
 
-  test("parse reads the primary-key StorageV3 manifest deltalogs") {
+  test(
+    "parse reads primary-key deltalogs from an L0 manifest with no column groups"
+  ) {
     val bytes = writeManifest(
       Seq(
         ("9001", 0, 3L),
@@ -96,6 +98,7 @@ class V3ManifestReaderTest extends AnyFunSuite with Matchers {
     )
 
     result shouldBe a[Right[_, _]]
+    result.toOption.get.rows shouldBe scala.None
     result.toOption.get.deltaLogs shouldBe Seq(
       DeltaLogFile(
         0L,
@@ -123,12 +126,34 @@ class V3ManifestReaderTest extends AnyFunSuite with Matchers {
       .rows shouldBe Some(12000L)
   }
 
-  test("a manifest with no column groups states no rows") {
+  test("one manifest record with empty fields is valid") {
+    val bytes = writeManifest(Seq.empty)
     V3ManifestReader
-      .parse(writeManifest(Seq.empty), "files/insert_log/10/20/30")
-      .toOption
-      .get
-      .rows shouldBe scala.None
+      .parse(bytes, "files/insert_log/10/20/30") shouldBe Right(
+      ManifestFacts(Seq.empty, scala.None)
+    )
+    V3ManifestReader
+      .parseStatistics(bytes, "files/insert_log/10/20/30") shouldBe Right(
+      Map.empty
+    )
+  }
+
+  test("zero-byte manifests fail facts and statistics reads") {
+    val bytes = Array.empty[Byte]
+    V3ManifestReader.parse(bytes, "segment").isLeft shouldBe true
+    V3ManifestReader.parseStatistics(bytes, "segment").isLeft shouldBe true
+  }
+
+  test("Avro containers without a record fail facts and statistics reads") {
+    val bytes = writeManifest(Seq.empty, includeRecord = false)
+    val failures = Seq(
+      V3ManifestReader.parse(bytes, "segment").left.toOption,
+      V3ManifestReader.parseStatistics(bytes, "segment").left.toOption
+    )
+    failures.foreach { failure =>
+      failure shouldBe defined
+      failure.get.getMessage should include("no record in Avro file")
+    }
   }
 
   test("a manifest written without column groups still reads") {
@@ -194,6 +219,62 @@ class V3ManifestReaderTest extends AnyFunSuite with Matchers {
     ) shouldBe "files/insert_log/10/20/30/_metadata/manifest-7.avro"
   }
 
+  test(
+    "version zero supplies empty facts and statistics without storage access"
+  ) {
+    val store =
+      new FailingObjectStore(new IllegalStateException("must not be opened"))
+    V3ManifestReader.load("segment", 0L, "", store) shouldBe Right(
+      ManifestFacts(Seq.empty, Some(0L))
+    )
+    V3ManifestReader.loadStatistics("segment", 0L, "", store) shouldBe Right(
+      Map.empty
+    )
+  }
+
+  test(
+    "version zero stays empty when a later manifest contains data and statistics"
+  ) {
+    val base = Files.createTempDirectory("milvus-v3-initial-manifest-test")
+    val metadata = Files.createDirectory(base.resolve("_metadata"))
+    val later = metadata.resolve("manifest-1.avro")
+    try {
+      Files.write(
+        later,
+        writeManifest(
+          Seq(("delete-1", 0, 1L)),
+          stats = Map(
+            "bloom_filter.100" -> (Seq("bloom-1"), Map.empty[String, String])
+          ),
+          groups = Seq(Seq((0L, 5L)))
+        )
+      )
+      val store = new LocalObjectStore()
+      V3ManifestReader
+        .load(base.toString, 1L, "", store)
+        .toOption
+        .get
+        .rows shouldBe Some(5L)
+      V3ManifestReader
+        .loadStatistics(base.toString, 1L, "", store)
+        .toOption
+        .get should not be empty
+      V3ManifestReader.load(base.toString, 0L, "", store) shouldBe Right(
+        ManifestFacts(Seq.empty, Some(0L))
+      )
+      V3ManifestReader.loadStatistics(
+        base.toString,
+        0L,
+        "",
+        store
+      ) shouldBe Right(Map.empty)
+    } finally {
+      Files.deleteIfExists(later)
+      Files.deleteIfExists(metadata)
+      Files.deleteIfExists(base)
+    }
+  }
+
   test("parseStatistics resolves relative paths and keeps metadata") {
     val bytes = writeManifest(
       Seq.empty,
@@ -256,7 +337,8 @@ class V3ManifestReaderTest extends AnyFunSuite with Matchers {
   private def writeManifest(
       deltaLogs: Seq[(String, Int, Long)],
       stats: Map[String, (Seq[String], Map[String, String])] = Map.empty,
-      groups: Seq[Seq[(Long, Long)]] = Seq.empty
+      groups: Seq[Seq[(Long, Long)]] = Seq.empty,
+      includeRecord: Boolean = true
   ): Array[Byte] = {
     val deltaSchema = schema
       .getField("delta_logs")
@@ -314,7 +396,7 @@ class V3ManifestReaderTest extends AnyFunSuite with Matchers {
     val writer =
       new DataFileWriter[GenericRecord](new GenericDatumWriter[GenericRecord]())
     writer.create(schema, out)
-    writer.append(rec)
+    if (includeRecord) writer.append(rec)
     writer.close()
     out.toByteArray
   }

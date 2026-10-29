@@ -13,13 +13,17 @@ class SnapshotSegmentReaderTest extends AnyFunSuite with Matchers {
       segmentId = 99L,
       partitionId = 42L,
       rows = 8L,
-      storageVersion = 3L
+      storageVersion = 3L,
+      segmentLevel = 1L,
+      channelName = "source-channel"
     )
     val entry = SnapshotSegmentReader.parse(bytes, 4).fold(throw _, identity)
     entry.segmentId shouldBe 99L
     entry.partitionId shouldBe 42L
     entry.numOfRows shouldBe 8L
     entry.storageVersion shouldBe 3L
+    entry.segmentLevel shouldBe 1L
+    entry.channelName shouldBe "source-channel"
   }
 
   test("unsupported raw manifest versions fail") {

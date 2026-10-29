@@ -63,7 +63,8 @@ case class SnapshotSegmentEntry(
     binlogFiles: Seq[FieldBinlogEntry],
     deltaLogFiles: Seq[FieldBinlogEntry],
     statsLogFiles: Seq[FieldBinlogEntry] = Seq.empty,
-    indexFiles: Option[Vector[IndexFileEntry]] = None
+    indexFiles: Option[Vector[IndexFileEntry]] = None,
+    channelName: String = ""
 )
 
 /** Decoder for the per-segment AVRO records a Milvus snapshot lists in its
@@ -311,6 +312,7 @@ object SnapshotSegmentReader extends com.zilliz.milvus.storage.Logging {
       "storage_version"
     )
       .foreach(field(schema, _, Schema.Type.LONG, root))
+    field(schema, "channel_name", Schema.Type.STRING, root)
     Seq("binlog_files", "deltalog_files", "statslog_files").foreach { name =>
       val group = array(schema, name, Schema.Type.RECORD, root)
       val path = s"$root.$name[]"
@@ -380,7 +382,8 @@ object SnapshotSegmentReader extends com.zilliz.milvus.storage.Logging {
       binlogFiles = projectFieldBinlogs(rec.get("binlog_files")),
       deltaLogFiles = projectFieldBinlogs(rec.get("deltalog_files")),
       statsLogFiles = projectFieldBinlogs(rec.get("statslog_files")),
-      indexFiles = Some(projectIndexes(rec.get("index_files")))
+      indexFiles = Some(projectIndexes(rec.get("index_files"))),
+      channelName = asString(rec.get("channel_name"))
     )
   }
 

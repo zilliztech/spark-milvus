@@ -114,6 +114,9 @@ final class SnapshotCatalog(
 
 object SnapshotCatalog extends Logging {
 
+  // datapb.SegmentLevel_L0 identifies segments that carry only deletes.
+  private val L0SegmentLevel = 1L
+
   /** Segment id of a V3 manifest entry: the id the entry carries, else the last
     * path element of its base path, else 0.
     */
@@ -228,12 +231,15 @@ object SnapshotCatalog extends Logging {
       endpoint = endpoint
     )
     snapshot.flatMap { value =>
-      try Right(attachIndexes(value, metadata, entries, endpoint))
+      try Right(attachSegmentMetadata(value, metadata, entries, endpoint))
       catch { case NonFatal(error) => Left(error) }
     }
   }
 
-  private def attachIndexes(
+  /** Segment identity and partition come from Avro; the V3 path only locates
+    * storage and may retain a different or nonstandard directory layout.
+    */
+  private def attachSegmentMetadata(
       snapshot: Snapshot,
       metadata: SnapshotJson,
       entries: Seq[SnapshotSegmentEntry],
@@ -255,91 +261,108 @@ object SnapshotCatalog extends Logging {
       bySegment.forall(_._2.size == 1),
       "snapshot lists duplicate segment Avro records"
     )
+    metadata.segmentIds.filter(_.nonEmpty).foreach { expected =>
+      require(
+        expected.distinct.size == expected.size,
+        "snapshot segment_ids contains duplicate segment ids"
+      )
+      val missing = expected.toSet.diff(bySegment.keySet).toSeq.sorted
+      val unexpected = bySegment.keySet.diff(expected.toSet).toSeq.sorted
+      require(
+        missing.isEmpty && unexpected.isEmpty,
+        s"snapshot segment_ids does not match segment Avro records: missing [${missing
+            .mkString(", ")}], unexpected [${unexpected.mkString(", ")}]"
+      )
+    }
     val describedIds = snapshot.segments.iterator.map(_.id).toSet
     val unlocated = bySegment.keySet.diff(describedIds)
     require(
       unlocated.isEmpty,
       s"snapshot segment Avro records have no V3 manifest location: ${unlocated.toSeq.sorted.mkString(", ")}"
     )
+    val undescribed = describedIds.diff(bySegment.keySet)
+    require(
+      undescribed.isEmpty,
+      s"V3 manifest locations have no snapshot segment Avro records: ${undescribed.toSeq.sorted.mkString(", ")}"
+    )
     val segments = snapshot.segments.map { segment =>
-      bySegment.get(segment.id).map(_.head) match {
-        case None => segment
-        case Some(entry) =>
-          require(
-            entry.partitionId == segment.partitionId,
-            s"segment ${segment.id} has conflicting snapshot partition ids"
-          )
-          require(
-            entry.storageVersion == segment.storageVersion,
-            s"segment ${segment.id} has conflicting snapshot storage versions"
-          )
-          require(
-            entry.numOfRows >= 0L,
-            s"segment ${segment.id} has negative row count"
-          )
-          val indexes = entry.indexFiles match {
-            case None => SegmentIndexes.Unknown
-            case Some(files) =>
-              val available = files.filter(_.filePaths.nonEmpty).map { index =>
-                require(
-                  index.segmentId == segment.id,
-                  s"index ${index.indexId} names segment ${index.segmentId}, expected ${segment.id}"
+      val entry = bySegment(segment.id).head
+      require(
+        entry.storageVersion == segment.storageVersion,
+        s"segment ${segment.id} has conflicting snapshot storage versions"
+      )
+      require(
+        entry.numOfRows >= 0L,
+        s"segment ${segment.id} has negative row count"
+      )
+      val indexes = entry.indexFiles match {
+        case None => SegmentIndexes.Unknown
+        case Some(files) =>
+          val available = files.filter(_.filePaths.nonEmpty).map { index =>
+            require(
+              index.segmentId == segment.id,
+              s"index ${index.indexId} names segment ${index.segmentId}, expected ${segment.id}"
+            )
+            require(
+              index.rowCount == entry.numOfRows,
+              s"index ${index.indexId} has ${index.rowCount} rows but segment ${segment.id} has ${entry.numOfRows}"
+            )
+            require(
+              index.buildId > 0L,
+              s"index ${index.indexId} has no build id"
+            )
+            require(
+              index.filePaths.forall(_.nonEmpty),
+              s"index ${index.indexId} contains an empty file path"
+            )
+            metadata.buildIds.foreach { ids =>
+              require(
+                ids.contains(index.buildId),
+                s"index ${index.indexId} build ${index.buildId} is absent from snapshot build_ids"
+              )
+            }
+            definitions.foreach { all =>
+              require(
+                all.exists(d =>
+                  d.indexId == index.indexId && d.fieldId == index.fieldId
+                ),
+                s"segment index ${index.indexId} for field ${index.fieldId} is absent from snapshot indexes"
+              )
+            }
+            SegmentIndex(
+              collectionId = snapshot.collectionId,
+              partitionId = entry.partitionId,
+              segmentId = segment.id,
+              fieldId = index.fieldId,
+              indexId = index.indexId,
+              buildId = index.buildId,
+              name = index.name,
+              parameters = index.parameters,
+              filePaths = index.filePaths.map(path =>
+                keyIn(
+                  snapshot.bucket,
+                  path,
+                  s"index ${index.indexId}",
+                  endpoint
                 )
-                require(
-                  index.rowCount == entry.numOfRows,
-                  s"index ${index.indexId} has ${index.rowCount} rows but segment ${segment.id} has ${entry.numOfRows}"
-                )
-                require(
-                  index.buildId > 0L,
-                  s"index ${index.indexId} has no build id"
-                )
-                require(
-                  index.filePaths.forall(_.nonEmpty),
-                  s"index ${index.indexId} contains an empty file path"
-                )
-                metadata.buildIds.foreach { ids =>
-                  require(
-                    ids.contains(index.buildId),
-                    s"index ${index.indexId} build ${index.buildId} is absent from snapshot build_ids"
-                  )
-                }
-                definitions.foreach { all =>
-                  require(
-                    all.exists(d =>
-                      d.indexId == index.indexId && d.fieldId == index.fieldId
-                    ),
-                    s"segment index ${index.indexId} for field ${index.fieldId} is absent from snapshot indexes"
-                  )
-                }
-                SegmentIndex(
-                  collectionId = snapshot.collectionId,
-                  partitionId = entry.partitionId,
-                  segmentId = segment.id,
-                  fieldId = index.fieldId,
-                  indexId = index.indexId,
-                  buildId = index.buildId,
-                  name = index.name,
-                  parameters = index.parameters,
-                  filePaths = index.filePaths.map(path =>
-                    keyIn(
-                      snapshot.bucket,
-                      path,
-                      s"index ${index.indexId}",
-                      endpoint
-                    )
-                  ),
-                  rowCount = index.rowCount,
-                  serializedSize = index.serializedSize,
-                  indexVersion = index.indexVersion,
-                  currentIndexVersion = index.currentIndexVersion,
-                  indexStorePathVersion = index.indexStorePathVersion
-                )
-              }
-              if (available.nonEmpty) SegmentIndexes.Available(available)
-              else SegmentIndexes.Unindexed
+              ),
+              rowCount = index.rowCount,
+              serializedSize = index.serializedSize,
+              indexVersion = index.indexVersion,
+              currentIndexVersion = index.currentIndexVersion,
+              indexStorePathVersion = index.indexStorePathVersion
+            )
           }
-          segment.copy(rows = Some(entry.numOfRows), indexes = indexes)
+          if (available.nonEmpty) SegmentIndexes.Available(available)
+          else SegmentIndexes.Unindexed
       }
+      segment.copy(
+        partitionId = entry.partitionId,
+        rows = Some(entry.numOfRows),
+        indexes = indexes,
+        isDeleteOnly = entry.segmentLevel == L0SegmentLevel,
+        channelName = entry.channelName
+      )
     }
     snapshot.copy(
       segments = segments,
@@ -369,15 +392,27 @@ object SnapshotCatalog extends Logging {
     try {
       val defaultPartition = partitionIds.headOption
       val v3 = v3Items.map { item =>
-        val (rawBasePath, version) =
+        val content =
           ManifestContentJson.parse(item.manifest) match {
-            case Right(content) => (content.basePath, content.ver.toLong)
-            case Left(_)        => (item.manifest, -1L)
+            case Right(content) => content
+            case Left(error) =>
+              throw new IllegalArgumentException(
+                s"invalid manifest reference for segment ${item.segmentID}: ${error.getMessage}",
+                error
+              )
           }
+        require(
+          content.basePath.trim.nonEmpty,
+          s"invalid manifest reference for segment ${item.segmentID}: base_path must not be empty"
+        )
+        require(
+          content.ver >= 0L,
+          s"invalid manifest reference for segment ${item.segmentID}: fixed snapshots require a nonnegative version, got ${content.ver}"
+        )
         val basePath =
           keyIn(
             bucket,
-            rawBasePath,
+            content.basePath,
             s"segment ${item.segmentID} manifest",
             endpoint
           )
@@ -393,7 +428,7 @@ object SnapshotCatalog extends Logging {
           partitionId = partitionId,
           storageVersion = 3,
           rows = None,
-          layout = SegmentLayout.Manifest(basePath, version),
+          layout = SegmentLayout.Manifest(basePath, content.ver),
           deletes = DeleteFiles.InManifest,
           statistics = SegmentStatistics.InManifest
         )

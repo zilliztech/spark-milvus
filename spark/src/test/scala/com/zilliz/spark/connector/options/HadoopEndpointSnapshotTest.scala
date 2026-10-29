@@ -47,7 +47,7 @@ class HadoopEndpointSnapshotTest
     val root = Files.createTempDirectory("hadoop-endpoint")
     val key = "snapshots/10/metadata/2.json"
     Files.createDirectories(root.resolve(key).getParent)
-    // A V3-only snapshot: the catalog opens no segment file for it.
+    // An empty snapshot needs no segment files for this endpoint check.
     Files.write(
       root.resolve(key),
       """{
@@ -57,9 +57,7 @@ class HadoopEndpointSnapshotTest
         ]}},
         "format_version": 4,
         "manifest_list": [],
-        "storagev2_manifest_list": [
-          {"segmentID": 30, "manifest": "{\"ver\":1,\"base_path\":\"insert_log/10/20/30\"}"}
-        ]
+        "storagev2_manifest_list": []
       }""".getBytes(StandardCharsets.UTF_8)
     )
     val hadoop = spark.sparkContext.hadoopConfiguration
