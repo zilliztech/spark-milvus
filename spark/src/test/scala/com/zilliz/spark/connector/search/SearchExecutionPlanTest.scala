@@ -31,6 +31,7 @@ import com.zilliz.milvus.storage.vector.{
   CandidateBytesFixture,
   CandidateEncoding,
   CandidateRuns,
+  IndexSearch,
   SearchPlan
 }
 import com.zilliz.spark.connector.options.{SearchLimits, TaskResources}
@@ -47,6 +48,124 @@ class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
       Map.empty,
       snapshotRows = rows
     )
+
+  private def withPlanningSpark(
+      cores: Int
+  )(check: SparkSession => Unit): Unit = {
+    val spark = SparkSession
+      .builder()
+      .master(s"local[$cores]")
+      .appName("candidate-capacity-planning")
+      .config("spark.ui.enabled", "false")
+      .config("spark.driver.host", "127.0.0.1")
+      .config("spark.driver.bindAddress", "127.0.0.1")
+      .getOrCreate()
+    try check(spark)
+    finally spark.stop()
+  }
+
+  private def capacityPlan(
+      spark: SparkSession,
+      tasks: Seq[SegmentReadTask],
+      k: Int,
+      capacity: Int
+  ): SearchExecutionPlan.Milvus =
+    SearchExecutionPlan.milvus(
+      spark,
+      SearchLimits.Default.copy(
+        groupMaxBytes = Some(3L * SearchPlan.bytesPerQuery(layout, capacity))
+      ),
+      SearchQueries
+        .Rows(spark.sparkContext.emptyRDD[(Long, Array[Float])], 20L),
+      tasks,
+      4L,
+      layout,
+      k,
+      MetricType.L2,
+      SearchMode.Exact,
+      None,
+      takeColumns = false
+    )
+
+  private def assertCandidateBudget(
+      plan: SearchExecutionPlan.Milvus,
+      capacity: Int
+  ): Unit = {
+    plan.segments.groups.foreach { group =>
+      group.queries.toLong * SearchResources.groupBytesPerQuery(
+        layout,
+        capacity,
+        plan.budget.pipelineGroups
+      ) should be <= plan.budget.group.bytes
+    }
+    val rangeQueries = plan.segments.queryRanges
+      .map(range =>
+        range.map(index => plan.segments.groups(index).queries.toLong).sum
+      )
+      .max
+    plan.segments.needs.get.queriesHeap shouldBe rangeQueries * (
+      SearchPlan.QueryIdBytes.toLong + capacity.toLong * SearchPlan.CandidateBytes +
+        SearchPlan.TopKQueueBytes
+    )
+  }
+
+  test("one set budgets and retains the combined top-k of its small segments") {
+    withPlanningSpark(1) { spark =>
+      Seq(6 -> 6, Int.MaxValue -> 7).foreach { case (requested, capacity) =>
+        val planned = capacityPlan(
+          spark,
+          Seq(segment(1L, Some(3L)), segment(2L, Some(4L))),
+          requested,
+          capacity
+        )
+        planned.segments.sets.map(_.size) shouldBe Seq(2)
+        planned.tasks.map(_.topK).distinct shouldBe Vector(capacity)
+        planned.segmentK shouldBe 4
+        planned.setK shouldBe capacity
+        planned.merge.k shouldBe capacity
+        planned.segments.groups.map(_.queries).max shouldBe 3
+        planned.segments.groups.map(_.queries).sum shouldBe 20
+        assertCandidateBudget(planned, capacity)
+      }
+    }
+  }
+
+  test(
+    "global merge budgets its output beyond every individual set's capacity"
+  ) {
+    withPlanningSpark(2) { spark =>
+      val rows = Map(1L -> 3L, 2L -> 4L, 3L -> 3L, 4L -> 4L)
+      val planned = capacityPlan(
+        spark,
+        rows.toSeq.sortBy(_._1).map { case (id, count) =>
+          segment(id, Some(count))
+        },
+        Int.MaxValue,
+        14
+      )
+      planned.segments.sets.size shouldBe 2
+      val setCapacities = planned.segments.sets.map(set =>
+        set.map(segment => rows(segment.segmentId)).sum.toInt
+      )
+      setCapacities.sum shouldBe 14
+      setCapacities.max should be < 14
+      planned.tasks.map(_.topK) shouldBe setCapacities.flatMap(capacity =>
+        Seq.fill(planned.segments.queryRanges.size)(capacity)
+      )
+      planned.setK shouldBe setCapacities.max
+      planned.merge.k shouldBe 14
+      val footprint = SearchMerge.footprint(
+        2,
+        14,
+        maxRuns = planned.mergeStage.maxRuns
+      )
+      planned.mergeStage.footprint shouldBe footprint
+      planned.mergeStage.footprint.answerBytes shouldBe 14L * CandidateBytes.Width
+      planned.merge.bytesPerQuery shouldBe footprint.bytesPerQuery
+      planned.merge.maxRuns shouldBe planned.mergeStage.maxRuns
+      assertCandidateBudget(planned, 14)
+    }
+  }
 
   test(
     "candidate dictionary uses all segment ids and rejects known oversized physical extents"
@@ -126,7 +245,7 @@ class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
         segment(id, Some(10L))
           .copy(indexes = SegmentIndexes.Available(Vector(descriptor)))
       }
-      def plan(tasks: Seq[SegmentReadTask], mode: SearchMode) =
+      def plan(tasks: Seq[SegmentReadTask], mode: SearchMode, k: Int = 3) =
         SearchExecutionPlan.milvus(
           spark,
           SearchLimits.Default,
@@ -135,7 +254,7 @@ class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
           tasks,
           4L,
           layout,
-          3,
+          k,
           MetricType.L2,
           mode,
           None,
@@ -145,6 +264,17 @@ class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
       val second = indexed(2L)
       val full = plan(Seq(first, second), SearchMode.PreferIndex)
       full.candidateDictionary.size shouldBe 2
+      val indexedCapacity =
+        plan(Seq(first, second), SearchMode.PreferIndex, k = 100)
+      indexedCapacity.merge.k shouldBe 20
+      indexedCapacity.tasks.map(_.topK).distinct shouldBe Vector(10)
+      indexedCapacity.segments.needs.get.queriesOffHeap shouldBe
+        100L * layout.rowBytes + 200L + IndexSearch.resultBytes(
+          100,
+          20,
+          SearchLimits.Default.callsInFlight
+        )
+      assertCandidateBudget(indexedCapacity, 20)
       val exactFull = plan(Seq(first, second), SearchMode.Exact)
       exactFull.candidateDictionary.size shouldBe 2
       plan(
@@ -173,6 +303,26 @@ class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
         Seq(first, unproven.copy(indexes = SegmentIndexes.Unindexed)),
         SearchMode.PreferIndex
       ).candidateDictionary.size shouldBe 2
+
+      // Neither a missing extent nor an index's estimate proves an upper
+      // bound for the rows an exact scan can return.
+      Seq(
+        segment(2L, None),
+        unproven
+      ).foreach { unbounded =>
+        val conservative =
+          plan(Seq(first, unbounded), SearchMode.Exact, k = 100)
+        conservative.segmentK shouldBe 100
+        conservative.setK shouldBe 100
+        conservative.merge.k shouldBe 100
+        conservative.tasks.map(_.topK) should contain(100)
+        conservative.mergeStage.footprint shouldBe SearchMerge.footprint(
+          conservative.segments.sets.size,
+          100,
+          maxRuns = conservative.mergeStage.maxRuns
+        )
+        assertCandidateBudget(conservative, 100)
+      }
     } finally spark.stop()
   }
 
@@ -607,20 +757,27 @@ class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
     ) shouldBe 0L
   }
 
-  test("a source answers with at most its rows, which sizes the stages") {
-    SearchExecutionPlan.answerK(10000000, Some(1350000L)) shouldBe 1350000
-    SearchExecutionPlan.answerK(100, Some(1350000L)) shouldBe 100
-    SearchExecutionPlan.answerK(10000000, None) shouldBe 10000000
-    SearchExecutionPlan.answerK(10000000, Some(-1L)) shouldBe 10000000
-    // The merge footprint follows the answer bound while the selection keeps k.
-    val bounded =
-      SearchMerge.plan(1000, 1000L, 16, 10000000, 1L << 30, answerK = 6750000)
-    bounded.k shouldBe 10000000
-    bounded.bytesPerQuery shouldBe SearchMerge
-      .footprint(16, 6750000)
-      .bytesPerQuery
-    SearchMerge.plan(1000, 1000L, 16, 10000000, 1L << 30).bytesPerQuery shouldBe
-      SearchMerge.footprint(16, 10000000).bytesPerQuery
+  test(
+    "candidate capacity uses a complete row bound and saturates before overflow"
+  ) {
+    SearchExecutionPlan.candidateK(100, Seq(Some(3L), Some(4L))) shouldBe 7
+    SearchExecutionPlan.candidateK(6, Seq(Some(3L), Some(4L))) shouldBe 6
+    Seq(Seq.empty, Seq(Some(0L)), Seq(Some(0L), Some(0L))).foreach { rows =>
+      SearchExecutionPlan.candidateK(100, rows) shouldBe 1
+    }
+    Seq(None, Some(-1L)).foreach { unknown =>
+      Seq(Seq(unknown), Seq(Some(3L), unknown)).foreach { rows =>
+        SearchExecutionPlan.candidateK(100, rows) shouldBe 100
+      }
+    }
+    SearchExecutionPlan.candidateK(
+      Int.MaxValue,
+      Seq(Some(Long.MaxValue), Some(Long.MaxValue))
+    ) shouldBe Int.MaxValue
+    SearchExecutionPlan.candidateK(
+      Int.MaxValue,
+      Seq(Some(Int.MaxValue.toLong - 1L), Some(2L))
+    ) shouldBe Int.MaxValue
   }
 
   test("task policy is serializable without driver resources") {
@@ -631,7 +788,8 @@ class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
       8,
       2,
       prefetchIndexes = false,
-      pipelineGroups = false
+      pipelineGroups = false,
+      topK = 7
     )
     val bytes = new ByteArrayOutputStream()
     val output = new ObjectOutputStream(bytes)

@@ -531,6 +531,32 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       Seq(10L -> 0L)
   }
 
+  test("global merge retains and budgets more hits than any one source sends") {
+    val rows = Seq(
+      (7L, 10L, 0L, 0f),
+      (7L, 10L, 1L, 2f),
+      (7L, 10L, 2L, 4f),
+      (7L, 11L, 0L, 1f),
+      (7L, 11L, 1L, 3f),
+      (7L, 11L, 2L, 5f)
+    )
+    val planned = SearchMerge.plan(2, 1L, 2, 6, 1L << 30)
+    planned.k shouldBe 6
+    planned.bytesPerQuery shouldBe SearchMerge.footprint(2, 6).bytesPerQuery
+    planned.targetBytes shouldBe SearchMerge.footprint(2, 6).stateBytes
+    val found = SearchMerge
+      .merged(
+        spark,
+        candidates(rows),
+        MetricType.L2,
+        planned,
+        packedBroadcast
+      )
+      .collect()
+    found.map(row => row.getLong(1) -> row.getLong(2)).toSeq shouldBe
+      Seq(10L -> 0L, 11L -> 0L, 10L -> 1L, 11L -> 1L, 10L -> 2L, 11L -> 2L)
+  }
+
   test("a local master's tasks all share one JVM's memory") {
     // local[2] in beforeAll: one executor, this JVM, running two tasks at
     // once, so an executor budget is halved before a task plans against it;

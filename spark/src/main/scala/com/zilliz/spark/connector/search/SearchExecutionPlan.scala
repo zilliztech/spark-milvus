@@ -33,7 +33,9 @@ private[connector] object SearchExecutionPlan {
     final case class Stream(plannedBytes: Long) extends Retention
   }
 
-  /** The complete execution policy for one segment set and query range. */
+  /** The complete execution policy for one segment set and query range. `topK`
+    * is the candidate capacity of the entire set, at most the requested k.
+    */
   final case class Task(
       retention: Retention,
       keptMaxBytes: Long,
@@ -41,7 +43,8 @@ private[connector] object SearchExecutionPlan {
       collectThreads: Int,
       callsInFlight: Int,
       prefetchIndexes: Boolean,
-      pipelineGroups: Boolean
+      pipelineGroups: Boolean,
+      topK: Int
   ) extends Serializable
 
   /** How the merge stage runs on one executor: `running` of its tasks at once,
@@ -72,11 +75,11 @@ private[connector] object SearchExecutionPlan {
     *   the merge stage's concurrency and the heap its tasks plan against
     */
   /** @param segmentK
-    *   the most hits one segment answers a query with: k, or its rows when
-    *   fewer, which sizes the search stage
+    *   the largest per-segment candidate capacity, bounded only by proven
+    *   physical rows and the requested k
     * @param setK
-    *   the most hits one segment set answers a query with, which sizes the
-    *   merge
+    *   the largest candidate capacity of a segment set; the global merge can
+    *   retain more candidates when they come from multiple sets
     */
   final case class Milvus(
       budget: Budget,
@@ -120,11 +123,17 @@ private[connector] object SearchExecutionPlan {
       takeColumns: Boolean
   ): Milvus = {
     val index = mode == SearchMode.PreferIndex
-    // A segment answers a query with at most its rows, so the search stage is
-    // sized for that many hits a query rather than a k far above it.
-    val segmentK = answerK(k, tasks.flatMap(_.knownRows).reduceOption(_ max _))
+    // Grouping precedes set formation. The global bound safely budgets every
+    // set's merger; estimates and index counts cannot reduce its capacity.
+    val rowsOf =
+      tasks.map(task => task.segmentId -> task.provenPhysicalRows).toMap
+    val totalK = candidateK(k, tasks.map(_.provenPhysicalRows))
+    val segmentK = tasks
+      .map(task => candidateK(k, Seq(task.provenPhysicalRows)))
+      .reduceOption(_ max _)
+      .getOrElse(1)
     val budget =
-      Budget.of(spark, limits, index, layout, segmentK, queries.count)
+      Budget.of(spark, limits, index, layout, totalK, queries.count)
     val delivery = queryDelivery(queries, layout, limits.queriesMaxBytes)
     val batch = SearchResources.exactScanBatch(configuredBatch)
     val descriptors =
@@ -140,11 +149,11 @@ private[connector] object SearchExecutionPlan {
       layout,
       budget.concurrency,
       queries.count.toInt,
-      segmentK,
+      totalK,
       SearchResources.groupPlanBytes(
         budget.group.bytes,
         layout,
-        segmentK,
+        totalK,
         budget.pipelineGroups
       ),
       SearchPlan.Budget(budget.segments.bytes, budget.queries.bytes),
@@ -161,11 +170,14 @@ private[connector] object SearchExecutionPlan {
       rangesWanted = limits.queryRanges,
       workingBytes = groupQueries =>
         if (index)
-          IndexSearch.resultBytes(groupQueries, segmentK, limits.callsInFlight)
+          IndexSearch.resultBytes(groupQueries, totalK, limits.callsInFlight)
         else 0L
     )
     val threads =
       if (limits.collectThreads > 0) limits.collectThreads else budget.cores
+    val setKs = plan.sets.map(set =>
+      candidateK(k, set.map(segment => rowsOf(segment.segmentId)))
+    )
     val policies = plan.sets.zipWithIndex.flatMap { case (set, setIndex) =>
       plan.queryRanges.map { range =>
         val keep = retention(
@@ -191,37 +203,24 @@ private[connector] object SearchExecutionPlan {
               .sum * layout.rowBytes.toLong,
             IndexSearch.resultBytes(
               range.map(i => plan.groups(i).queries).max,
-              segmentK,
+              totalK,
               1
             )
           ),
-          pipelineGroups = budget.pipelineGroups && keep == Retention.Segments
+          pipelineGroups = budget.pipelineGroups && keep == Retention.Segments,
+          topK = setKs(setIndex)
         )
       }
     }.toVector
     val stageHeap = budget.heapFor(budget.resources.tasksPerExecutor)
-    // A set's answer to a query holds at most the rows of its segments, and
-    // the whole search at most every row.
-    val rowsOf = tasks.map(task => task.segmentId -> task.knownRows).toMap
-    val setRows = plan.sets.map(set =>
-      set.foldLeft(Option(0L)) { (sum, segment) =>
-        for (total <- sum; rows <- rowsOf(segment.segmentId)) yield total + rows
-      }
-    )
-    val setK = answerK(k, setRows.flatten.reduceOption(_ max _))
-    val totalK = answerK(
-      k,
-      tasks.foldLeft(Option(0L)) { (sum, task) =>
-        for (total <- sum; rows <- task.knownRows) yield total + rows
-      }
-    )
+    val setK = setKs.reduceOption(_ max _).getOrElse(1)
     val merge = mergeStage(
       spark.sparkContext.defaultParallelism,
       budget.resources,
       budget.heap,
       budget.fraction,
       plan.sets.size,
-      setK,
+      totalK,
       CandidateRuns.Plain,
       CandidateBytes.Width.toLong,
       queries.count,
@@ -249,12 +248,11 @@ private[connector] object SearchExecutionPlan {
         merge.partitions,
         queries.count,
         plan.sets.size,
-        k,
+        totalK,
         merge.executionHeap.bytes,
         CandidateRuns.Plain,
         CandidateBytes.Width.toLong,
-        merge.maxRuns,
-        setK
+        merge.maxRuns
       ),
       if (takeColumns)
         Some(
@@ -271,12 +269,20 @@ private[connector] object SearchExecutionPlan {
     )
   }
 
-  /** The hits a source can answer a query with: `k`, or every row it has when
-    * that is fewer. Unknown row counts leave k as it is. `IndexSearch` asks the
-    * index for the same bound at run time.
+  /** Candidate capacity for a set or the whole search. Only proven physical row
+    * counts may reduce k; any unknown count leaves it unchanged. Saturate
+    * before summing to avoid overflow, and keep one slot for empty inputs
+    * because search and merge APIs require a positive capacity.
     */
-  def answerK(k: Int, rows: Option[Long]): Int =
-    rows.filter(_ >= 0L).map(r => math.min(k.toLong, r).toInt).getOrElse(k)
+  private[search] def candidateK(k: Int, rows: Seq[Option[Long]]): Int = {
+    require(k > 0, s"k must be positive: $k")
+    val capacity = rows.foldLeft(0L) {
+      case (sum, Some(count)) if count >= 0L =>
+        math.min(k.toLong, sum + math.min(k.toLong, count))
+      case _ => k.toLong
+    }
+    math.max(1L, capacity).toInt
+  }
 
   /** One global segment dictionary for every candidate source in this search.
     * Known physical extents fail early when UInt32 row addresses cannot cover
