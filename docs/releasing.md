@@ -75,6 +75,9 @@ required.
 
 All artifacts use group `com.zilliz` and the same final version. `<line>` is
 `4.0` or `4.2`; `<platform>` is one of the native platforms above.
+The published 2.0.0 universal entries are
+`com.zilliz:spark-milvus-4.0_2.13:2.0.0` and
+`com.zilliz:spark-milvus-4.2_2.13:2.0.0`.
 
 | Artifact ID | Contents and dependencies |
 |---|---|
@@ -85,6 +88,11 @@ All artifacts use group `com.zilliz` and the same final version. `<line>` is
 
 Resolve an entry through Maven or `spark-submit --packages`. Supplying its small
 JAR alone through `--jars` does not resolve the implementation or native JARs.
+For a standalone Spark 4.0 assembly with the matching Linux native bundle,
+download the [x86_64 JAR](https://github.com/zilliztech/spark-milvus/releases/download/v2.0.0/spark-milvus-4.0-bundle-2.0.0-linux-x86_64.jar)
+or the [aarch64 JAR](https://github.com/zilliztech/spark-milvus/releases/download/v2.0.0/spark-milvus-4.0-bundle-2.0.0-linux-aarch64.jar)
+from the [2.0.0 release](https://github.com/zilliztech/spark-milvus/releases/tag/v2.0.0),
+and supply it through `--jars`. Its platform must match the driver and executors.
 Use `sbt -DsparkVersion=<line> spark/assembly` with a selected native bundle
 for local fat-JAR workflows. Root assembly/publication is retired.
 
@@ -127,7 +135,7 @@ start. Paths may differ between driver and workers. For example, with an
 available release version and Spark 4.0 installed:
 
 ```bash
-release_version=2.0.0-rc.1  # replace with the released version to consume
+release_version=2.0.0
 worker_jsig=/absolute/path/on/workers/to/jdk21/lib/libjsig.so
 export LD_PRELOAD="$JAVA_HOME/lib/libjsig.so"
 "$SPARK_HOME/bin/spark-submit" \
@@ -165,7 +173,7 @@ rewrite it. Python 3.12, JDK 21 and sbt are required. Native hosts also need the
 
 ```bash
 git submodule update --init --recursive milvus-proto milvus-storage knowhere
-release_version=2.0.0-rc.1
+release_version=2.0.1-rc.1  # example only; choose an unused version
 sbt "exportBuildMatrix target/build-matrix.json"
 python3 scripts/release.py plan --matrix target/build-matrix.json \
   --version "$release_version" --output target/release-plan.json
@@ -524,9 +532,10 @@ secrets they are environment secrets, so build and test jobs cannot read them:
 | `DOCKERHUB_TOKEN` | `DOCKERHUB_TOKEN` | Access token of that account with read and write scope |
 
 The `docker-hub` environment needs the same reviewers and `v2.*` tag deployment
-policy as `maven-central`, and the `milvusdb/spark-milvus` repository must
-exist on Docker Hub before the first release; `docker push` does not create a
-repository under an organization. Committing the workflow configures neither.
+policy as `maven-central`. The Docker Hub account must be allowed to push to
+`milvusdb/spark-milvus`; confirm that the repository is public for a public
+release. Committing the workflow configures neither the environment nor Docker
+Hub permissions.
 The login step receives only these two secrets and the run logs out at the end
 of every image job, including after a failure. The equivalent manual commands for one platform, after verifying the
 downloaded `assembly-linux-x86_64` artifact, are:

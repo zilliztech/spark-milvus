@@ -23,6 +23,54 @@ developed on `main` and released from branch `2.0`, where the `v2.0.x` tags
 are cut. Candidate versions and artifact coordinates are explicitly recorded by
 the [release workflow](docs/releasing.md).
 
+## Install and run 2.0.0
+
+The release supports Spark 4.0 and 4.2 with Scala 2.13. Resolve the universal
+entry for your Spark line from Maven Central:
+
+| Spark line | Maven coordinate |
+|---|---|
+| 4.0 | `com.zilliz:spark-milvus-4.0_2.13:2.0.0` |
+| 4.2 | `com.zilliz:spark-milvus-4.2_2.13:2.0.0` |
+
+For example, pass the Spark 4.0 coordinate to `spark-submit` with
+`--packages com.zilliz:spark-milvus-4.0_2.13:2.0.0`. The universal entry
+resolves the implementation and native bundles for Linux x86_64, Linux aarch64
+and Apple silicon; the connector selects the matching bundle at runtime. To
+download only one native platform, use the platform-specific coordinates in
+the [release guide](docs/releasing.md#maven-coordinates-and-runtime-requirements).
+The entry JAR alone is not sufficient with `--jars`: Maven or `--packages`
+must resolve its dependencies. Configure the connector extension, plugin and
+the running JRE's `libjsig` for both driver and executors as shown in that
+guide.
+
+For a single JAR, download the Spark 4.0 assembly matching your Linux host:
+
+| Platform | 2.0.0 assembly |
+|---|---|
+| Linux x86_64 | [Download JAR](https://github.com/zilliztech/spark-milvus/releases/download/v2.0.0/spark-milvus-4.0-bundle-2.0.0-linux-x86_64.jar) |
+| Linux aarch64 | [Download JAR](https://github.com/zilliztech/spark-milvus/releases/download/v2.0.0/spark-milvus-4.0-bundle-2.0.0-linux-aarch64.jar) |
+
+These assemblies include the connector and matching native libraries; supply
+one through `--jars` to Spark 4.0. Check downloads against the release's
+[SHA256SUMS](https://github.com/zilliztech/spark-milvus/releases/download/v2.0.0/SHA256SUMS).
+The [release page](https://github.com/zilliztech/spark-milvus/releases/tag/v2.0.0)
+also contains the manifests. Spark and the runtime prerequisites remain
+necessary; see the [release guide](docs/releasing.md#maven-coordinates-and-runtime-requirements).
+
+The Spark 4.0 image contains the connector, Spark and examples. Docker selects
+the Linux amd64 or arm64 image for the host:
+
+```bash
+docker pull milvusdb/spark-milvus:2.0.0-spark4.0
+docker run --rm milvusdb/spark-milvus:2.0.0-spark4.0 \
+  /opt/spark-milvus/demo/run.sh python 01_read_snapshot.py
+```
+
+The example uses a bundled sample and needs no Milvus service or storage
+credentials. See the [image guide](docker/README.md) for Java examples, your
+own snapshot and Kubernetes deployment.
+
 ## Project structure
 
 The public build has five production modules in three layers. Dependencies
@@ -242,10 +290,8 @@ docker rm temp
 
 ## Using the connector
 
-Use the public candidate's JVM implementation and matching OSS native JAR, or
-its universal/platform-specific Maven entry, for the selected Spark line. See
-[release coordinates](docs/releasing.md). For a local build, use the selected
-`spark/assembly` bundle.
+Use the [2.0.0 Maven entry, assembly JAR or image](#install-and-run-200).
+For a local build, use the selected `spark/assembly` bundle.
 
 ### Run the demos
 
@@ -256,14 +302,14 @@ snapshot by default and need no Milvus service or object-store credentials. A
 separate REST example looks up an existing snapshot's path on deployments that
 expose the snapshot API and can write connector read options for it.
 
-Use Linux x86_64 or aarch64, Java 21, Spark 4.0.1 for Scala 2.13, and a local
-`spark/assembly` JAR containing the native libraries for your platform. From
-the checkout root:
+Use Linux x86_64 or aarch64, Java 21, Spark 4.0.1 for Scala 2.13, and the
+[released assembly](#install-and-run-200) or a local `spark/assembly` JAR
+containing the native libraries for your platform. From the checkout root:
 
 ```bash
 export SPARK_HOME=/absolute/path/to/spark-4.0.1-bin-hadoop3-scala2.13
 export JAVA_HOME=/absolute/path/to/jdk-21
-export CONNECTOR_JAR="/absolute/path/to/spark-milvus-4.0-bundle-<version>.jar"
+export CONNECTOR_JAR="/absolute/path/to/spark-milvus-4.0-bundle-2.0.0-linux-x86_64.jar"
 ./demo/run.sh python 01_read_snapshot.py
 ./demo/run.sh java ReadSnapshot
 ./demo/run.sh python 04_exact_search.py
@@ -272,7 +318,7 @@ export CONNECTOR_JAR="/absolute/path/to/spark-milvus-4.0-bundle-<version>.jar"
 ./demo/run.sh java IndexSearch
 ```
 
-Replace the paths and version with your actual installation and assembly.
+Replace the paths and, on aarch64, the assembly filename for your installation.
 The [walkthrough](demo/README.md) covers all nine example pairs, assembly setup,
 expected results, a verified release candidate, REST path lookup, and your own
 snapshot. Java sources compile on launch using the existing JDK and JARs;
