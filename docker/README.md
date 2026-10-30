@@ -2,14 +2,18 @@
 
 [build.sh](build.sh) packages an existing Spark-Milvus assembly with Spark
 4.0.1, Scala 2.13, Java 21, Python, the example sources and the frozen sample.
-Releases publish this image; see [the release guide](../docs/releasing.md#publish-the-container-image).
+The 2.0.0 release publishes the image as `milvusdb/spark-milvus:2.0.0-spark4.0`;
+see [the release guide](../docs/releasing.md#publish-the-container-image).
 The host needs Docker, Bash and Python 3. Java compilation happens in the image;
 the image build does not compile native libraries.
 
 ## Build from an assembly
 
-First produce a Spark 4.0 / Scala 2.13 `spark/assembly` JAR containing the
-matching Linux native bundle. Follow [Prepare the runtime](../demo/README.md#prepare-the-runtime)
+Use a Spark 4.0 / Scala 2.13 assembly containing the matching Linux native
+bundle. Download the 2.0.0 assembly for
+[x86_64](https://github.com/zilliztech/spark-milvus/releases/download/v2.0.0/spark-milvus-4.0-bundle-2.0.0-linux-x86_64.jar)
+or [aarch64](https://github.com/zilliztech/spark-milvus/releases/download/v2.0.0/spark-milvus-4.0-bundle-2.0.0-linux-aarch64.jar),
+or build one using [Prepare the runtime](../demo/README.md#prepare-the-runtime)
 and the [native build guide](../native/build/README.md). A thin JVM JAR or
 standalone native JAR is not an assembly.
 
@@ -17,7 +21,7 @@ From the repository root:
 
 ```bash
 ./docker/build.sh \
-  --assembly "/absolute/path/to/spark-milvus-4.0-bundle-<version>.jar" \
+  --assembly "/absolute/path/to/spark-milvus-4.0-bundle-2.0.0-linux-x86_64.jar" \
   --image spark-milvus-demo:4.0.1-jdk21-amd64 \
   --platform linux/amd64
 ```
@@ -76,7 +80,8 @@ These commands use the baked 14-row sample, with no Milvus service or storage
 credentials:
 
 ```bash
-DEMO_IMAGE=spark-milvus-demo:4.0.1-jdk21-amd64
+DEMO_IMAGE=milvusdb/spark-milvus:2.0.0-spark4.0
+docker pull "$DEMO_IMAGE"
 docker run --rm "$DEMO_IMAGE"
 docker run --rm "$DEMO_IMAGE" /opt/spark-milvus/demo/run.sh python 01_read_snapshot.py
 docker run --rm "$DEMO_IMAGE" /opt/spark-milvus/demo/run.sh java ReadSnapshot
@@ -105,8 +110,8 @@ disposable Milvus collection and obtaining its snapshot path.
 
 ## Registry and Kubernetes deployment
 
-Each release publishes this image to Docker Hub as
-`milvusdb/spark-milvus:<version>-spark4.0`, a multi-architecture tag over
+The [2.0.0 image](https://hub.docker.com/r/milvusdb/spark-milvus) is available as
+`milvusdb/spark-milvus:2.0.0-spark4.0`, a multi-architecture tag over
 `-amd64` and `-arm64` platform images built from the released Linux assemblies.
 The [release guide](../docs/releasing.md#publish-the-container-image)
 describes the publication jobs and the environment they run in. Use a published

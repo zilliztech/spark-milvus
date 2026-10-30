@@ -28,8 +28,16 @@ sources live in [python/](python/); Java sources live in
 
 ## Container image and Kubernetes templates
 
-The [image guide](../docker/README.md) packages an existing assembly with the
-runtime, examples and frozen sample, and shows local Docker commands. The
+The released image `milvusdb/spark-milvus:2.0.0-spark4.0` includes the
+runtime, examples and frozen sample for Linux amd64 and arm64. For example:
+
+```bash
+docker run --rm milvusdb/spark-milvus:2.0.0-spark4.0 \
+  /opt/spark-milvus/demo/run.sh python 01_read_snapshot.py
+```
+
+The [image guide](../docker/README.md) shows more local Docker commands and
+how to build an image from an assembly. The
 [Helm deployment templates](../deploy/helm/spark-milvus-demo/) submit these
 examples to Kubernetes with configurable images, service accounts and existing
 input Secrets. See the [cluster setup guide](../docs/cluster-setup.md) for
@@ -51,6 +59,11 @@ network requirements, plus standalone and Kubernetes deployment examples.
 The connector examples also need the connector and native Storage/Knowhere
 libraries for the current platform. Choose one artifact source:
 
+- **Released assembly:** download the Spark 4.0 bundle for [Linux x86_64](https://github.com/zilliztech/spark-milvus/releases/download/v2.0.0/spark-milvus-4.0-bundle-2.0.0-linux-x86_64.jar)
+  or [Linux aarch64](https://github.com/zilliztech/spark-milvus/releases/download/v2.0.0/spark-milvus-4.0-bundle-2.0.0-linux-aarch64.jar).
+  Verify it against [SHA256SUMS](https://github.com/zilliztech/spark-milvus/releases/download/v2.0.0/SHA256SUMS),
+  then set `CONNECTOR_JAR` to its absolute path as shown below. The release
+  assembly already includes the matching native libraries.
 - **Local assembly:** build `spark/assembly` with a matching unified native
   bundle. The native JAR and its `.jar.properties` sidecar must be present; the
   bundle must match the checkout's pinned source revisions. Follow the
@@ -58,6 +71,17 @@ libraries for the current platform. Choose one artifact source:
 - **Verified public candidate:** use an existing candidate containing the
   Spark 4.0 JVM JAR and the matching Linux native JAR. See the
   [release guide](../docs/releasing.md) for candidate layout and verification.
+
+For a released assembly, set Java and Spark paths and select the downloaded
+JAR for your architecture (this example is x86_64):
+
+```bash
+export JAVA_HOME=/absolute/path/to/jdk-21
+export PATH="$JAVA_HOME/bin:$PATH"
+export SPARK_HOME=/absolute/path/to/spark-4.0.1-bin-hadoop3-scala2.13
+unset CANDIDATE
+export CONNECTOR_JAR=/absolute/path/to/spark-milvus-4.0-bundle-2.0.0-linux-x86_64.jar
+```
 
 For a local assembly:
 

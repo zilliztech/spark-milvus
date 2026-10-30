@@ -22,9 +22,32 @@ storage versions fail during planning.
 | 4.0, 4.1, 4.2 | 2.13.16 |
 
 The single `spark` module selects a line through `-DsparkVersion` and
-`-DscalaVersion`. See the [release guide](releasing.md) for published lines,
-platforms and runtime requirements. The 1.x line ended at v1.6.0 and is no longer
-maintained.
+`-DscalaVersion` when building from source. Version 2.0.0 publishes Spark 4.0
+and 4.2 artifacts for Scala 2.13; Spark 3.5 and 4.1 require a source build.
+See the [release guide](releasing.md) for platforms and runtime requirements.
+The 1.x line ended at v1.6.0 and is no longer maintained.
+
+## Install version 2.0.0
+
+For Spark 4.0, resolve the universal entry artifact from Maven Central:
+
+```bash
+spark-submit --packages com.zilliz:spark-milvus-4.0_2.13:2.0.0 ...
+```
+
+For Spark 4.2 use `com.zilliz:spark-milvus-4.2_2.13:2.0.0`. Both entries
+resolve the JVM implementation and all published native platforms; alternatively
+use a [platform-specific entry](releasing.md#maven-coordinates-and-runtime-requirements)
+to resolve one native platform. Resolve the entry and its dependencies through
+Maven or `--packages`: its small entry JAR alone is not sufficient for `--jars`.
+
+For Spark 4.0 on Linux, download the complete assembly for
+[x86_64](https://github.com/zilliztech/spark-milvus/releases/download/v2.0.0/spark-milvus-4.0-bundle-2.0.0-linux-x86_64.jar)
+or [aarch64](https://github.com/zilliztech/spark-milvus/releases/download/v2.0.0/spark-milvus-4.0-bundle-2.0.0-linux-aarch64.jar)
+and pass it with `--jars`. The [release](https://github.com/zilliztech/spark-milvus/releases/tag/v2.0.0)
+also provides checksums. See the [cluster setup guide](cluster-setup.md) for
+driver and executor configuration and the
+[image guide](../docker/README.md) for the Spark 4.0 container.
 
 <a id="31-reading-data"></a>
 
