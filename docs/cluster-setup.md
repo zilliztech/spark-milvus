@@ -206,16 +206,27 @@ environment through `spark.yarn.appMasterEnv.*`, while executors use
 Use Kubernetes or YARN for Python cluster deployment; Spark standalone cluster
 deploy mode does not support Python applications.
 
-## Build the application image
+## Use the application image
 
-The [connector image](../docker/README.md) packages Spark 4.0.1, Scala 2.13,
-Java 21, Python, the connector assembly and both languages' example programs.
-Build the matching native bundle and `spark/assembly` first, following the
-[demo runtime instructions](../demo/README.md#prepare-the-runtime). Then package
-that assembly; replace the JAR and registry below with your own:
+The published [connector image](../docker/README.md) packages Spark 4.0.1,
+Scala 2.13, Java 21, Python, the connector assembly and both languages' example
+programs. The 2.0.0 tag supports Linux amd64 and arm64:
 
 ```bash
-export CONNECTOR_JAR="/absolute/path/to/spark-milvus-4.0-bundle-<version>.jar"
+docker pull milvusdb/spark-milvus:2.0.0-spark4.0
+docker run --rm milvusdb/spark-milvus:2.0.0-spark4.0 \
+  /opt/spark-milvus/demo/run.sh python 01_read_snapshot.py
+```
+
+This local example reads the bundled fixture. For custom builds, build the
+matching native bundle and `spark/assembly` first, following the
+[demo runtime instructions](../demo/README.md#prepare-the-runtime), or download
+the matching Linux assembly from the
+[2.0.0 release](https://github.com/zilliztech/spark-milvus/releases/tag/v2.0.0).
+Then package that assembly; replace the JAR and registry below with your own:
+
+```bash
+export CONNECTOR_JAR="/absolute/path/to/spark-milvus-4.0-bundle-2.0.0-linux-x86_64.jar"
 ./docker/build.sh \
   --assembly "$CONNECTOR_JAR" \
   --image registry.example.com/spark-milvus-demo:4.0.1-jdk21-amd64 \
@@ -326,9 +337,9 @@ Save the following as `/private/spark-demo-values.yaml`:
 
 ```yaml
 image:
-  repository: registry.example.com/spark-milvus-demo
-  tag: "4.0.1-jdk21-amd64"
-  # Prefer digest: sha256:... after publishing the image.
+  repository: milvusdb/spark-milvus
+  tag: "2.0.0-spark4.0"
+  # Prefer digest: sha256:... to pin the image.
 language: python
 example: exact
 input:
@@ -343,7 +354,9 @@ nodeSelector:
 For Java, set `language: java`; `example: exact` then selects the precompiled
 `ExactSearch` class. The chart also supports `read`, `filter`, `sql`,
 `filtered`, `index`, `vectors` and `partition`. Use `image.pullSecrets` for a
-private registry and adjust both image platform and node selector for ARM64.
+private registry. For ARM64, change the node selector; the published tag also
+contains an ARM64 image. For a custom single-platform image, match the image
+platform to the node selector.
 See the chart's [values](../deploy/helm/spark-milvus-demo/values.yaml) for the
 complete configuration, including existing accounts and resource sizing.
 

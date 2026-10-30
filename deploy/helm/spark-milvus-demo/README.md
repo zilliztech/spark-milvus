@@ -3,8 +3,9 @@
 This Helm chart runs one Python or Java demo on an existing Kubernetes cluster.
 A Job runs Spark 4.0.1's `spark-submit` inside the application image; Spark creates
 the driver and executors. No Spark Operator or separately deployed Spark master
-is required. Build the image with the [image guide](../../../docker/README.md)
-and review the [cluster permissions and storage setup](../../../docs/cluster-setup.md).
+is required. Use the published `milvusdb/spark-milvus:2.0.0-spark4.0` image
+or build one with the [image guide](../../../docker/README.md), and review the
+[cluster permissions and storage setup](../../../docs/cluster-setup.md).
 
 The chart does not call Milvus, create snapshots, create/read input Secrets, or
 provision a Kubernetes cluster. `helm template` and `helm lint` work offline.
@@ -17,17 +18,18 @@ Start with the vector-functions example, which needs no snapshot:
 helm lint deploy/helm/spark-milvus-demo
 helm template vector-demo deploy/helm/spark-milvus-demo \
   --namespace spark-demo \
-  --set image.repository=registry.example.com/team/spark-milvus-demo \
-  --set image.tag=4.0.1-jdk21-amd64
+  --set image.repository=milvusdb/spark-milvus \
+  --set image.tag=2.0.0-spark4.0
 
 helm install vector-demo deploy/helm/spark-milvus-demo \
   --namespace spark-demo --create-namespace \
-  --set image.repository=registry.example.com/team/spark-milvus-demo \
-  --set image.tag=4.0.1-jdk21-amd64
+  --set image.repository=milvusdb/spark-milvus \
+  --set image.tag=2.0.0-spark4.0
 ```
 
-The image must already be available to the cluster. For immutable image selection,
-set `image.digest=sha256:<64 lowercase hex characters>`; it takes precedence over
+The chart defaults to a locally built image, so the examples explicitly select
+the published image. The cluster nodes must be able to pull it. For immutable
+image selection, set `image.digest=sha256:<64 lowercase hex characters>`; it takes precedence over
 the tag. `image.pullSecrets` is a list of existing registry Secret names and is
 applied to the submitter, driver and executors. Match the native bundle and image
 to `nodeSelector.kubernetes.io/arch` (`amd64` by default, or `arm64`).
@@ -53,8 +55,8 @@ For example, save these non-secret values as `snapshot-demo.yaml`:
 
 ```yaml
 image:
-  repository: registry.example.com/team/spark-milvus-demo
-  tag: 4.0.1-jdk21-amd64
+  repository: milvusdb/spark-milvus
+  tag: 2.0.0-spark4.0
 language: python
 example: exact
 input:

@@ -13,8 +13,9 @@ cross-identity failures. Credentials are never supplied in Helm values.
 
 Copy [ci-values.read.example.yaml](ci-values.read.example.yaml), select a real
 read-test image by immutable digest and set `readOptions.existingSecret`.
-The image must provide `runner.command`; the local bundle-only Docker image
-does not contain an integration runner.
+The image must provide `runner.command`; the published
+`milvusdb/spark-milvus:2.0.0-spark4.0` demo image does not contain an
+integration runner.
 
 ```bash
 helm lint --strict deploy/helm/spark-milvus-integration -f /private/read-values.yaml
