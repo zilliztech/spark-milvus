@@ -6,6 +6,7 @@ import java.io.{
   ObjectInputStream,
   ObjectOutputStream
 }
+import java.net.{URL, URLClassLoader}
 import java.nio.charset.StandardCharsets
 import scala.jdk.CollectionConverters._
 
@@ -134,6 +135,24 @@ class SearchDriverBoundaryTest extends AnyFunSuite {
     assertDriverCredentialsAbsent(frameBytes)
     assert(restored[MilvusNearestByJoinFrameExec](frameBytes).spark == null)
   }
+
+  test(
+    "an executor initializes the merge without the driver's class server and keeps using it"
+  ) {
+    val expected = SearchMerge.HitSchema
+    val executor = new FreshPackage(getClass.getClassLoader)
+    try {
+      // The first task on the executor to use the merge, while its requests to
+      // the driver fail, as they do once the task is interrupted.
+      val first =
+        withContextClassLoader(new UnreachableDriver(executor))(
+          hitSchema(executor)
+        )
+      // Any later task on the same executor.
+      val later = hitSchema(executor)
+      assert(Seq(first, later) == Seq.fill(2)(Right(expected)))
+    } finally executor.close()
+  }
 }
 
 private object SearchDriverBoundaryTest {
@@ -198,4 +217,68 @@ private object SearchDriverBoundaryTest {
     ): RDD[InternalRow] =
       throw new AssertionError("Serialization must not run a fallback")
   }
+
+  val SearchPackage = "com.zilliz.spark.connector.search."
+  val MergeObject = "com.zilliz.spark.connector.search.SearchMerge$"
+  val SearchClasses: URL =
+    classOf[SearchMerge.Plan].getProtectionDomain.getCodeSource.getLocation
+
+  /** This package's classes loaded afresh, as an executor JVM holds its own:
+    * the merge object starts uninitialized whatever this JVM did with the
+    * suite's copy. Every other class comes from the suite's class path.
+    */
+  final class FreshPackage(parent: ClassLoader)
+      extends URLClassLoader(Array(SearchClasses), parent) {
+    override protected def loadClass(
+        name: String,
+        resolve: Boolean
+    ): Class[_] =
+      if (!name.startsWith(SearchPackage)) super.loadClass(name, resolve)
+      else
+        getClassLoadingLock(name).synchronized {
+          val loaded = findLoadedClass(name)
+          if (loaded != null) loaded else findClass(name)
+        }
+  }
+
+  /** A task's context class loader on an executor under Spark Connect, Spark's
+    * `ExecutorClassLoader`, whose requests to the driver fail: a class its
+    * parent lacks is fetched from the driver, and a fetch that fails other than
+    * by "not found", as an interrupted one does, throws
+    * `RemoteClassLoaderError`, an Error that is neither a LinkageError nor a
+    * ClassNotFoundException.
+    */
+  final class UnreachableDriver(parent: ClassLoader)
+      extends ClassLoader(parent) {
+    override protected def findClass(name: String): Class[_] =
+      throw new FetchFailed(name)
+  }
+
+  final class FetchFailed(name: String) extends Error(name)
+
+  /** `body` with `loader` as the thread's context class loader, which is what
+    * an executor sets for the tasks of a Spark Connect session.
+    */
+  def withContextClassLoader[A](loader: ClassLoader)(body: => A): A = {
+    val thread = Thread.currentThread()
+    val previous = thread.getContextClassLoader
+    thread.setContextClassLoader(loader)
+    try body
+    finally thread.setContextClassLoader(previous)
+  }
+
+  /** The hit schema of the merge object `classes` loaded, initializing the
+    * object on first use, or what that threw. An object whose initialization
+    * threw is never initialized again: every later use throws
+    * NoClassDefFoundError.
+    */
+  def hitSchema(classes: ClassLoader): Either[Throwable, AnyRef] =
+    try {
+      val merge = Class.forName(MergeObject, true, classes)
+      Right(
+        merge.getMethod("HitSchema").invoke(merge.getField("MODULE$").get(null))
+      )
+    } catch {
+      case thrown: Throwable => Left(thrown)
+    }
 }
