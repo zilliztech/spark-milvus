@@ -288,6 +288,8 @@ def connectClient(l: Versions.SparkLine): Seq[Setting[_]] = Seq(
 
 // Thin candidates preserve module boundaries for downstream compilation. Their
 // POMs and manifests receive release coordinates without changing local modules.
+// Every release line passes the whole closure and exports its spark module;
+// only ThinArtifacts.sharedModulesLine also exports the four modules below it.
 lazy val thinReleaseSettings: Seq[Setting[_]] =
   ThinArtifacts.settings("spark", Versions.selected.javaRelease) ++ Seq(
     releaseThinArtifacts / aggregate := false,

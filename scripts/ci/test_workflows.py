@@ -392,11 +392,15 @@ class WorkflowGateTest(unittest.TestCase):
         jobs = workflow("build-artifacts.yml")["jobs"]
         steps = jobs["jvm"]["steps"]
         export = next(step for step in steps if "releaseThinArtifacts" in step.get("run", ""))
-        self.assertEqual(export["if"], "matrix.line == '4.0'")
-        self.assertEqual(export["env"]["RELEASE_VERSION"], "${{ inputs.version }}")
-        self.assertIn('"-Drelease.version=$RELEASE_VERSION" "spark/releaseThinArtifacts"', export["run"])
+        # Every release line exports its thin Spark module from its own selection.
+        self.assertNotIn("if", export)
+        self.assertEqual(export["env"], {"RELEASE_VERSION": "${{ inputs.version }}",
+                                         "SPARK_LINE": "${{ matrix.line }}",
+                                         "SCALA_VERSION": "${{ matrix.scala }}"})
+        self.assertEqual(export["run"], 'sbt "-DsparkVersion=$SPARK_LINE" "-DscalaVersion=$SCALA_VERSION" '
+                                        '"-Drelease.version=$RELEASE_VERSION" "spark/releaseThinArtifacts"')
         upload = next(step for step in steps if step.get("with", {}).get("name") == "thin-${{ matrix.line }}")
-        self.assertEqual(upload["if"], export["if"])
+        self.assertNotIn("if", upload)
         self.assertEqual(upload["with"]["path"], "target/release-thin/${{ matrix.line }}/")
         self.assertEqual(upload["with"]["if-no-files-found"], "error")
         self.assertLess(steps.index(export), steps.index(upload))

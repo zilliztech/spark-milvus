@@ -16,14 +16,14 @@ Jenkins.
 | Native platforms | `linux-x86_64`, `linux-aarch64`, `darwin-aarch64` |
 | Native build hosts | Ubuntu 22.04 on each Linux architecture, GCC 12 including gfortran; macOS 15 on Apple silicon, Apple clang 17 |
 | Consumer hosts | Ubuntu 22.04 and 24.04 on each Linux architecture; macOS 14 and 15 on Apple silicon |
-| Entry points | Universal and platform-specific coordinates; Spark 4.0 also has a thin module coordinate |
+| Entry points | Universal, platform-specific and thin module coordinates for each line |
 | Container image | `milvusdb/spark-milvus:<version>-spark4.0` for `linux/amd64` and `linux/arm64`, Spark 4.0.1, Scala 2.13, Java 21 |
 
 The twelve consumer jobs cover both Spark lines, the three native platforms and
-both OS versions of each platform. Each job tests both entry points against the
-same candidate; Spark 4.0 jobs also test the thin modules with a separate native
-bundle. Each platform's native JAR is built once on its build host and reused on
-both OS versions. A failed platform or consumer blocks publication.
+both OS versions of each platform. Each job tests both entry points and its
+line's thin modules against the same candidate, the thin modules with a separate
+native bundle. Each platform's native JAR is built once on its build host and
+reused on both OS versions. A failed platform or consumer blocks publication.
 
 The Spark 4.0 connector compiles against 4.0.0 and is tested with 4.0.1;
 the 4.2 connector compiles and runs against 4.2.0. Export metadata records the
@@ -110,15 +110,21 @@ also carry their provenance and license material.
 
 ### Thin modules for downstream libraries
 
-`com.zilliz:spark-milvus-4.0-thin_2.13` contains the Spark connector classes.
-Its POM resolves `spark-milvus-core_2.13`,
+`com.zilliz:spark-milvus-<line>-thin_2.13`, for example
+`spark-milvus-4.2-thin_2.13`, contains the Spark connector classes compiled for
+that line. Its POM resolves `spark-milvus-core_2.13`,
 `spark-milvus-native-storage_2.13`, `spark-milvus-native-runtime` and
-`spark-milvus-native-vector`. All five artifacts use the same candidate version. Each has a POM, binary,
-sources and Javadoc; `native-vector` includes the pinned Knowhere Java API.
+`spark-milvus-native-vector`. These four lower-level modules carry no Spark
+line: a release publishes them once, and both lines' thin modules depend on the
+same files. All six artifacts use the same candidate version. Each has a POM,
+binary, sources and Javadoc; `native-vector` includes the pinned Knowhere Java
+API.
 The exported POMs preserve module boundaries and resolve external dependencies.
 The Spark module marks dependencies supplied by Spark as `provided`; the four
 lower-level modules retain their declared scopes so their compile dependencies
-remain available to downstream libraries without Spark.
+remain available to downstream libraries without Spark. Their POMs come from the
+Spark 4.0 export, the line whose Arrow API they compile against, and carry the
+library versions that line resolves.
 
 Thin is a packaging choice, not another implementation or a new sbt project.
 Downstream code compiles against these JARs without copying connector sources.
@@ -182,7 +188,7 @@ sbt -DsparkVersion=4.0 -DscalaVersion=2.13.16 "-Drelease.version=$release_versio
 # Restart sbt and clean module products before changing the selected line.
 sbt -DsparkVersion=4.2 -DscalaVersion=2.13.16 "-Drelease.version=$release_version" \
   "native-runtime/clean; native-storage/clean; native-vector/clean; core/clean; spark/clean; integration/clean" \
-  "spark/releaseJvmArtifacts"
+  "spark/releaseJvmArtifacts" "spark/releaseThinArtifacts"
 ```
 
 Each selected JVM task writes `target/release-jvm/<line>` with binary, sources,
@@ -190,10 +196,14 @@ Javadoc and `artifact.json`. Module clean does not remove these release exports;
 root `clean` does, so retain/stage completed exports before using root clean.
 The tasks neither select nor compile a native bundle.
 
-The 4.0 thin task writes five module exports and `thin-artifacts.json` to
-`target/release-thin/4.0`. It does not enable direct sbt publication. The verifier
-checks the POM closure, duplicate coordinates/classes,
-upstream APIs, source pins and absence of embedded platform resources.
+Each thin task writes its module exports and `thin-artifacts.json` to
+`target/release-thin/<line>`. The 4.0 export holds the four shared modules and
+`spark-milvus-4.0-thin_2.13`; the 4.2 export holds only
+`spark-milvus-4.2-thin_2.13`. Both tasks check their line's whole five-module
+closure for duplicate classes. They do not enable direct sbt publication. The
+verifier checks each line's POM closure, duplicate coordinates/classes,
+upstream APIs, source pins and absence of embedded platform resources, and
+rejects a second copy of the shared modules.
 
 Build on **each** Ubuntu 22.04 architecture; change `native_platform` to match
 the host. Do not use a newer OS to produce the older-baseline binary.
@@ -219,6 +229,7 @@ directory once, then stage the complete candidate:
 cp -R target/release-jvm/4.0 target/release-inputs/jvm-4.0
 cp -R target/release-jvm/4.2 target/release-inputs/jvm-4.2
 cp -R target/release-thin/4.0 target/release-inputs/thin-4.0
+cp -R target/release-thin/4.2 target/release-inputs/thin-4.2
 python3 scripts/release.py stage --plan target/release-plan.json \
   --inputs target/release-inputs --output target/release-candidate
 python3 scripts/release.py verify --candidate target/release-candidate
@@ -230,13 +241,14 @@ public submodule pins, matrix, Maven paths and SHA-256 digests. Staging checks t
 JVM exports, native provenance, sidecar checksums and matching ABI reports.
 
 For downstream development, a thin-only candidate uses the same staging and
-verification code, without rebuilding native artifacts:
+verification code, without rebuilding native artifacts. It takes the thin
+exports of both lines:
 
 ```bash
 python3 scripts/release.py plan --matrix target/build-matrix.json --version "$release_version" --thin-only \
   --output target/thin-plan.json
 python3 scripts/release.py stage --plan target/thin-plan.json \
-  --inputs target/release-thin/4.0 --output target/thin-candidate
+  --inputs target/release-thin --output target/thin-candidate
 python3 scripts/release.py verify --candidate target/thin-candidate
 ```
 
@@ -264,7 +276,7 @@ python3 scripts/ci/consumer_smoke.py --candidate target/release-candidate \
 The script installs the matching PySpark distribution, creates a separate sbt
 project containing only the smoke fixtures, and resolves production classes
 from the candidate. It runs real `spark-submit --packages` for both entry types
-and the Spark 4.0 thin coordinate, with fresh dependency caches and no Maven
+and the line's thin coordinate, with fresh dependency caches and no Maven
 local fallback. The thin run adds its matching native bundle via `--jars`.
 Resolved JAR digests and native platform sets must
 match the manifest. No implementation source is compiled into the fixture JAR.

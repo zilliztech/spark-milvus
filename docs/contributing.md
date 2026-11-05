@@ -59,10 +59,10 @@ checks cover all retained main/test roots, including unselected shims.
 
 Use `spark/assembly` with a selected native bundle for a local fat JAR. All
 lines use the same merge/shading rules and leave Spark-supplied Arrow/Jackson
-modules out. Published candidates use `spark/releaseJvmArtifacts` and, for 4.0,
-`spark/releaseThinArtifacts`; root `assembly` and direct root publication have
-been retired. See [the release guide](releasing.md) for supported release lines
-and final artifact validation.
+modules out. Published candidates use `spark/releaseJvmArtifacts` and
+`spark/releaseThinArtifacts` on each release line; root `assembly` and direct
+root publication have been retired. See [the release guide](releasing.md) for
+supported release lines and final artifact validation.
 
 ## Imports
 
