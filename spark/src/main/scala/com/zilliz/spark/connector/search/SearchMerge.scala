@@ -7,10 +7,10 @@ import scala.reflect.ClassTag
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
 import org.apache.spark.resource.ResourceProfile
-import org.apache.spark.sql.{DataFrame, Encoders, Row, SparkSession}
+import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{LongType, StructField, StructType}
 import org.apache.spark.HashPartitioner
 
 import com.zilliz.milvus.storage.schema.MetricType
@@ -35,8 +35,22 @@ private[search] object SearchMerge {
 
   /** Each query's selected row addresses. Scores are needed only until the
     * global top-k is settled; the take reads the selected addresses.
+    *
+    * The fields are written out because executors initialize this object too,
+    * when a task deserializes one of its closures. Deriving them from a case
+    * class with `Encoders.product` runs Scala reflection, which looks classes
+    * up through the task's context class loader; under Spark Connect that
+    * loader asks the driver for every name it lacks, and one failed request, as
+    * when the task is interrupted, fails the initialization for the executor's
+    * lifetime.
     */
-  val HitSchema: StructType = Encoders.product[SearchHit].schema
+  val HitSchema: StructType = StructType(
+    Seq(
+      StructField(SearchQueries.IdColumn, LongType, nullable = false),
+      StructField("_segment_id", LongType, nullable = false),
+      StructField("_row_offset", LongType, nullable = false)
+    )
+  )
 
   /** The hit columns when some query is required to appear without a hit: the
     * columns of the hit are NULL in its row.
@@ -410,10 +424,3 @@ private[search] object SearchMerge {
     )
   }
 }
-
-/** A selected row address associated with its query. */
-private[search] case class SearchHit(
-    query_id: Long,
-    _segment_id: Long,
-    _row_offset: Long
-)
