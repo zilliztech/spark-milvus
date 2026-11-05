@@ -131,18 +131,17 @@ def main_jars(manifest):
 
 def expected_artifacts(manifest, line, platform, entry):
     if entry == "thin":
-        if line != "4.0":
-            raise ValueError("Thin consumer currently supports only Spark 4.0")
+        # Every line's thin module resolves the same four shared modules.
+        entry_id = f"spark-milvus-{line}-thin_2.13"
         names = {
             "spark-milvus-native-runtime", "spark-milvus-native-vector",
-            "spark-milvus-native-storage_2.13", "spark-milvus-core_2.13",
-            "spark-milvus-4.0-thin_2.13",
+            "spark-milvus-native-storage_2.13", "spark-milvus-core_2.13", entry_id,
         }
         available = main_jars(manifest)
         missing = names - available.keys()
         if missing:
             raise ValueError("Candidate is missing thin artifacts: " + ", ".join(sorted(missing)))
-        return "spark-milvus-4.0-thin_2.13", {name: available[name] for name in names}
+        return entry_id, {name: available[name] for name in names}
     suffix = "" if entry == "universal" else "-" + platform
     entry_id = f"spark-milvus-{line}{suffix}_2.13"
     names = {entry_id, f"spark-milvus-{line}-jvm_2.13"}
@@ -340,7 +339,7 @@ def smoke(candidate, line, platform, output, *, central=False, entry=None, nativ
         entries = ("thin",)
     else:
         entries = ("universal", "platform")
-        if line == "4.0" and "spark-milvus-4.0-thin_2.13" in main_jars(manifest):
+        if f"spark-milvus-{line}-thin_2.13" in main_jars(manifest):
             entries += ("thin",)
     if native_bundle is not None and entries != ("thin",):
         raise ValueError("--native-bundle requires --entry thin or a thin-only candidate")
