@@ -124,24 +124,35 @@ class ConsumerTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Resolved native platforms"):
             consumer.check_resolved(self.ivy, expected)
 
+    SHARED_THIN = {"spark-milvus-native-runtime", "spark-milvus-native-vector",
+                   "spark-milvus-native-storage_2.13", "spark-milvus-core_2.13"}
+
     def thin_manifest(self):
         names = ("native-runtime", "native-vector", "native-storage_2.13",
-                 "core_2.13", "4.0-thin_2.13")
+                 "core_2.13", "4.0-thin_2.13", "4.2-thin_2.13")
         return {"plan": {"distribution": "thin", "native": []},
                 "artifacts": [self.jar("spark-milvus-" + name) for name in names]}
 
     def test_thin_resolves_modules_without_a_platform_or_fat_jar(self):
-        manifest = self.thin_manifest()
-        entry, expected = consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "thin")
-        self.assertEqual(entry, "spark-milvus-4.0-thin_2.13")
-        self.assertEqual(len(consumer.check_resolved(self.ivy, expected)), 5)
-        self.jar("spark-milvus-4.0-jvm_2.13")
-        with self.assertRaisesRegex(RuntimeError, "different connector artifacts"):
-            consumer.check_resolved(self.ivy, expected)
+        for line, other in (("4.0", "4.2"), ("4.2", "4.0")):
+            with self.subTest(line=line):
+                manifest = self.thin_manifest()
+                entry, expected = consumer.expected_artifacts(manifest, line, "linux-x86_64", "thin")
+                self.assertEqual(entry, f"spark-milvus-{line}-thin_2.13")
+                # Both lines resolve the same shared modules below their own Spark module.
+                self.assertEqual(set(expected), self.SHARED_THIN | {entry})
+                self.keep(expected)
+                self.assertEqual(len(consumer.check_resolved(self.ivy, expected)), 5)
+                for extra in (f"spark-milvus-{line}-jvm_2.13", f"spark-milvus-{other}-thin_2.13"):
+                    self.jar(extra)
+                    with self.assertRaisesRegex(RuntimeError, "different connector artifacts"):
+                        consumer.check_resolved(self.ivy, expected)
+                    self.keep(expected)
 
     def test_thin_rejects_native_resources_in_transitive_dependencies(self):
         manifest = self.thin_manifest()
         _, expected = consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "thin")
+        self.keep(expected)
         with zipfile.ZipFile(self.ivy / "jars/other.group_bad.jar", "w") as archive:
             archive.writestr("native/milvus/1/linux-x86_64/manifest.properties", "format.version=1")
         with self.assertRaisesRegex(RuntimeError, "Resolved native platforms"):
@@ -152,10 +163,13 @@ class ConsumerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "needs --native-bundle"):
             consumer.thin_native_bundle(self.root, manifest, "linux-x86_64")
         manifest["artifacts"].pop()
-        with self.assertRaisesRegex(ValueError, "missing thin artifacts"):
-            consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "thin")
-        with self.assertRaisesRegex(ValueError, "only Spark 4.0"):
+        with self.assertRaisesRegex(ValueError, "missing thin artifacts: spark-milvus-4.2-thin_2.13$"):
             consumer.expected_artifacts(manifest, "4.2", "linux-x86_64", "thin")
+        consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "thin")
+        manifest["artifacts"] = [item for item in manifest["artifacts"]
+                                 if item["artifactId"] != "spark-milvus-core_2.13"]
+        with self.assertRaisesRegex(ValueError, "missing thin artifacts: spark-milvus-core_2.13$"):
+            consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "thin")
 
     def test_ivy_resolvers_do_not_use_maven_local(self):
         path = self.root / "ivysettings.xml"
@@ -206,7 +220,7 @@ class ConsumerDiagnosticsTest(unittest.TestCase):
         self.environment.start()
         self.addCleanup(self.environment.stop)
 
-    def simulate(self, *, fail=False):
+    def simulate(self, *, fail=False, line="4.0", native=None):
         commands = []
         spark_home = None
 
@@ -247,13 +261,14 @@ class ConsumerDiagnosticsTest(unittest.TestCase):
              mock.patch.object(consumer, "fixture_resources", return_value={"read-fixtures/test": "a" * 64}), \
              mock.patch.object(consumer, "expected_artifacts", side_effect=lambda *args: (args[-1], {})), \
              mock.patch.object(consumer, "check_resolved", return_value={}), \
+             mock.patch.object(consumer, "thin_native_bundle", return_value=native), \
              mock.patch.object(consumer.sys, "platform", "linux"), \
              mock.patch.object(consumer.os, "uname", return_value=mock.Mock(machine="x86_64")):
             if fail:
                 with self.assertRaisesRegex(RuntimeError, "^original consumer failure$"):
-                    consumer.smoke(self.candidate, "4.0", "linux-x86_64", self.output)
+                    consumer.smoke(self.candidate, line, "linux-x86_64", self.output)
             else:
-                consumer.smoke(self.candidate, "4.0", "linux-x86_64", self.output)
+                consumer.smoke(self.candidate, line, "linux-x86_64", self.output)
         self.assertFalse(spark_home.exists(), "temporary Spark installation must be removed")
         return commands
 
@@ -291,6 +306,26 @@ class ConsumerDiagnosticsTest(unittest.TestCase):
             self.assertEqual(entry["executed"], len(consumer.REQUIRED_CHECKS))
             self.assertEqual(entry["passed"], entry["executed"])
             self.assertEqual((entry["failed"], entry["canceled"]), (0, 0))
+
+    def test_each_line_also_consumes_its_thin_module_with_a_separate_native_bundle(self):
+        native = self.root / "milvus-native-linux-x86_64.jar"
+        native.write_bytes(b"native bundle")
+        for line, spark in (("4.0", "4.0.1"), ("4.2", "4.2.0")):
+            with self.subTest(line=line):
+                (self.candidate / "release-manifest.json").write_text(json.dumps({
+                    "version": "2.0.0", "plan": {"jvm": [{"line": line, "spark": spark}]},
+                    "artifacts": [{"artifactId": f"spark-milvus-{line}-thin_2.13",
+                                   "extension": "jar", "classifier": ""}],
+                }))
+                commands = self.simulate(line=line, native=native)
+                self.assertEqual(len(commands), 3)
+                self.assertNotIn("--jars", commands[0] + commands[1])
+                self.assertEqual(commands[2][commands[2].index("--jars") + 1], str(native))
+                report = json.loads((self.output / "consumer-result.json").read_text())
+                self.assertEqual(report["line"], line)
+                self.assertEqual([entry["entry"] for entry in report["entries"]],
+                                 ["universal", "platform", "thin"])
+                self.assertEqual(report["entries"][2]["nativeBundle"]["sha256"], consumer.digest(native))
 
     def test_required_check_evidence_rejects_missing_duplicate_and_canceled_work(self):
         lines = [f"MILVUS_CHECK\t{name}\tpassed" for name in consumer.REQUIRED_CHECKS]

@@ -306,11 +306,14 @@ jobs:
           SPARK_LINE: ${{ matrix.line }}
           SCALA_VERSION: ${{ matrix.scala }}
         run: sbt "-DsparkVersion=$SPARK_LINE" "-DscalaVersion=$SCALA_VERSION" "-Drelease.version=$RELEASE_VERSION" "spark/releaseJvmArtifacts"
-      - name: Export transitive thin modules for Spark 4.0
-        if: matrix.line == '4.0'
+      # Every line exports its thin Spark module; the Spark 4.0 export also
+      # carries the four modules below it, which a release publishes once.
+      - name: Export the thin modules without a native bundle
         env:
           RELEASE_VERSION: ${{ inputs.version }}
-        run: sbt -DsparkVersion=4.0 -DscalaVersion=2.13.16 "-Drelease.version=$RELEASE_VERSION" "spark/releaseThinArtifacts"
+          SPARK_LINE: ${{ matrix.line }}
+          SCALA_VERSION: ${{ matrix.scala }}
+        run: sbt "-DsparkVersion=$SPARK_LINE" "-DscalaVersion=$SCALA_VERSION" "-Drelease.version=$RELEASE_VERSION" "spark/releaseThinArtifacts"
       - uses: actions/upload-artifact@v4
         with:
           name: jvm-${{ matrix.line }}
@@ -319,7 +322,6 @@ jobs:
           compression-level: 0
           retention-days: 14
       - uses: actions/upload-artifact@v4
-        if: matrix.line == '4.0'
         with:
           name: thin-${{ matrix.line }}
           path: target/release-thin/${{ matrix.line }}/

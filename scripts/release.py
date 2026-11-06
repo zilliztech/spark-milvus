@@ -37,12 +37,20 @@ SDK_PACKAGES = ("io/milvus/client/", "io/milvus/v2/", "io/milvus/param/", "io/mi
 
 VERSION = re.compile(r"2\.\d+\.\d+(?:-[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*)?")
 SHA = re.compile(r"[0-9a-f]{40}")
-THIN_MODULES = {
+RELEASE_LINES = ("4.0", "4.2")
+# The modules below the Spark layer carry no Spark line in their coordinates, so
+# a release publishes them once. They come from the Spark 4.0 thin export, the
+# line their Arrow API compiles against; every line's Spark module depends on
+# those same files.
+SHARED_THIN_LINE = "4.0"
+SHARED_THIN_MODULES = {
     "spark-milvus-native-runtime": ("native-runtime", ()),
     "spark-milvus-native-storage_2.13": ("native-storage", ("spark-milvus-native-runtime",)),
     "spark-milvus-native-vector": ("native-vector", ("spark-milvus-native-runtime",)),
     "spark-milvus-core_2.13": ("core", ("spark-milvus-native-storage_2.13", "spark-milvus-native-vector")),
-    "spark-milvus-4.0-thin_2.13": ("spark", ("spark-milvus-core_2.13",)),
+}
+THIN_MODULES = SHARED_THIN_MODULES | {
+    f"spark-milvus-{line}-thin_2.13": ("spark", ("spark-milvus-core_2.13",)) for line in RELEASE_LINES
 }
 MAVEN_FILES = {(classifier, extension) for classifier, extension in
                (("", "jar"), ("sources", "jar"), ("javadoc", "jar"), ("", "pom"))}
@@ -146,10 +154,12 @@ def validate_plan(plan):
             "Empty or duplicate native matrix")
     require(set(native) <= set(NATIVE_PLATFORMS), "Unsupported native release platform")
     require(lines and len(set(lines)) == len(lines), "Empty or duplicate JVM matrix")
-    require(set(lines) <= {"4.0", "4.2"}, "Unsupported JVM release line")
+    require(set(lines) <= set(RELEASE_LINES), "Unsupported JVM release line")
+    require(SHARED_THIN_LINE in lines,
+            f"Release plan must contain Spark {SHARED_THIN_LINE}, whose thin export carries the shared modules")
     if distribution == "thin":
-        require(not native and lines == ["4.0"] and not plan.get("consumer"),
-                "Thin-only plan must contain Spark 4.0 and no native consumer matrix")
+        require(not native and not plan.get("consumer"),
+                "Thin-only plan must contain no native or consumer matrix")
     for item in plan["native"]:
         baseline = system_baseline(item["platform"])
         require(all(item.get(field) == value for field, value in baseline.items()),
@@ -170,7 +180,6 @@ def create_plan(version, output, matrix, thin_only=False):
     if thin_only:
         plan["distribution"] = "thin"
         plan["native"] = []
-        plan["jvm"] = [item for item in plan["jvm"] if item["line"] == "4.0"]
     plan["sourceSha"] = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     plan["pins"] = {}
@@ -317,8 +326,8 @@ def small_jar(path, readme, license_bytes):
 
 
 def expected_artifacts(plan):
-    thin = {artifact: ("thin", "4.0", None) for artifact in THIN_MODULES
-            if any(item["line"] == "4.0" for item in plan["jvm"])}
+    thin = {artifact: ("thin", None, None) for artifact in SHARED_THIN_MODULES}
+    thin.update({f"spark-milvus-{item['line']}-thin_2.13": ("thin", item["line"], None) for item in plan["jvm"]})
     if plan.get("distribution") == "thin":
         return thin
     result = {f"spark-milvus-native-{item['platform']}": ("native", None, item["platform"])
@@ -342,24 +351,27 @@ def entry_dependencies(plan, line, platform):
             for name in names]
 
 
-def thin_metadata(data, plan):
-    line = next((item for item in plan["jvm"] if item["line"] == "4.0"), None)
-    require(line is not None, "Thin modules require Spark 4.0 in the release plan")
+def thin_metadata(data, plan, line):
+    """Check one Spark line's thin export and return its modules by artifact ID."""
+    row = next((item for item in plan["jvm"] if item["line"] == line), None)
+    require(row is not None, f"Thin modules require Spark {line} in the release plan")
     require(data.get("schemaVersion") == 1 and data.get("kind") == "thin",
             "Unsupported thin artifact metadata")
     require(all(data.get(key) == plan[key] for key in ("groupId", "version", "sourceSha"))
-            and data.get("sparkLine") == "4.0"
-            and data.get("scalaVersion") == line["scala"] and data.get("scalaBinaryVersion") == "2.13",
+            and data.get("sparkLine") == line
+            and data.get("scalaVersion") == row["scala"] and data.get("scalaBinaryVersion") == "2.13",
             "Thin build identity mismatch")
     # The published API compiles against the line's compatibility floor; the
     # consumer matrix may use a newer maintenance release of that same line.
-    versions = [data.get("sparkVersion", ""), line["spark"]]
-    require(all(re.fullmatch(r"4\.0\.(?:0|[1-9][0-9]*)", version) for version in versions)
+    versions = [data.get("sparkVersion", ""), row["spark"]]
+    require(all(re.fullmatch(re.escape(line) + r"\.(?:0|[1-9][0-9]*)", version) for version in versions)
             and tuple(map(int, versions[0].split("."))) <= tuple(map(int, versions[1].split("."))),
             "Thin Spark build version must match the line and not exceed the consumer version")
+    # Only the shared line's export carries the shared modules.
+    expected = {f"spark-milvus-{line}-thin_2.13"} | (set(SHARED_THIN_MODULES) if line == SHARED_THIN_LINE else set())
     modules = data.get("modules", [])
-    require(len(modules) == len(THIN_MODULES)
-            and {module["artifactId"] for module in modules} == set(THIN_MODULES),
+    require(len(modules) == len(expected)
+            and {module["artifactId"] for module in modules} == expected,
             "Missing or duplicate thin module GAV")
     for module in modules:
         artifact = module["artifactId"]
@@ -408,7 +420,7 @@ def verify_thin_pom(artifact, dependencies, module, plan, spark_build_version):
         expected = {(dep["groupId"], dep["artifactId"], dep["version"]) for dep in declared}
         require(actual == expected and len(declared) == len(expected),
                 f"Thin POM dependencies differ from build metadata: {artifact} ({scope})")
-    if artifact == "spark-milvus-4.0-thin_2.13":
+    if THIN_MODULES[artifact][0] == "spark":
         spark = {dep["artifactId"]: dep for dep in dependencies if dep["groupId"] == "org.apache.spark"}
         require(set(spark) >= {"spark-core_2.13", "spark-sql_2.13", "spark-catalyst_2.13"},
                 "Thin Spark POM is missing provided Spark dependencies")
@@ -416,7 +428,8 @@ def verify_thin_pom(artifact, dependencies, module, plan, spark_build_version):
                     for dep in spark.values()), "Thin Spark dependencies must use the provided Spark build version")
 
 
-def verify_thin_jar(path, artifact, plan, classes):
+def verify_thin_jar(path, artifact, plan):
+    """Check one thin JAR and return its classes for the per-line duplicate check."""
     with zipfile.ZipFile(path) as archive:
         names = archive_names(archive)
         require(not any(name.startswith("native/") or name.endswith((".so", ".dylib", ".dll")) or ".so." in name
@@ -430,14 +443,26 @@ def verify_thin_jar(path, artifact, plan, classes):
         require(own_classes, f"Thin JAR is missing implementation classes: {artifact}")
         if artifact == "spark-milvus-native-vector":
             require("io/knowhere/Knowhere.class" in own_classes, "Thin JAR is missing the Knowhere Java API")
-        for name in own_classes:
-            require(name not in classes, f"Duplicate thin class: {name} in {artifact} and {classes.get(name)}")
-            classes[name] = artifact
         if artifact == "spark-milvus-native-runtime":
             expected = properties(archive.read(COMPATIBILITY))
             require(expected == {"format.version": "1", "storage.revision": plan["pins"]["milvus-storage"],
                                  "knowhere.revision": plan["pins"]["knowhere"]},
                     "Thin/native compatibility identity mismatch")
+        return own_classes
+
+
+def verify_thin_classes(classes, plan):
+    """Each line resolves the shared modules and its own Spark module.
+
+    The Spark modules of different lines hold the same class names; within one
+    line's closure every class has exactly one owner.
+    """
+    for item in plan["jvm"]:
+        owners = {}
+        for artifact in [*SHARED_THIN_MODULES, f"spark-milvus-{item['line']}-thin_2.13"]:
+            for name in sorted(classes[artifact]):
+                require(name not in owners, f"Duplicate thin class: {name} in {artifact} and {owners.get(name)}")
+                owners[name] = artifact
 
 
 def stage(plan_path, inputs, output):
@@ -527,15 +552,16 @@ def stage(plan_path, inputs, output):
                 record(artifact, "entry", content=pom_bytes(artifact, plan, deps), extension="pom", line=line, platform=platform)
                 document_jars(artifact, "entry", f"# {artifact}\n\nMaven dependency entry; implementation and native "
                     "resources are provided by the dependencies in this artifact's POM.\n", line=line, platform=platform, main=True)
-        thin_exports = list(inputs.rglob("thin-artifacts.json"))
-        has_thin = any(item["line"] == "4.0" for item in plan["jvm"])
-        require(len(thin_exports) == int(has_thin), "Expected exactly one thin module export for Spark 4.0")
-        if has_thin:
-            metadata_path = thin_exports[0]
-            data = json.loads(metadata_path.read_text())
-            modules = thin_metadata(data, plan)
-            manifest["thin"] = data | {"modules": [{key: value for key, value in module.items() if key != "files"}
-                                                  for module in modules.values()]}
+        thin_exports = [(path, json.loads(path.read_text())) for path in inputs.rglob("thin-artifacts.json")]
+        manifest["thin"] = []
+        for item in plan["jvm"]:
+            line = item["line"]
+            matches = [export for export in thin_exports if export[1].get("sparkLine") == line]
+            require(len(matches) == 1, f"Expected exactly one thin module export for Spark {line}")
+            metadata_path, data = matches[0]
+            modules = thin_metadata(data, plan, line)
+            manifest["thin"].append(data | {"modules": [{key: value for key, value in module.items() if key != "files"}
+                                                       for module in modules.values()]})
             for artifact, module in modules.items():
                 files = module.get("files", [])
                 require(len(files) == len(MAVEN_FILES)
@@ -546,7 +572,8 @@ def stage(plan_path, inputs, output):
                     require(digest(source) == file["sha256"] and source.stat().st_size == file["size"],
                             "Thin build checksum mismatch")
                     record(artifact, "thin", source=source, classifier=file["classifier"],
-                           extension=file["extension"], line="4.0")
+                           extension=file["extension"], line=None if artifact in SHARED_THIN_MODULES else line)
+        require(len(thin_exports) == len(plan["jvm"]), "Unexpected thin module export")
         for file in manifest["artifacts"]:
             path = repository / file["path"]
             for algorithm in ("md5", "sha1", "sha256", "sha512"):
@@ -567,8 +594,15 @@ def verify(candidate):
     files = manifest["artifacts"]
     require(len({file["path"] for file in files}) == len(files), "Duplicate candidate file")
     expected = expected_artifacts(plan)
-    thin_modules = thin_metadata(manifest.get("thin", {}), plan) if any(
-        role[0] == "thin" for role in expected.values()) else {}
+    exports = {data.get("sparkLine"): data for data in manifest.get("thin", [])}
+    require(len(exports) == len(manifest.get("thin", [])) == len(plan["jvm"]),
+            "Candidate thin exports differ from the release lines")
+    # Artifact -> (module metadata, Spark build version of the export that carries it).
+    thin_modules = {}
+    for item in plan["jvm"]:
+        data = exports.get(item["line"], {})
+        for artifact, module in thin_metadata(data, plan, item["line"]).items():
+            thin_modules[artifact] = (module, data["sparkVersion"])
     thin_classes = {}
     slots = {(artifact, classifier, extension) for artifact in expected
              for classifier, extension in MAVEN_FILES}
@@ -600,15 +634,15 @@ def verify(candidate):
             if file["kind"] == "entry":
                 require(deps == entry_dependencies(plan, file["line"], file["platform"]), "Wrong entry dependency graph")
             elif file["kind"] == "thin":
-                verify_thin_pom(file["artifactId"], deps, thin_modules[file["artifactId"]], plan,
-                                manifest["thin"]["sparkVersion"])
+                module, spark_build_version = thin_modules[file["artifactId"]]
+                verify_thin_pom(file["artifactId"], deps, module, plan, spark_build_version)
         elif file["classifier"] == "sources":
             verify_sources(path, file["kind"], file["artifactId"])
         elif not file["classifier"]:
             if file["kind"] == "jvm":
                 verify_jvm(path, plan)
             elif file["kind"] == "thin":
-                verify_thin_jar(path, file["artifactId"], plan, thin_classes)
+                thin_classes[file["artifactId"]] = verify_thin_jar(path, file["artifactId"], plan)
             elif file["kind"] == "native":
                 verify_native(path, plan, file["platform"])
                 abi = manifest["nativeAbi"][file["platform"]]
@@ -624,6 +658,7 @@ def verify(candidate):
                     names = archive_names(archive)
                     require(not any(name.endswith(".class") or name.startswith("native/") for name in names),
                             "Entry JAR contains implementation")
+    verify_thin_classes(thin_classes, plan)
     actual_paths = {str(path.relative_to(repository)) for path in repository.rglob("*") if path.is_file()}
     require(actual_paths == expected_paths, "Candidate repository contains untracked files")
     return manifest
@@ -919,7 +954,7 @@ def main():
     plan.add_argument("--matrix", type=Path, required=True,
                       help="Versions exportBuildMatrix JSON; release lines have one source of truth")
     plan.add_argument("--thin-only", action="store_true",
-                      help="Export a Spark 4.0 thin-only plan for separate module consumption checks")
+                      help="Export a thin-only plan of the release lines for separate module consumption checks")
     staging = commands.add_parser("stage")
     staging.add_argument("--plan", type=Path, required=True)
     staging.add_argument("--inputs", type=Path, required=True)

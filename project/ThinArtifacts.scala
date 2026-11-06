@@ -14,9 +14,17 @@ import sbt.Keys._
   */
 object ThinArtifacts {
   val releaseThinArtifacts = taskKey[Seq[File]](
-    "Export Spark 4.0 thin module JARs, sources, documentation, POMs and metadata"
+    "Export the selected Spark line's thin module JARs, sources, documentation, POMs and metadata"
   )
   val thinModule = taskKey[Module]("Collect one module's thin release inputs")
+
+  /** Only the `spark` module's coordinates name a Spark line. The four modules
+    * below it are published once per release, from this line's export: their
+    * Arrow API compiles against it, and their POMs keep the versions it
+    * resolves. Every other release line exports its `spark` module alone, which
+    * depends on those same coordinates.
+    */
+  val sharedModulesLine = "4.0"
 
   final case class Module(
       projectId: String,
@@ -47,8 +55,8 @@ object ThinArtifacts {
     )
   )
 
-  def outputDirectory(root: File): File =
-    root / "target" / "release-thin" / "4.0"
+  def outputDirectory(root: File, line: Versions.SparkLine): File =
+    root / "target" / "release-thin" / line.id
 
   def export(
       root: File,
@@ -68,9 +76,10 @@ object ThinArtifacts {
       sourceSha.matches("[a-f0-9]{40}"),
       "Thin release source must have an exact Git commit"
     )
+    val releaseLines = Versions.releaseConsumers.keys.toSeq.sorted
     require(
-      line.id == "4.0" && scalaBinary == "2.13",
-      "Thin releases currently support Spark 4.0 / Scala 2.13"
+      releaseLines.contains(line.id) && scalaBinary == "2.13",
+      s"Thin releases support Spark ${releaseLines.mkString(" and ")} with Scala 2.13"
     )
     val expected = Set(
       "native-runtime",
@@ -85,7 +94,10 @@ object ThinArtifacts {
         .toSet == expected && modules.size == expected.size,
       "The thin candidate must include the complete five-module closure"
     )
-    val destination = outputDirectory(root)
+    val published =
+      if (line.id == sharedModulesLine) modules
+      else modules.filter(_.projectId == "spark")
+    val destination = outputDirectory(root, line)
     IO.createDirectory(destination)
     val work = destination / "export-work"
     IO.delete(work)
@@ -121,19 +133,44 @@ object ThinArtifacts {
       .map { case (key, candidates) =>
         key -> candidates.head
       }
-    val exported = modules.map { module =>
-      val artifact = names(module.projectId)
-      val directory = destination / artifact
-      IO.createDirectory(directory)
-      val stem = s"$artifact-$version"
+    // A consumer resolves the whole closure, so every line checks it for
+    // duplicate classes, including the shared modules it does not export.
+    val binaryInputs = modules.map { module =>
       val moduleWork = work / module.projectId
-      val binaryInputs = unpack(module.binary, moduleWork / "binary")
+      val moduleInputs = unpack(module.binary, moduleWork / "binary")
       val apiInputs =
         if (module.projectId == "native-vector")
           unpack(knowhereApi, moduleWork / "knowhere-api").filterNot(
             _._2 == "META-INF/MANIFEST.MF"
           )
         else Seq.empty
+      module.projectId -> (moduleInputs ++ apiInputs)
+    }.toMap
+    val duplicates = binaryInputs.toSeq
+      .flatMap { case (projectId, inputs) =>
+        inputs
+          .map(_._2)
+          .filter(_.endsWith(".class"))
+          .distinct
+          .map(_ -> names(projectId))
+      }
+      .groupBy(_._1)
+      .collect {
+        case (name, owners) if owners.size > 1 =>
+          s"$name: ${owners.map(_._2).sorted.mkString(", ")}"
+      }
+      .toSeq
+      .sorted
+    require(
+      duplicates.isEmpty,
+      s"Thin modules contain duplicate classes: ${duplicates.mkString("; ")}"
+    )
+    val exported = published.map { module =>
+      val artifact = names(module.projectId)
+      val directory = destination / artifact
+      IO.createDirectory(directory)
+      val stem = s"$artifact-$version"
+      val moduleWork = work / module.projectId
       val manifestFile = moduleWork / "binary" / "META-INF" / "MANIFEST.MF"
       val input = new FileInputStream(manifestFile)
       val manifest =
@@ -151,7 +188,7 @@ object ThinArtifacts {
       try manifest.write(manifestOutput)
       finally manifestOutput.close()
       val binary = directory / s"$stem.jar"
-      ReleaseArtifacts.archive(binaryInputs ++ apiInputs, binary)
+      ReleaseArtifacts.archive(binaryInputs(module.projectId), binary)
       verifyBinary(binary, module.projectId)
 
       val sources = directory / s"$stem-sources.jar"
@@ -197,6 +234,7 @@ object ThinArtifacts {
         resolved,
         module.providedDependencies,
         module.projectId,
+        line,
         sourceSha
       )
       val pomFile = directory / s"$stem.pom"
@@ -245,29 +283,6 @@ object ThinArtifacts {
       )
       metadata -> outputs.map(_._3)
     }
-    val classes = exported.flatMap { case (_, outputs) =>
-      val binary = outputs.head
-      val jar = new JarFile(binary)
-      try
-        jar.entries.asScala
-          .map(_.getName)
-          .filter(_.endsWith(".class"))
-          .map(_ -> binary.getName)
-          .toVector
-      finally jar.close()
-    }
-    val duplicates = classes
-      .groupBy(_._1)
-      .collect {
-        case (name, owners) if owners.size > 1 =>
-          s"$name: ${owners.map(_._2).mkString(", ")}"
-      }
-      .toSeq
-      .sorted
-    require(
-      duplicates.isEmpty,
-      s"Thin modules contain duplicate classes: ${duplicates.mkString("; ")}"
-    )
     val metadata = JSONObject(
       Map(
         "schemaVersion" -> 1,
@@ -297,6 +312,7 @@ object ThinArtifacts {
       resolved: Map[(String, String), ModuleID],
       declaredProvided: Set[(String, String)],
       projectId: String,
+      line: Versions.SparkLine,
       sourceSha: String
   ): Elem = {
     val sparkModule = projectId == "spark"
@@ -377,7 +393,7 @@ object ThinArtifacts {
         "artifactId" -> artifact,
         "version" -> version,
         "name" -> artifact,
-        "description" -> publicationDescription(projectId),
+        "description" -> publicationDescription(projectId, line),
         "url" -> "https://github.com/zilliztech/spark-milvus"
       )
     )
@@ -402,7 +418,10 @@ object ThinArtifacts {
     })
   }
 
-  private def publicationDescription(projectId: String): String = {
+  private def publicationDescription(
+      projectId: String,
+      line: Versions.SparkLine
+  ): String = {
     val purpose = projectId match {
       case "native-runtime" =>
         "Shared native loader and source compatibility checks."
@@ -413,7 +432,7 @@ object ThinArtifacts {
       case "core" =>
         "Milvus V3 schemas, storage formats and read/search computation."
       case "spark" =>
-        "Spark 4.0 read-only DataSource and vector search interfaces."
+        s"Spark ${line.id} read-only DataSource and vector search interfaces."
       case other => sys.error(s"Unknown thin module: $other")
     }
     s"Read-only Spark Milvus thin module. $purpose"
