@@ -453,7 +453,7 @@ class ReleaseTest(unittest.TestCase):
                                 for field, value in release.system_baseline(platform).items()))
         darwin = next(row for row in self.plan["native"] if row["platform"] == "darwin-aarch64")
         self.assertEqual(darwin["runner"], "macos-15")
-        self.assertEqual([host["runner"] for host in darwin["consumers"]], ["macos-14", "macos-15"])
+        self.assertEqual([host["runner"] for host in darwin["consumers"]], ["macos-15"])
         broken = copy.deepcopy(self.plan)
         next(row for row in broken["native"] if row["platform"] == "darwin-aarch64")["macos"] = "13.0"
         with self.assertRaisesRegex(ValueError, "system ABI baseline"):
@@ -725,11 +725,11 @@ class ReleaseTest(unittest.TestCase):
         output = self.root / "actual-plan.json"
         release.create_plan("2.0.0-rc.1", output, self.build_matrix)
         plan = json.loads(output.read_text())
-        # Two Linux platforms with two OS versions and one macOS platform with two,
+        # Two Linux platforms with two OS versions and one macOS platform with one,
         # each across both Spark lines.
-        self.assertEqual(len(plan["consumer"]), 12)
+        self.assertEqual(len(plan["consumer"]), 10)
         self.assertEqual({row["os_version"] for row in plan["consumer"]},
-                         {"ubuntu-22.04", "ubuntu-24.04", "macos-14", "macos-15"})
+                         {"ubuntu-22.04", "ubuntu-24.04", "macos-15"})
         self.assertEqual(set(plan["pins"]), {"milvus-proto", "milvus-storage", "knowhere"})
 
     def test_release_plan_takes_versions_from_the_exported_matrix(self):

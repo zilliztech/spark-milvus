@@ -185,8 +185,9 @@ contents and runs source/spill checks. Shared modules run with their own
 configuration. The default root unit run tests Spark 4.0; other lines receive
 the matrix checks. Push/manual/full-validation CI adds mandatory native
 read/search/Arrow/Connect suites and real object-storage reads on Linux x86_64.
-The twelve independent release consumer jobs cover Spark 4.0/4.2 on the three
-native platforms, each on two supported OS versions.
+The ten independent release consumer jobs cover Spark 4.0/4.2 on the three
+native platforms: two OS versions on each Linux architecture and macOS 15 on
+Apple silicon.
 
 Candidate validation rejects the Milvus SDK and non-release dependencies.
 Native engine bindings retain upstream APIs needed by downstream libraries;
