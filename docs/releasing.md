@@ -15,12 +15,13 @@ Jenkins.
 | Spark / Scala / Java | Spark 4.0.1 and 4.2.0, Scala 2.13.16, JDK 21 |
 | Native platforms | `linux-x86_64`, `linux-aarch64`, `darwin-aarch64` |
 | Native build hosts | Ubuntu 22.04 on each Linux architecture, GCC 12 including gfortran; macOS 15 on Apple silicon, Apple clang 17 |
-| Consumer hosts | Ubuntu 22.04 and 24.04 on each Linux architecture; macOS 14 and 15 on Apple silicon |
+| Consumer hosts | Ubuntu 22.04 and 24.04 on each Linux architecture; macOS 15 on Apple silicon |
 | Entry points | Universal, platform-specific and thin module coordinates for each line |
 | Container image | `milvusdb/spark-milvus:<version>-spark4.0` for `linux/amd64` and `linux/arm64`, Spark 4.0.1, Scala 2.13, Java 21 |
 
-The twelve consumer jobs cover both Spark lines, the three native platforms and
-both OS versions of each platform. Each job tests both entry points and its
+The ten consumer jobs cover both Spark lines, the three native platforms and
+each platform's consumer OS versions: two on each Linux architecture, and macOS 15
+only, since GitHub no longer provides macOS 14 runners. Each job tests both entry points and its
 line's thin modules against the same candidate, the thin modules with a separate
 native bundle. Each platform's native JAR is built once on its build host and
 reused on both OS versions. A failed platform or consumer blocks publication.
@@ -316,7 +317,7 @@ a fixed-input read Job with an existing two-identity Secret.
 | Event | Required work |
 |---|---|
 | Pull request to `main` or a `{major}.{minor}` release branch such as `2.0`, and its merge queue entry | Formatting, Versions-derived five-combination source/POM/source-JAR checks and clean contracts, shared unit tests, the default line's Spark suite, scripts and Helm; existing JVM/thin exports |
-| Push to those branches or manual CI dispatch | The checks above, native builds, mandatory read/search/Arrow/Connect suites, isolated object-storage reads, candidate verification, all twelve consumer jobs, and the Spark 4.0 assembly with a local image build on both Linux architectures |
+| Push to those branches or manual CI dispatch | The checks above, native builds, mandatory read/search/Arrow/Connect suites, isolated object-storage reads, candidate verification, all ten consumer jobs, and the Spark 4.0 assembly with a local image build on both Linux architectures |
 | `v2.x.y-central-test.<digits>` tag | Full CI, signed `USER_MANAGED` upload, Central validation, authenticated byte verification, one consumer job and deployment deletion; no public release |
 | Other accepted `v2.*` release tag | Full CI explicitly enabled, nonempty validated candidate, controlled publication, public Central consumer check, then the Spark 4.0 image on both Linux architectures and its multi-architecture tag |
 
@@ -391,7 +392,7 @@ the native jobs download those artifacts by exact run ID and name. They accept
 them only when the file inventory is regular and complete, the recorded native
 inputs exactly equal the inputs recomputed with the current prepared toolchain,
 and the platform and JAR SHA-256 agree across the sidecar and ABI report. The
-current ABI audit, x86 CPU gate, candidate verification and all twelve consumer
+current ABI audit, x86 CPU gate, candidate verification and all ten consumer
 jobs still run. JVM artifacts and the versioned candidate are rebuilt by the
 tag run. If the exact successful source run is missing or its artifacts no
 longer satisfy these checks, the release fails before entering the protected

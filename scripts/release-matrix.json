@@ -35,7 +35,6 @@
       "libc": "libc++",
       "macos": "14.0",
       "consumers": [
-        {"os_version": "macos-14", "runner": "macos-14"},
         {"os_version": "macos-15", "runner": "macos-15"}
       ]
     }
