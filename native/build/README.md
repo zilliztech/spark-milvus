@@ -22,6 +22,13 @@ revision. The build consumes those recipes without patching or exporting a
 project-owned replacement. Integration-specific link relationships are declared
 on the consuming targets in this project's CMake files. The build does not
 select an unpinned latest release.
+`dependencies.json` also pins the AWS CRT libraries that `aws-sdk-cpp` requires
+transitively (`aws-crt-cpp`, `aws-c-*`, `aws-checksums` and `s2n`), at the
+revisions the last passing native builds resolved. Conan looks in ConanCenter
+before the Milvus remote. In late October 2026 ConanCenter revised
+`aws-c-event-stream/0.7.1` and `aws-checksums/0.2.10` to require
+`aws-c-common/0.14.5`, while the rest of that graph requires 0.14.0, so locking
+the unpinned family fails with a version conflict.
 `profiles/linux-x86_64` and `profiles/linux-aarch64` select GCC 12, C++20 and
 shared host dependencies; the two differ only in `arch`. `profiles/darwin-aarch64`
 and `profiles/darwin-x86_64` select Apple clang and differ in `arch`, the Apple
