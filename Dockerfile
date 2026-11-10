@@ -162,14 +162,10 @@ WORKDIR /workspace
 COPY . .
 
 # Initialize missing submodules without resetting source revisions copied from the build context.
-# Local fetches from Knowhere also check ownership of its separate Git directory.
 # Ubuntu 22.04's Git compares safe.directory against the .git file path.
 RUN git config --global --add safe.directory /workspace && \
     git config --global --add safe.directory /workspace/milvus-proto && \
     git config --global --add safe.directory /workspace/milvus-storage && \
-    git config --global --add safe.directory /workspace/knowhere && \
-    git config --global --add safe.directory /workspace/knowhere/.git && \
-    git config --global --add safe.directory /workspace/.git/modules/knowhere && \
     make init-missing-submodules
 
 # Both Linux architectures build the unified bundle, or take a matching
@@ -210,17 +206,17 @@ RUN --mount=type=cache,id=spark-milvus-coursier,target=/root/.cache/coursier,sha
     entries_file="$(mktemp)"; \
     manifest_file="$(mktemp)"; \
     jar tf "${assembly_jar}" > "${entries_file}"; \
-    resource_prefix="native/milvus/1/${native_platform}/"; \
+    resource_prefix="native/milvus/2/${native_platform}/"; \
     grep -Fqx "${resource_prefix}manifest.properties" "${entries_file}"; \
     unzip -p "${assembly_jar}" "${resource_prefix}manifest.properties" > "${manifest_file}"; \
-    for entry in libmilvus-storage-jni.so libknowhere_jni.so; do \
+    for entry in libmilvus-storage-jni.so; do \
         if ! grep -Fqx "${resource_prefix}${entry}" "${entries_file}"; then \
             canonical="$(awk -F= -v key="alias.${entry}" '$1 == key { print $2 }' "${manifest_file}")"; \
             test -n "${canonical}"; \
             grep -Fqx "${resource_prefix}${canonical}" "${entries_file}"; \
         fi; \
     done; \
-    if grep -Eq '^native/(knowhere/|linux-[^/]+/)' "${entries_file}"; then \
+    if grep -Eq '^native/linux-[^/]+/' "${entries_file}"; then \
         echo "Assembly contains native resources outside the unified bundle" >&2; \
         exit 1; \
     fi; \

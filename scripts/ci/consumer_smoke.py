@@ -32,8 +32,7 @@ FIXTURE_ROOT = ROOT / "core/src/test/resources/read-fixtures"
 FIXTURE_GROUPS = ("collections/nearest",)
 REQUIRED_CHECKS = (
     "independent-executor", "v3-snapshot", "v3-advanced", "v3-empty",
-    "repeated-actions", "exact-unfiltered", "exact-filtered",
-    "approx-unfiltered", "approx-filtered", "sql-search",
+    "repeated-actions",
 )
 FIXTURE_CLASSES = (
     MAIN.replace(".", "/"), "com/zilliz/milvus/storage/io/ReadFixtures",
@@ -41,13 +40,13 @@ FIXTURE_CLASSES = (
 GROUP = "com.zilliz"
 # Native platform -> the (sys.platform, uname machine) of the host that consumes
 # it; also what tells a platform bundle from the native-runtime, native-storage
-# and native-vector modules, whose names share the prefix.
+# modules, whose names share the prefix.
 HOSTS = {"linux-x86_64": ("linux", "x86_64"), "linux-aarch64": ("linux", "aarch64"),
          "darwin-aarch64": ("darwin", "arm64"), "darwin-x86_64": ("darwin", "x86_64")}
 CENTRAL = "https://repo.maven.apache.org/maven2"
 
 
-def completed_checks(log):
+def completed_checks(log, required=REQUIRED_CHECKS):
     """Require each gate exactly once; a final banner cannot hide omitted work."""
     checks = []
     for line in log.splitlines():
@@ -56,7 +55,7 @@ def completed_checks(log):
             if len(fields) != 3 or fields[2] != "passed":
                 raise RuntimeError("Consumer check did not pass: " + line)
             checks.append(fields[1])
-    if len(checks) != len(set(checks)) or set(checks) != set(REQUIRED_CHECKS):
+    if len(checks) != len(set(checks)) or set(checks) != set(required):
         raise RuntimeError("Consumer omitted or duplicated required checks: " + repr(checks))
     if "ALL PASS" not in log.splitlines():
         raise RuntimeError("Consumer did not finish")
@@ -102,18 +101,18 @@ def fixture_resources(root=FIXTURE_ROOT, groups=FIXTURE_GROUPS):
     return resources
 
 
-def verify_fixture_jar(jar, resources):
+def verify_fixture_jar(jar, resources, allowed=FIXTURE_CLASSES):
     """The consumer contains only its test entry, integrity helper and fixed data."""
     with zipfile.ZipFile(jar) as archive:
         names = archive.namelist()
         if len(set(names)) != len(names):
             raise RuntimeError("Smoke JAR contains duplicate entries")
         classes = [name for name in names if name.endswith(".class")]
-        if any(base + ".class" not in classes for base in FIXTURE_CLASSES):
+        if any(base + ".class" not in classes for base in allowed):
             raise RuntimeError("Smoke JAR is missing its read-only entry or integrity helper")
         for name in classes:
             if not any(name == base + ".class" or name.startswith(base + "$")
-                       for base in FIXTURE_CLASSES):
+                       for base in allowed):
                 raise RuntimeError("Smoke JAR contains production classes: " + name)
         actual = {name: hashlib.sha256(archive.read(name)).hexdigest() for name in names
                   if name.startswith("read-fixtures/") and not name.endswith("/")}
@@ -131,10 +130,10 @@ def main_jars(manifest):
 
 def expected_artifacts(manifest, line, platform, entry):
     if entry == "thin":
-        # Every line's thin module resolves the same four shared modules.
+        # Every line's thin module resolves the same shared modules below it.
         entry_id = f"spark-milvus-{line}-thin_2.13"
         names = {
-            "spark-milvus-native-runtime", "spark-milvus-native-vector",
+            "spark-milvus-native-runtime",
             "spark-milvus-native-storage_2.13", "spark-milvus-core_2.13", entry_id,
         }
         available = main_jars(manifest)
@@ -168,7 +167,7 @@ def check_resolved(ivy, expected):
             found[jar.name] = digest(jar)
         with zipfile.ZipFile(jar) as archive:
             for name in archive.namelist():
-                if name.startswith("native/milvus/1/") and name.endswith("/manifest.properties"):
+                if name.startswith("native/milvus/2/") and name.endswith("/manifest.properties"):
                     native_platforms.add(name.split("/")[3])
     wanted = {item["sha256"] for item in expected.values()}
     if set(found.values()) != wanted or len(found) != len(expected):
@@ -303,7 +302,7 @@ def compile_fixture(work, repository, version, row, entry_id, env):
         cwd=project, env={**env, "COURSIER_CACHE": str(work / "compile-coursier")},
     )
     jar = project / "target/scala-2.13/smoke.jar"
-    verify_fixture_jar(jar, resources)
+    verify_fixture_jar(jar, resources, FIXTURE_CLASSES)
     return jar
 
 
@@ -425,13 +424,13 @@ def smoke(candidate, line, platform, output, *, central=False, entry=None, nativ
             finally:
                 collect_diagnostics(spark_home, work, diagnostics, previous_apps)
             text = log.read_text()
-            checks = completed_checks(text)
+            checks = completed_checks(text, REQUIRED_CHECKS)
             resolved = check_resolved(ivy, expected)
             report = {"entry": entry_id, "resolved": resolved, "result": "passed", **checks}
             if native:
                 if digest(native) != native_digest:
                     raise RuntimeError("Native bundle changed during thin consumption")
-                report["nativeBundle"] = {"sha256": native_digest, "platform": platform, "withCardinal": False}
+                report["nativeBundle"] = {"sha256": native_digest, "platform": platform, "components": ["storage"]}
             reports.append(report)
         (output / "consumer-result.json").write_text(json.dumps({
             "version": version, "platform": platform, "line": line,

@@ -16,42 +16,28 @@ import org.apache.avro.generic.{
 }
 import org.apache.avro.io.{DecoderFactory, EncoderFactory}
 import org.apache.spark.sql.{DataFrame, SparkSession}
-import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanHelper
-import org.apache.spark.sql.functions.call_function
 import org.apache.spark.TaskContext
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.jni.storage.NativeStorageLibrary
-import com.zilliz.milvus.jni.vector.NativeVectorLibrary
 import com.zilliz.milvus.storage.manifest.{
   SnapshotSegmentFixture,
   SnapshotSegmentSchema
 }
-import com.zilliz.spark.connector.extensions.{
-  MilvusNearestByJoinExec,
-  MilvusReadSparkSessionExtensions,
-  MilvusSparkPlugin
-}
-import com.zilliz.spark.connector.implicits._
-import com.zilliz.spark.connector.metrics.{NearestByMetrics, SearchMetrics}
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.testkit.LocalMilvusCollection
 
-/** Public file reads and searches against frozen V3 data. Every destructive
-  * case changes only a temporary copy; no writer or online service prepares it.
+/** Public file reads against frozen V3 data. Every destructive case changes
+  * only a temporary copy; no writer or online service prepares it.
   */
-class V3ReadContractTest
-    extends AnyFunSuite
-    with BeforeAndAfterAll
-    with AdaptiveSparkPlanHelper {
+class V3ReadContractTest extends AnyFunSuite with BeforeAndAfterAll {
   private val mapper = new ObjectMapper()
   private var spark: SparkSession = _
   private var available = true
   private val avro = "files/snapshots/10/manifests/1/30.avro"
   private val manifest = "files/insert_log/10/20/30/_metadata/manifest-2.avro"
   private val delete = "files/insert_log/10/20/30/_delta/delete.parquet"
-  private val index = "files/index_files/1030/1/20/30/HNSW_0"
   private val liveIds = ((3000L until 3008L) ++ (3100L until 3108L))
     .filterNot(Set(3002L, 3105L))
     .sorted
@@ -62,7 +48,6 @@ class V3ReadContractTest
     if (available) {
       try {
         NativeStorageLibrary.load()
-        NativeVectorLibrary.load()
       } catch {
         case _: UnsatisfiedLinkError | _: NoClassDefFoundError |
             _: RuntimeException =>
@@ -74,11 +59,6 @@ class V3ReadContractTest
         .builder()
         .master("local[2,2]")
         .appName("v3-read-contract")
-        .config(
-          "spark.sql.extensions",
-          classOf[MilvusReadSparkSessionExtensions].getName
-        )
-        .config("spark.plugins", classOf[MilvusSparkPlugin].getName)
         .config("spark.ui.enabled", "false")
         .config("spark.sql.shuffle.partitions", "2")
         .config("spark.driver.host", "127.0.0.1")
@@ -211,7 +191,7 @@ class V3ReadContractTest
     assert(messages(failure).contains(key), messages(failure))
   }
 
-  private def failsReadAndSearchPlanning(
+  private def failsReadPlanning(
       options: Map[String, String],
       clues: String*
   ): Unit = {
@@ -223,53 +203,10 @@ class V3ReadContractTest
     Seq(true, false).foreach { columnar =>
       fails(read(options + ("milvus.read.columnar" -> columnar.toString)))
     }
-    Seq("exact", "approx").foreach { mode =>
-      fails(search(read(options).filter("id IN (3000, 3002)"), mode))
-    }
-  }
-
-  private def search(base: DataFrame, mode: String): DataFrame = {
-    val session = spark
-    import session.implicits._
-    val queries = Seq(("q", Seq(0.1f, 0f))).toDF("qid", "qv")
-    queries.nearestByJoin(
-      base,
-      call_function("vector_l2_distance", queries("qv"), base("vector")),
-      3,
-      mode,
-      "distance"
-    )
-  }
-
-  private def searchIds(
-      base: DataFrame,
-      mode: String,
-      indexedSegments: Long,
-      segments: Long = 2L
-  ): Seq[Long] = {
-    val result = search(base, mode).select("id")
-    val found = result.collect().map(_.getLong(0)).toSeq.sorted
-    val execution = collectFirst(result.queryExecution.executedPlan) {
-      case node: MilvusNearestByJoinExec => node
-    }.getOrElse(
-      fail("the fixed V3 search must use the connector's physical operator")
-    )
-    assert(
-      execution.metrics(NearestByMetrics.IndexSegments).value == indexedSegments
-    )
-    assert(
-      execution
-        .metrics(NearestByMetrics.ExactSegments)
-        .value == segments - indexedSegments
-    )
-    assert(execution.metrics(SearchMetrics.KnowhereCalls).value > 0L)
-    if (indexedSegments > 0L)
-      assert(execution.metrics(SearchMetrics.IndexBytes).value > 0L)
-    found
   }
 
   test(
-    "fixed V3 reads and searches need no management parser or service options"
+    "fixed V3 reads need no management parser or service options"
   ) {
     fixture { (_, options) =>
       assert(
@@ -284,107 +221,11 @@ class V3ReadContractTest
       val frame = read(options)
       assert(ids(frame) == liveIds)
       assert(ids(frame.filter("category IS NULL")) == Seq(3001L))
-      assert(searchIds(frame, "exact", 0L) == Seq(3000L, 3001L, 3100L))
-      assert(searchIds(frame, "approx", 2L) == Seq(3000L, 3001L, 3100L))
     }
   }
 
   test(
-    "large requested top-k respects task capacity across native search traversals"
-  ) {
-    fixture { (_, options) =>
-      val session = spark
-      import session.implicits._
-      val queries = (0 until 8)
-        .map(query => (query, Seq(query.toFloat / 10f, 0f)))
-        .toDF("qid", "qv")
-      // Spark 4.2 validates its own upper bound before connector planning.
-      val largeK =
-        if (org.apache.spark.SPARK_VERSION.startsWith("4.2.")) 10000
-        else Int.MaxValue
-      val configured = options ++ Map(
-        // Four queries per group at the global physical bound of 16 rows.
-        // Every group must contain multiple queries so the old unbounded
-        // merger fails its capacity guard before attempting a huge allocation.
-        MilvusOption.SearchGroupMaxBytes -> "3104",
-        MilvusOption.SearchQueryRanges -> "1"
-      )
-      val fractionKey = "spark.memory.fraction"
-      // Simulate the connector's planning budget through SQLConf; the running
-      // Spark memory manager keeps the configuration it started with.
-      val plannerConf = spark.sessionState.conf
-      val previous = plannerConf.getAllConfs.get(fractionKey)
-      // Leave 4 KiB per local task: one group fits, but keeping all eight
-      // queries' mergers does not. The normal setting keeps the queries.
-      val limitedFraction = 1.0 - 8192.0 /
-        (Runtime.getRuntime.maxMemory() - (300L << 20)).toDouble
-
-      def run(mode: String, k: Int, segmentBytes: Long): (Long, Long) = {
-        val base = read(
-          configured + (MilvusOption.SearchSegmentsMaxBytes -> segmentBytes.toString)
-        )
-        val result = queries
-          .nearestByJoin(
-            base,
-            call_function("vector_l2_distance", queries("qv"), base("vector")),
-            k,
-            mode,
-            "distance"
-          )
-          .select("qid", "id")
-        val found = result.collect().toSeq.groupBy(_.getInt(0))
-        assert(found.keySet == (0 until 8).toSet)
-        found.values.foreach { rows =>
-          val matches = rows.map(_.getLong(1)).sorted
-          if (k == largeK) assert(matches == liveIds)
-          else {
-            assert(matches.distinct.size == k)
-            assert(matches.forall(liveIds.contains))
-          }
-        }
-        val execution = collectFirst(result.queryExecution.executedPlan) {
-          case node: MilvusNearestByJoinExec => node
-        }.getOrElse(fail("native search must use the connector's operator"))
-        assert(
-          execution.metrics(NearestByMetrics.IndexSegments).value ==
-            (if (mode == "approx") 2L else 0L)
-        )
-        assert(execution.metrics(SearchMetrics.KnowhereCalls).value > 0L)
-        (
-          execution.metrics(SearchMetrics.ReadBytes).value,
-          execution.metrics(SearchMetrics.IndexBytes).value
-        )
-      }
-
-      try {
-        Seq("exact", "approx").foreach { mode =>
-          withClue(s"$mode: ") {
-            plannerConf.setConfString(fractionKey, "0.6")
-            val queriesKept = run(mode, largeK, 128L << 20)
-            // Ten exceeds either segment's eight physical rows and must not
-            // be truncated to the per-segment bound by the global merge.
-            run(mode, 10, 128L << 20)
-            plannerConf.setConfString(fractionKey, limitedFraction.toString)
-            val segmentsKept = run(mode, largeK, 128L << 20)
-            val streamed = run(mode, largeK, 1L)
-            if (mode == "approx") {
-              assert(segmentsKept._2 == queriesKept._2)
-              assert(streamed._2 == 2L * segmentsKept._2)
-            } else {
-              assert(streamed._1 > segmentsKept._1)
-            }
-          }
-        }
-      } finally
-        previous match {
-          case Some(value) => plannerConf.setConfString(fractionKey, value)
-          case None        => plannerConf.unsetConf(fractionKey)
-        }
-    }
-  }
-
-  test(
-    "L0 deletes respect partition and channel scope across native reads and narrowed searches"
+    "L0 deletes respect partition and channel scope across native reads"
   ) {
     for (
       (partition, channel, applies) <- Seq(
@@ -403,7 +244,6 @@ class V3ReadContractTest
         val expectedAll = if (applies) liveIds else (liveIds :+ 3002L).sorted
         val expectedSegment = (3000L until 3008L)
           .filterNot(id => applies && id == 3002L)
-        val expectedHits = if (applies) Seq(3000L) else Seq(3000L, 3002L)
         Seq(true, false).foreach { columnar =>
           val readOptions =
             options + ("milvus.read.columnar" -> columnar.toString)
@@ -417,16 +257,7 @@ class V3ReadContractTest
             )
           )
           assert(ids(narrowed) == expectedSegment)
-          Seq("exact", "approx").foreach { mode =>
-            assert(
-              searchIds(
-                narrowed.filter("id IN (3000, 3002)"),
-                mode,
-                indexedSegments = if (mode == "approx") 1L else 0L,
-                segments = 1L
-              ) == expectedHits
-            )
-          }
+
         }
       }
     }
@@ -449,11 +280,11 @@ class V3ReadContractTest
         "milvus.partitions" -> "20",
         "milvus.segments" -> "30"
       )
-      failsReadAndSearchPlanning(explicit, MilvusOption.SnapshotPath)
+      failsReadPlanning(explicit, MilvusOption.SnapshotPath)
     }
   }
 
-  test("a zero-record L0 manifest fails read and search planning") {
+  test("a zero-record L0 manifest fails read planning") {
     fixture { (root, options) =>
       val l0Manifest = addL0(root, -1L, "source-channel")
       val reader = new DataFileStream[GenericRecord](
@@ -473,7 +304,7 @@ class V3ReadContractTest
         "milvus.partitions" -> "20",
         "milvus.segments" -> "30"
       )
-      failsReadAndSearchPlanning(
+      failsReadPlanning(
         narrowed,
         "files/insert_log/10/-1/41",
         "no record"
@@ -499,7 +330,7 @@ class V3ReadContractTest
       }
       // Segment 30 has no local delete for PK 3002. Losing the L0 role must
       // fail before selection could discard that delete source as data.
-      failsReadAndSearchPlanning(
+      failsReadPlanning(
         options ++ Map("milvus.partitions" -> "20", "milvus.segments" -> "30"),
         "41",
         "snapshot segment Avro"
@@ -523,7 +354,7 @@ class V3ReadContractTest
             .asInstanceOf[ObjectNode]
             .put("manifest", reference)
         }
-        failsReadAndSearchPlanning(options, "segment 41", "manifest reference")
+        failsReadPlanning(options, "segment 41", "manifest reference")
       }
     }
   }
@@ -556,7 +387,7 @@ class V3ReadContractTest
     }
   }
 
-  test("an empty V3 snapshot retains its schema and yields no rows or hits") {
+  test("an empty V3 snapshot retains its schema and yields no rows") {
     fixture { (root, options) =>
       metadata(root) { json =>
         json.putArray("manifest_list")
@@ -567,8 +398,6 @@ class V3ReadContractTest
       val frame = read(options)
       assert(frame.schema.fieldNames.toSeq == Seq("id", "vector", "category"))
       assert(ids(frame).isEmpty)
-      assert(ids(search(frame, "exact")).isEmpty)
-      assert(ids(search(frame, "approx")).isEmpty)
     }
   }
 
@@ -610,37 +439,6 @@ class V3ReadContractTest
     for (missing <- Seq(true, false)) fixture { (root, options) =>
       damage(root, delete, missing)
       failsWithFile("delete.parquet") { ids(read(options)) }
-    }
-  }
-
-  test(
-    "missing or corrupt declared indexes fail instead of silently scanning"
-  ) {
-    for (missing <- Seq(true, false)) fixture { (root, options) =>
-      if (missing) damage(root, index, missing = true)
-      else {
-        // Preserve the object length so this reaches envelope decoding rather
-        // than failing the earlier SLICE_META size check.
-        val path = root.resolve(index)
-        Files.write(path, new Array[Byte](Math.toIntExact(Files.size(path))))
-      }
-      assert(searchIds(read(options), "exact", 0L) == Seq(3000L, 3001L, 3100L))
-      failsWithFile(if (missing) "HNSW_0" else "index object") {
-        ids(search(read(options), "approx"))
-      }
-    }
-  }
-
-  test("explicitly unindexed V3 segments use the supported exact fallback") {
-    fixture { (root, options) =>
-      for (segment <- Seq(30L, 31L)) {
-        Files.write(
-          root.resolve(s"files/snapshots/10/manifests/1/$segment.avro"),
-          SnapshotSegmentFixture.encode(segmentId = segment, rows = 8L)
-        )
-      }
-      Files.delete(root.resolve(index))
-      assert(searchIds(read(options), "approx", 0L) == Seq(3000L, 3001L, 3100L))
     }
   }
 

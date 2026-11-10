@@ -126,7 +126,7 @@ object Versions {
     )
     val shared = sharedScalas.map { scala =>
       val modules = Seq("native-storage", "core") ++
-        (if (scala == scala213) Seq("native-runtime", "native-vector")
+        (if (scala == scala213) Seq("native-runtime")
          else Seq.empty)
       JSONObject(
         Map(

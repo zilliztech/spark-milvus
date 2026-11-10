@@ -287,9 +287,9 @@ object HadoopStorageKeys extends Logging {
     )
   }
 
-  /** Whether the S3A identity Hadoop uses for `bucket` is an assumed role.
-    * Backfill decides its native writer's role with this, so it and the
-    * connector read one rule; a chain the native layer cannot express throws.
+  /** Whether the S3A identity Hadoop uses for `bucket` is an assumed role. A
+    * native writer decides its role with this, so writers and reads follow one
+    * rule; a chain the native layer cannot express throws.
     */
   private[connector] def s3aAssumesRole(
       conf: Configuration,
@@ -614,6 +614,9 @@ object HadoopStorageKeys extends Logging {
     * spells that as the absence of `access.key`, so there is no key to
     * translate; the C layer spells it `fs.use_iam`, which has to be set
     * explicitly or its provider chain is never consulted.
+    *
+    * The fallback is logged with the bucket it applies to: the identity then
+    * comes from the machine, not from the options or the Hadoop keys.
     */
   private def iamFallback(
       properties: Map[String, String]
@@ -626,7 +629,17 @@ object HadoopStorageKeys extends Logging {
     val assumesRole = properties.contains(StorageProperties.RoleArn)
     val alreadySet = properties.contains(StorageProperties.UseIam)
     if (isLocal || hasStaticKeys || assumesRole || alreadySet) Map.empty
-    else Map(StorageProperties.UseIam -> "true")
+    else {
+      val bucket = properties
+        .get(StorageProperties.BucketName)
+        .map(name => s" for bucket '$name'")
+        .getOrElse("")
+      logInfo(
+        s"No static keys or role are set$bucket; the native storage layer uses its " +
+          "default credential chain (environment variables, web identity or instance role)."
+      )
+      Map(StorageProperties.UseIam -> "true")
+    }
   }
 
   /** Per-bucket key first, then the global one, matching how Hadoop's own

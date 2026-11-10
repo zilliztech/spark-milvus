@@ -5,7 +5,7 @@ from common import bounded_rows, check_fixture_rows, demo_session
 
 
 def main():
-    with demo_session(__doc__) as (spark, args, options, _):
+    with demo_session(__doc__) as (spark, args, options):
         # The snapshot supplies the schema and segment locations. Storage access
         # and delete handling belong to the connector; no Milvus service is used.
         documents = spark.read.format("milvus").options(**options).load()

@@ -51,6 +51,10 @@ final class SelectedRowsColumn(
   override def getArray(rowId: Int): ColumnarArray =
     underlying.getArray(rows(rowId))
   override def getMap(rowId: Int): ColumnarMap = underlying.getMap(rows(rowId))
-  override def getChild(ordinal: Int): ColumnVector =
-    underlying.getChild(ordinal)
+  // A struct row reads its fields from the children at the same row id, so
+  // each child has to be selected the same way as its parent.
+  override def getChild(ordinal: Int): ColumnVector = {
+    val child = underlying.getChild(ordinal)
+    new SelectedRowsColumn(child, rows, child.dataType())
+  }
 }

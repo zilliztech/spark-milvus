@@ -25,6 +25,8 @@ SCRIPT = Path(__file__).resolve().parents[1] / "package-native.py"
 SPEC = importlib.util.spec_from_file_location("package_native", SCRIPT)
 PACKAGE_NATIVE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PACKAGE_NATIVE)
+FIXTURE_LOAD = (*PACKAGE_NATIVE.LOAD_ENTRIES, "libcompute_jni.so")
+FIXTURE_REQUIRED = (*PACKAGE_NATIVE.REQUIRED_ENTRIES, "libcompute_jni.so", "libcompute.so")
 
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "Native packaging validates Linux ELF files")
@@ -39,7 +41,7 @@ class PackageNativeTest(unittest.TestCase):
         self.libraries.mkdir()
         self.source_count = 0
         self.compile("libdependency.so.1", "int dependency(void) { return 7; }")
-        for number, name in enumerate(PACKAGE_NATIVE.REQUIRED_ENTRIES):
+        for number, name in enumerate(FIXTURE_REQUIRED):
             self.compile(
                 name,
                 f"extern int dependency(void); int entry_{number}(void) {{ return dependency(); }}",
@@ -48,24 +50,24 @@ class PackageNativeTest(unittest.TestCase):
         self.provenance = self.root / "provenance.json"
         self.metadata = {
             "storage.revision": "a" * 40,
-            "knowhere.revision": "b" * 40,
+            "compute.revision": "b" * 40,
             "platform": "linux-x86_64" if os.uname().machine == "x86_64" else "linux-aarch64",
-            "with_cardinal": False,
-            "with_diskann": PACKAGE_NATIVE.FORMAT.builds_diskann(),
+            "components": ["storage", "compute"],
+            "loadEntries": list(FIXTURE_LOAD),
+            "features": {},
             "dependency.mode": "shared",
             "auditPolicy": "jvm-load",
             "audit": "passed",
-            "jvmLoadTests": PACKAGE_NATIVE.expected_jvm_load_tests(),
-            "knowhereCApiTestsExit": 0,
-            "knowhereCApiTests": list(PACKAGE_NATIVE.C_API_TESTS),
+            "jvmLoadTests": PACKAGE_NATIVE.expected_jvm_load_tests(FIXTURE_LOAD),
+            "componentTests": [{"component": "compute", "tests": ["component_api"], "exit": 0}],
             "relocationRoots": [],
-            "dlopenEntries": list(PACKAGE_NATIVE.AUDIT_DLOPEN_ENTRIES),
+            "dlopenEntries": list(FIXTURE_REQUIRED),
         }
         self.record_provenance()
-        self.prefix = f"native/milvus/1/{self.metadata['platform']}/"
+        self.prefix = f"native/milvus/2/{self.metadata['platform']}/"
         self.output = self.root / "bundle.jar"
         self.jvm_load_patch = mock.patch.object(
-            PACKAGE_NATIVE, "check_jvm_loads", return_value=PACKAGE_NATIVE.expected_jvm_load_tests(),
+            PACKAGE_NATIVE, "check_jvm_loads", return_value=PACKAGE_NATIVE.expected_jvm_load_tests(FIXTURE_LOAD),
         )
         self.jvm_load_mock = self.jvm_load_patch.start()
         self.jvm_load_patch_active = True
@@ -100,9 +102,9 @@ class PackageNativeTest(unittest.TestCase):
         libraries, aliases = PACKAGE_NATIVE.inventory(self.libraries, self.metadata["platform"])
         self.metadata["auditPolicy"] = "jvm-load"
         self.metadata["audit"] = "passed"
-        self.metadata["jvmLoadTests"] = PACKAGE_NATIVE.expected_jvm_load_tests()
+        self.metadata["jvmLoadTests"] = PACKAGE_NATIVE.expected_jvm_load_tests(FIXTURE_LOAD)
         self.metadata["relocationRoots"] = sorted(libraries)
-        self.metadata["dlopenEntries"] = list(PACKAGE_NATIVE.AUDIT_DLOPEN_ENTRIES)
+        self.metadata["dlopenEntries"] = list(FIXTURE_REQUIRED)
         self.metadata["libraries"] = {
             name: {key: record[key] for key in ("sha256", "soname", "needed")}
             for name, record in libraries.items()
@@ -139,35 +141,35 @@ class PackageNativeTest(unittest.TestCase):
             self.assertNotIn(self.prefix + "libdependency.so.1.0", archive.namelist())
             self.assertEqual(dependency.read_bytes(), archive.read(self.prefix + dependency.name))
             binaries = json.loads(archive.read("META-INF/milvus-native/binaries.json"))
-            self.assertEqual(len(PACKAGE_NATIVE.REQUIRED_ENTRIES) + 1, len(binaries))
+            self.assertEqual(len(FIXTURE_REQUIRED) + 1, len(binaries))
             self.assertEqual("libdependency.so.1", binaries[dependency.name]["soname"])
 
     def test_manifest_declares_exact_jvm_load_entries(self):
         self.package()
 
         with zipfile.ZipFile(self.output) as archive:
-            self.assertEqual(",".join(PACKAGE_NATIVE.LOAD_ENTRIES),
+            self.assertEqual(",".join(FIXTURE_LOAD),
                              self.manifest(archive)["load.entries"])
 
     def test_packaging_reruns_both_jvm_load_orders_on_the_source_directory(self):
         self.package()
 
-        self.jvm_load_mock.assert_called_once_with(self.libraries.resolve(), output=None)
+        self.jvm_load_mock.assert_called_once_with(self.libraries.resolve(), output=None, load_entries=list(FIXTURE_LOAD))
 
     def test_entry_library_may_be_a_real_soname_alias(self):
         self.compile(
-            "libknowhere_jni.so", "extern int dependency(void); int known(void) { return dependency(); }",
-            dependencies=("libdependency.so.1",), soname="libknowhere_jni.so.1",
+            "libcompute_jni.so", "extern int dependency(void); int known(void) { return dependency(); }",
+            dependencies=("libdependency.so.1",), soname="libcompute_jni.so.1",
         )
-        (self.libraries / "libknowhere_jni.so.1").symlink_to("libknowhere_jni.so")
+        (self.libraries / "libcompute_jni.so.1").symlink_to("libcompute_jni.so")
         self.record_provenance()
 
         self.package()
 
         with zipfile.ZipFile(self.output) as archive:
             manifest = self.manifest(archive)
-            self.assertEqual("libknowhere_jni.so.1", manifest["alias.libknowhere_jni.so"])
-            self.assertIn("libknowhere_jni.so.1", manifest["libraries"].split(","))
+            self.assertEqual("libcompute_jni.so.1", manifest["alias.libcompute_jni.so"])
+            self.assertIn("libcompute_jni.so.1", manifest["libraries"].split(","))
 
     def test_packaged_libraries_load_after_moving_away_from_build_directory(self):
         (self.libraries / "libdependency.so").symlink_to("libdependency.so.1")
@@ -232,12 +234,12 @@ class PackageNativeTest(unittest.TestCase):
 
     def test_jvm_load_failure_blocks_packaging_even_when_ldd_exits_successfully(self):
         self.compile(
-            "libknowhere_jni.so",
+            "libcompute_jni.so",
             "extern int missing_native_symbol; int *known = &missing_native_symbol;",
         )
         # GNU ldd -r normally exits zero for undefined symbols; checking only
         # its exit code would publish a JAR that fails at native initialization.
-        diagnostic = PACKAGE_NATIVE.command("ldd", "-r", str(self.libraries / "libknowhere_jni.so"))
+        diagnostic = PACKAGE_NATIVE.command("ldd", "-r", str(self.libraries / "libcompute_jni.so"))
         self.assertIn("undefined symbol: missing_native_symbol", diagnostic)
         self.record_provenance()
         self.stop_jvm_load_mock()
@@ -252,12 +254,13 @@ class PackageNativeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "SONAME.*libunaliased.so.1"):
             self.package()
 
-    def test_cardinal_callbacks_resolve_only_in_the_declared_knowhere_parent(self):
-        self.compile("libcardinalv1.so", "extern int host_callback(void); int plugin(void) { return host_callback(); }")
-        self.compile("libcardinalv2.so", "int second_plugin(void) { return 5; }")
-        self.compile("libknowhere.so", "extern int plugin(void); int host_callback(void) { return 9; } int engine(void) { return plugin(); }",
-                     dependencies=("libcardinalv1.so",))
-        self.metadata["with_cardinal"] = True
+    def test_plugin_callbacks_resolve_only_in_the_declared_compute_parent(self):
+        self.compile("libpluginv1.so", "extern int host_callback(void); int plugin(void) { return host_callback(); }")
+        self.compile("libpluginv2.so", "int second_plugin(void) { return 5; }")
+        self.compile("libcompute.so", "extern int plugin(void); int host_callback(void) { return 9; } int engine(void) { return plugin(); }",
+                     dependencies=("libpluginv1.so",))
+        self.metadata["with_plugin"] = True
+        self.metadata["parentProviders"] = {"libpluginv1.so": "libcompute.so"}
         self.record_provenance()
 
         self.package()
@@ -270,36 +273,38 @@ class PackageNativeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "System ABI library must not be bundled: libz.so.1"):
             self.package()
 
-    def test_standalone_cardinal_relocation_does_not_replace_jvm_load_policy(self):
-        self.compile("libcardinalv1.so", "extern int missing_callback(void); int plugin(void) { return missing_callback(); }")
-        self.compile("libcardinalv2.so", "int second_plugin(void) { return 5; }")
-        self.compile("libknowhere.so", "int unrelated(void) { return 9; }")
-        self.metadata["with_cardinal"] = True
+    def test_unresolved_plugin_blocks_packaging_even_when_jvm_loads_pass(self):
+        self.compile("libpluginv1.so", "extern int missing_callback(void); int plugin(void) { return missing_callback(); }")
+        self.compile("libpluginv2.so", "int second_plugin(void) { return 5; }")
+        self.compile("libcompute.so", "int unrelated(void) { return 9; }")
+        self.metadata["with_plugin"] = True
         self.record_provenance()
 
-        standalone = PACKAGE_NATIVE.command("ldd", "-r", str(self.libraries / "libcardinalv1.so"))
+        standalone = PACKAGE_NATIVE.command("ldd", "-r", str(self.libraries / "libpluginv1.so"))
         self.assertIn("undefined symbol: missing_callback", standalone)
-        self.package()
-        self.assertTrue(self.output.is_file())
+        with self.assertRaisesRegex(ValueError, "relocation audit failed"):
+            self.package()
+        self.assertFalse(self.output.exists())
 
-    def test_underlinked_standalone_library_can_package_when_both_jvm_orders_load(self):
+    def test_underlinked_standalone_library_cannot_package_when_both_jvm_orders_load(self):
         self.compile("libother-plugin.so", "extern int host_callback(void); int plugin(void) { return host_callback(); }")
-        self.compile("libknowhere.so", "int host_callback(void) { return 9; }")
+        self.compile("libcompute.so", "int host_callback(void) { return 9; }")
         self.record_provenance()
 
         standalone = PACKAGE_NATIVE.command("ldd", "-r", str(self.libraries / "libother-plugin.so"))
         self.assertIn("undefined symbol: host_callback", standalone)
         self.stop_jvm_load_mock()
-        self.package()
-        self.assertTrue(self.output.is_file())
+        with self.assertRaisesRegex(ValueError, "relocation audit failed"):
+            self.package()
+        self.assertFalse(self.output.exists())
 
     def test_absolute_dependency_search_path_is_rejected(self):
         self.compile(
-            "libknowhere_jni.so", "extern int dependency(void); int known(void) { return dependency(); }",
+            "libcompute_jni.so", "extern int dependency(void); int known(void) { return dependency(); }",
             dependencies=("libdependency.so.1",), rpath=str(self.libraries),
         )
 
-        with self.assertRaisesRegex(ValueError, "dependencies from the bundle.*libknowhere_jni.so"):
+        with self.assertRaisesRegex(ValueError, "dependencies from the bundle.*libcompute_jni.so"):
             self.package()
 
     def test_source_symlink_must_not_escape_library_directory(self):
@@ -311,24 +316,24 @@ class PackageNativeTest(unittest.TestCase):
             self.package()
 
     def test_resource_path_cannot_inject_manifest_properties(self):
-        shutil.copy2(self.libraries / "libdependency.so.1", self.libraries / "bad\nwith_cardinal=true")
+        shutil.copy2(self.libraries / "libdependency.so.1", self.libraries / "bad\nwith_plugin=true")
 
         with self.assertRaisesRegex(ValueError, "Invalid native path"):
             self.package()
 
     def test_required_entry_cannot_be_omitted(self):
-        (self.libraries / "libknowhere_jni.so").rename(self.root / "outside-jni.so")
+        (self.libraries / "libcompute_jni.so").rename(self.root / "outside-jni.so")
 
-        with self.assertRaisesRegex(ValueError, "Missing JNI/engine entry: libknowhere_jni.so"):
+        with self.assertRaisesRegex(ValueError, "Missing JNI/engine entry: libcompute_jni.so"):
             self.package()
 
     def test_provenance_requires_exact_pins_and_shared_build(self):
         for key, invalid in (
             ("storage.revision", "main"),
-            ("knowhere.revision", "b" * 39),
+            ("compute.revision", "b" * 39),
             ("platform", "unknown"),
-            ("with_cardinal", "false"),
-            ("with_diskann", "true"),
+            ("features", {"plugin": "false"}),
+            ("features", {"disk": "true"}),
             ("dependency.mode", "static"),
         ):
             with self.subTest(key=key):
@@ -401,18 +406,12 @@ class PackageNativeTest(unittest.TestCase):
             ("jvmLoadTests", [dict(valid["jvmLoadTests"][0], exit=False), valid["jvmLoadTests"][1]]),
             ("jvmLoadTests", [dict(valid["jvmLoadTests"][0], diagnostic="unexpected"),
                               valid["jvmLoadTests"][1]]),
-            ("knowhereCApiTestsExit", None), ("knowhereCApiTestsExit", 1),
-            ("knowhereCApiTestsExit", False),
-            ("knowhereCApiTests", None),
-            ("knowhereCApiTests", valid["knowhereCApiTests"][:-1]),
-            ("knowhereCApiTests", valid["knowhereCApiTests"] + ["unexpected_test"]),
             ("relocationRoots", None),
             ("relocationRoots", valid["relocationRoots"][:-1]),
             ("relocationRoots", ["libmilvus-storage-jni.so", "libmilvus-storage.so"]),
             ("relocationRoots", valid["relocationRoots"] + ["libmilvus-storage.so"]),
             ("dlopenEntries", None),
-            ("dlopenEntries", list(reversed(valid["dlopenEntries"]))),
-            ("dlopenEntries", ["libmilvus-storage-jni.so", "libmilvus-storage.so"]),
+                        ("dlopenEntries", ["libmilvus-storage.so"]),
             ("dlopenEntries", valid["dlopenEntries"] + ["libmilvus-storage.so"]),
             ("libraries", None), ("libraries", []), ("aliases", None),
         )
@@ -454,20 +453,6 @@ class PackageNativeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Invalid provenance library record"):
             self.package()
 
-    def test_cardinal_flag_must_match_both_compiled_plugins(self):
-        self.metadata["with_cardinal"] = True
-        self.write_provenance()
-        with self.assertRaisesRegex(ValueError, "Cardinal libraries do not match"):
-            self.package()
-        self.compile("libcardinalv1.so", "int first_plugin(void) { return 1; }")
-        self.record_provenance()
-        with self.assertRaisesRegex(ValueError, "Cardinal libraries do not match"):
-            self.package()
-        self.compile("libcardinalv2.so", "int second_plugin(void) { return 2; }")
-        self.metadata["with_cardinal"] = False
-        self.record_provenance()
-        with self.assertRaisesRegex(ValueError, "Cardinal libraries do not match"):
-            self.package()
 
     def test_library_changed_during_packaging_does_not_replace_existing_artifact(self):
         self.package()
@@ -514,8 +499,8 @@ class PackageNativeTest(unittest.TestCase):
             manifest = self.manifest(archive)
             self.assertEqual(self.metadata["storage.revision"], manifest["storage.revision"])
             # The features a platform's build differs in are declared, not inferred.
-            self.assertEqual("false", manifest["with_cardinal"])
-            self.assertEqual(str(self.metadata["with_diskann"]).lower(), manifest["with_diskann"])
+            self.assertEqual("storage,compute", manifest["components"])
+            self.assertEqual("2", manifest["format.version"])
             self.assertEqual(
                 hashlib.sha256(self.provenance.read_bytes()).hexdigest(), manifest["provenance.sha256"],
             )

@@ -14,8 +14,6 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.jni.storage.NativeStorageLibrary
-import com.zilliz.milvus.jni.vector.NativeVectorLibrary
-import com.zilliz.spark.connector.extensions.MilvusSparkPlugin
 import com.zilliz.spark.connector.testkit.LocalMilvusCollection
 
 /** Owns a fixed-file Spark Connect server and a separate client JVM. The
@@ -38,12 +36,9 @@ abstract class ConnectSessionTestBase
   private var port = 0
   protected var spark: SparkSession = _
 
-  protected def sessionExtensions: String
-
   override def beforeAll(): Unit = {
     try {
       NativeStorageLibrary.load()
-      NativeVectorLibrary.load()
     } catch {
       case _: UnsatisfiedLinkError | _: NoClassDefFoundError |
           _: RuntimeException =>
@@ -61,11 +56,6 @@ abstract class ConnectSessionTestBase
         .builder()
         .master("local[2]")
         .appName("milvus-connect")
-        .config(
-          "spark.sql.extensions",
-          sessionExtensions
-        )
-        .config("spark.plugins", classOf[MilvusSparkPlugin].getName)
         .config("spark.ui.enabled", "false")
         .config("spark.sql.shuffle.partitions", "2")
         .config("spark.driver.host", "127.0.0.1")

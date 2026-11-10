@@ -28,6 +28,7 @@ jobs:
       native: ${{ steps.plan.outputs.native }}
       jvm: ${{ steps.plan.outputs.jvm }}
       image: ${{ steps.plan.outputs.image }}
+      thin: ${{ steps.plan.outputs.thin }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -41,6 +42,10 @@ jobs:
           java-version: '21'
           cache: sbt
       - uses: sbt/setup-sbt@v1
+      - name: Bind candidate coordinates to the producing run
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: python3 scripts/ci/candidate_identity.py --version "$RELEASE_VERSION"
       - name: Export the authoritative JVM matrix
         run: sbt 'exportBuildMatrix build-matrix.json'
       - id: plan
@@ -48,6 +53,7 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
           python3 scripts/release.py plan --version "$RELEASE_VERSION" --matrix build-matrix.json --output plan.json
+          python3 scripts/release.py check-unused --plan plan.json
           python3 - <<'PY'
           import json, os
           plan = json.load(open('plan.json'))
@@ -61,7 +67,7 @@ jobs:
           if len(image) != len(docker):
               raise SystemExit('Release plan must build every Linux native platform')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
-              for key, rows in (('native', plan['native']), ('jvm', plan['jvm']), ('image', image)):
+              for key, rows in (('native', plan['native']), ('jvm', plan['jvm']), ('image', image), ('thin', plan['thin'])):
                   print(f'{key}={json.dumps({"include": rows}, separators=(",", ":"))}', file=out)
           PY
       - uses: actions/upload-artifact@v4
@@ -88,7 +94,7 @@ jobs:
           persist-credentials: false
           submodules: false
       - name: Initialize public engine sources
-        run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+        run: git submodule update --init --recursive milvus-proto milvus-storage
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -171,7 +177,7 @@ jobs:
             ${{ env.CARGO_HOME }}/git
           key: ${{ steps.fingerprint.outputs.dependency_key_prefix }}${{ steps.fingerprint.outputs.key_digest }}
           restore-keys: ${{ steps.fingerprint.outputs.dependency_key_prefix }}
-      - name: Build both native engines on a bundle cache miss
+      - name: Build Storage and its JNI bindings on a bundle cache miss
         id: native_build
         if: steps.bundle-cache.outputs.cache-hit != 'true' && steps.branch_bundle_verify.outcome != 'success'
         env:
@@ -239,46 +245,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-  native-cpu:
-    name: Native CPU portability (linux-x86_64)
-    needs: native
-    if: inputs.build_native
-    # QEMU 8+ implements the AVX/AVX2/FMA features required by this gate.
-    # The native build itself retains its Ubuntu 22.04 ABI baseline.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-          submodules: false
-      - name: Initialize the pinned upstream CPU probe
-        run: git submodule update --init knowhere
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Prepare the CPU emulator and probe compiler
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends gcc-12 qemu-user binutils
-      - uses: actions/download-artifact@v4
-        with:
-          name: native-linux-x86_64
-          path: native-input
-      - name: Check native CPU portability on every build and cache hit
-        run: |
-          python3 scripts/check-native-cpu.py \
-            --bundle native-input/milvus-native-linux-x86_64.jar \
-            --output cpu-results/cpu.json
-      - name: Preserve CPU diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cpu-diagnostics-linux-x86_64
-          path: cpu-results/
-          if-no-files-found: warn
-          retention-days: 7
-
   jvm:
     name: JVM (Spark ${{ matrix.line }})
     needs: plan
@@ -293,7 +259,7 @@ jobs:
           persist-credentials: false
           submodules: false
       - name: Initialize public API sources
-        run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+        run: git submodule update --init --recursive milvus-proto milvus-storage
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -306,14 +272,6 @@ jobs:
           SPARK_LINE: ${{ matrix.line }}
           SCALA_VERSION: ${{ matrix.scala }}
         run: sbt "-DsparkVersion=$SPARK_LINE" "-DscalaVersion=$SCALA_VERSION" "-Drelease.version=$RELEASE_VERSION" "spark/releaseJvmArtifacts"
-      # Every line exports its thin Spark module; the Spark 4.0 export also
-      # carries the four modules below it, which a release publishes once.
-      - name: Export the thin modules without a native bundle
-        env:
-          RELEASE_VERSION: ${{ inputs.version }}
-          SPARK_LINE: ${{ matrix.line }}
-          SCALA_VERSION: ${{ matrix.scala }}
-        run: sbt "-DsparkVersion=$SPARK_LINE" "-DscalaVersion=$SCALA_VERSION" "-Drelease.version=$RELEASE_VERSION" "spark/releaseThinArtifacts"
       - uses: actions/upload-artifact@v4
         with:
           name: jvm-${{ matrix.line }}
@@ -321,17 +279,45 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+
+  thin:
+    name: Thin ${{ matrix.product }} (Spark ${{ matrix.line }}, Scala ${{ matrix.scala }})
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.thin) }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - run: git submodule update --init --recursive milvus-proto milvus-storage
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: sbt
+      - uses: sbt/setup-sbt@v1
+      - name: Export the selected thin product and its exact dependencies
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          SPARK_LINE: ${{ matrix.line }}
+          SCALA_VERSION: ${{ matrix.scala }}
+        run: |
+          sbt "-DsparkVersion=$SPARK_LINE" "-DscalaVersion=$SCALA_VERSION" \
+            "-Drelease.version=$RELEASE_VERSION" spark/releaseThinArtifacts
       - uses: actions/upload-artifact@v4
         with:
-          name: thin-${{ matrix.line }}
-          path: target/release-thin/${{ matrix.line }}/
+          name: thin-${{ matrix.line }}-${{ matrix.scala }}-${{ matrix.product }}
+          path: target/release-thin/${{ matrix.line }}/${{ matrix.scalaBinary }}/${{ matrix.product }}/
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
 
   assembly:
     name: Spark 4.0 assembly and image (${{ matrix.platform }})
-    needs: [plan, native, native-cpu]
+    needs: [plan, native]
     if: inputs.build_native
     strategy:
       fail-fast: false
@@ -344,7 +330,7 @@ jobs:
           persist-credentials: false
           submodules: false
       - name: Initialize public API sources
-        run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+        run: git submodule update --init --recursive milvus-proto milvus-storage
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -390,8 +376,8 @@ jobs:
           ./docker/build.sh \
             --assembly "$GITHUB_WORKSPACE/target/assembly-$NATIVE_PLATFORM/spark-milvus-4.0-bundle-$RELEASE_VERSION.jar" \
             --image "$image" --platform "$DOCKER_PLATFORM"
-          docker run --rm "$image" /opt/spark-milvus/demo/run.sh python 04_exact_search.py
-          docker run --rm "$image" /opt/spark-milvus/demo/run.sh java IndexSearch --explain
+          docker run --rm "$image" /opt/spark-milvus/demo/run.sh python 01_read_snapshot.py
+          docker run --rm "$image" /opt/spark-milvus/demo/run.sh java FilterProject --explain
       - uses: actions/upload-artifact@v4
         with:
           name: assembly-${{ matrix.platform }}
@@ -401,7 +387,7 @@ jobs:
           retention-days: 14
 
   darwin-reads:
-    name: Native reads and search (darwin-aarch64)
+    name: Native reads (darwin-aarch64)
     needs: native
     if: inputs.build_native
     runs-on: macos-15
@@ -411,7 +397,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: false
-      - run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+      - run: git submodule update --init --recursive milvus-proto milvus-storage
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -431,7 +417,7 @@ jobs:
         run: sbt 'exportBuildMatrix build-matrix.json'
       - name: Require the shared native read suites on macOS
         run: python3 scripts/ci/read_validation.py shared --matrix build-matrix.json --scala 2.13.16 --native-bundle native-input/milvus-native-darwin-aarch64.jar
-      - name: Require every Spark 4.0 read/search suite on macOS
+      - name: Require every Spark 4.0 read suite on macOS
         run: python3 scripts/ci/read_validation.py spark --matrix build-matrix.json --line 4.0 --scala 2.13.16 --native-bundle native-input/milvus-native-darwin-aarch64.jar
       - uses: actions/upload-artifact@v4
         if: always()
@@ -444,7 +430,7 @@ jobs:
           retention-days: 7
 
   candidate:
-    needs: [native, native-cpu, darwin-reads, jvm]
+    needs: [native, darwin-reads, jvm, thin]
     if: inputs.build_native
     runs-on: ubuntu-22.04
     timeout-minutes: 20

@@ -35,9 +35,10 @@ object ReleaseArtifacts {
     sys.props.get("release.version").map { value =>
       require(
         value
-          .matches("[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?") &&
-          !value.endsWith("-SNAPSHOT"),
-        "release.version must be an explicit release version, for example 2.0.0 or 2.0.0-rc.1"
+          .matches(
+            "2\\.[0-9]+\\.[0-9]+(?:-(?:(?:alpha|beta|rc)\\.[0-9]+(?:\\.[0-9]+)*|central-test\\.[0-9]+))?"
+          ) && !value.endsWith("-SNAPSHOT"),
+        "release.version must be an explicit release version, for example 2.1.0 or 2.1.0-rc.1"
       )
       value
     }
@@ -76,8 +77,7 @@ object ReleaseArtifacts {
   }
 
   def classpath(compile: Classpath, runtimeManaged: Classpath): Classpath = {
-    // Internal products and the locally compiled upstream Knowhere API come
-    // from Compile; runtime-only managed dependencies must be included too.
+    // Internal products come from Compile; include managed runtime dependencies.
     val products = compile.filter(entry =>
       entry.data.isDirectory || entry.get(moduleID.key).isEmpty
     )
@@ -86,13 +86,6 @@ object ReleaseArtifacts {
     val seen = scala.collection.mutable.Set.empty[File]
     (products ++ libraries).filter(entry =>
       seen.add(entry.data.getCanonicalFile)
-    )
-  }
-
-  def upstreamSources(root: File): Seq[(File, String)] = {
-    val base = root / "knowhere" / "java" / "src" / "main" / "java"
-    (base ** "*.java").get.map(source =>
-      source -> IO.relativize(base, source).get
     )
   }
 
@@ -125,12 +118,7 @@ object ReleaseArtifacts {
     val sourcesJar = directory / s"$stem-sources.jar"
     archive(sources, sourcesJar)
 
-    val knowhereDocs = upstreamDocumentation(
-      root,
-      jdk,
-      directory / "api-work" / "knowhere"
-    )
-    val allDocumentation = documentation :+ ("knowhere-api" -> knowhereDocs)
+    val allDocumentation = documentation
     val index = directory / "api-work" / "index.html"
     IO.write(
       index,
@@ -201,28 +189,6 @@ object ReleaseArtifacts {
     files.map(_._2) :+ metadataFile
   }
 
-  def upstreamDocumentation(root: File, jdk: File, knowhereDocs: File): File = {
-    IO.delete(knowhereDocs)
-    IO.createDirectory(knowhereDocs)
-    val upstream = upstreamSources(root).map(_._1.getAbsolutePath).sorted
-    require(
-      upstream.nonEmpty,
-      "Knowhere API sources are required for release documentation"
-    )
-    val result = Process(
-      Seq(
-        (jdk / "bin" / "javadoc").getAbsolutePath,
-        "-quiet",
-        "-Xdoclint:none",
-        "-d",
-        knowhereDocs.getAbsolutePath
-      ) ++ upstream,
-      root
-    ).!
-    require(result == 0, "Knowhere API documentation generation failed")
-    knowhereDocs
-  }
-
   private def dependencies(classpath: Classpath): JSONArray = {
     // Compile precedes Runtime in the resolved classpath: it includes Spark's
     // version selection. A POM must name each group/artifact only once.
@@ -248,10 +214,9 @@ object ReleaseArtifacts {
     try {
       val names = jar.entries.asScala.map(_.getName).toSet
       Seq(
-        "io/knowhere/Knowhere.class",
         "io/milvus/storage/NativeLibraryLoader.class",
         "com/zilliz/spark/connector/sources/MilvusDataSource.class",
-        "META-INF/milvus-native/compatibility.properties"
+        "META-INF/milvus-native/requirements/storage.properties"
       ).foreach(name =>
         require(names(name), s"JVM release JAR is missing $name")
       )

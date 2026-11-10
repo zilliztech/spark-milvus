@@ -153,12 +153,12 @@ final case class SegmentReadTask(
       physical.groups.headOption.map(_.fileRowCounts.sum)
   })
 
-  /** A complete physical row count that can bound an encoded row address.
-    * Unlike search sizing, this never infers a physical bound from an index's
-    * row count. Without a snapshot count, every column group must account for
-    * all of its files, without negative counts or overflow, and agree on the
-    * same total. Unknown or inconsistent metadata cannot prove a bound; the
-    * reader's existing validation still applies independently.
+  /** A complete physical row count that can bound an encoded row address. An
+    * index's row count does not establish this physical bound. Without a
+    * snapshot count, every column group must account for all of its files,
+    * without negative counts or overflow, and agree on the same total. Unknown
+    * or inconsistent metadata cannot prove a bound; the reader's existing
+    * validation still applies independently.
     */
   def provenPhysicalRows: Option[Long] = snapshotRows match {
     case Some(rows) => if (rows >= 0L) Some(rows) else None
@@ -190,13 +190,4 @@ final case class SegmentReadTask(
       } else None
   }
 
-  /** Rows available for search sizing, including a persisted index's count when
-    * the snapshot and column groups do not state one. This estimate does not
-    * replace `expectedRows`, the reader's independent short-read guard.
-    */
-  def knownRows: Option[Long] = expectedRows.orElse(indexes match {
-    case SegmentIndexes.Available(all) =>
-      all.map(_.rowCount).filter(_ > 0L).reduceOption(_ max _)
-    case _ => None
-  })
 }

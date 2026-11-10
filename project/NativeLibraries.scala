@@ -33,7 +33,7 @@ object NativeLibraries {
       s"JVM native load check failed for $directory (exit $exit):\n$output"
     )
     if (output.trim.nonEmpty) log(output.trim)
-    log(s"Verified both JVM native load orders: $directory")
+    log(s"Verified JVM native load entries: $directory")
   }
 
   private def nativeCheck(

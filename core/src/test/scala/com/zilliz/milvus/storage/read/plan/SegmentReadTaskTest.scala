@@ -169,7 +169,7 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
     copy.readVersionOrLatest shouldBe 11L
   }
 
-  test("a persisted index's row count sizes a segment the snapshot did not") {
+  test("a persisted index's row count does not prove a physical bound") {
     val indexed = physicalTask
       .copy(
         segmentId = 7L,
@@ -198,11 +198,8 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
         )
       )
 
-    indexed.knownRows shouldBe Some(25L)
-    indexed.copy(indexes = SegmentIndexes.Unknown).knownRows shouldBe None
     indexed.expectedRows shouldBe None
     indexed.provenPhysicalRows shouldBe None
-    indexed.copy(snapshotRows = Some(30L)).knownRows shouldBe Some(30L)
   }
 
   test(

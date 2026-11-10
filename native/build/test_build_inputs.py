@@ -10,33 +10,9 @@ from unittest.mock import patch
 
 import jvm_load
 import platforms
-from build import (knowhere_c_api_tests, cardinal_versions, digest, macos_openmp_redirect, platform_tool_requirements,
+from build import (dependency_linkage_conf, digest, macos_openmp_redirect, platform_tool_requirements,
                    prepare_conan_lock, promote_bundle, replace_requires_section, snapshot_corrosion, validate_conan_lock,
-                   validate_locked_graph)
-
-
-class CardinalVersionTest(unittest.TestCase):
-    def write(self, root, generation, body):
-        path = root / "cmake" / "libs" / "cardinal" / generation / "CMakeLists.txt"
-        path.parent.mkdir(parents=True)
-        path.write_text(body)
-
-    def test_tags_come_from_the_knowhere_cmake_files(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            self.write(root, "v1", "# comment\nset(CARDINAL_VERSION v2.5.112)\nset(CARDINAL_REPO_URL \"x\")\n")
-            self.write(root, "v2", "set(CARDINAL_VERSION v3.0.8)\n")
-            self.assertEqual(cardinal_versions(root), {"v1": "v2.5.112", "v2": "v3.0.8"})
-
-    def test_a_missing_or_ambiguous_version_file_fails(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            self.write(root, "v1", "set(CARDINAL_VERSION v2.5.112)\n")
-            with self.assertRaisesRegex(RuntimeError, "no Cardinal version file"):
-                cardinal_versions(root)
-            self.write(root, "v2", "set(CARDINAL_VERSION a)\nset(CARDINAL_VERSION b)\n")
-            with self.assertRaisesRegex(RuntimeError, "exactly one"):
-                cardinal_versions(root)
+                   validate_locked_graph, write_recipe_seed)
 
 
 #: The JNI entries this platform names, so fixtures match what promotion checks.
@@ -64,6 +40,23 @@ class BuildContextPinTest(unittest.TestCase):
         self.assertEqual(["tools.cmake.cmaketoolchain:extra_variables"], ast.literal_eval(identity[len(prefix):]))
         self.assertEqual("milvus-common/*:tools.system.package_manager:mode=report", mode)
 
+    def test_dependency_linkage_identity_tracks_bytes_not_work_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            first, second = Path(temporary) / "first.cmake", Path(temporary) / "second.cmake"
+            first.write_text("# exact reviewed link implementation\n")
+            second.write_bytes(first.read_bytes())
+            selected = {"grpc": "grpc/1.67.1#reviewed"}
+            a = dependency_linkage_conf(selected, first, conan_os="Linux")
+            b = dependency_linkage_conf(selected, second, conan_os="Linux")
+            identity = lambda options: [value for value in options if "user.spark_milvus:" in value]
+            self.assertEqual(identity(a), identity(b))
+            self.assertEqual([], dependency_linkage_conf(selected, first, conan_os="Macos"))
+            self.assertIn("-c:h", a)
+            self.assertIn("-c:b", a)
+            self.assertIn(str(first), " ".join(a))
+            second.write_text("# changed target links\n")
+            self.assertNotEqual(identity(a), identity(dependency_linkage_conf(selected, second, conan_os="Linux")))
+
     def test_replacements_keep_the_exact_recipe_revision(self):
         section = replace_requires_section({"openssl": "openssl/3.3.2#9f9f"})
         self.assertIn("openssl/*: openssl/3.3.2#9f9f", section)
@@ -79,11 +72,9 @@ class BundlePromotionTest(unittest.TestCase):
     def candidate(self, name, **changes):
         path = self.work / "bundle-candidates" / name
         path.mkdir(parents=True)
-        record = {"audit": "passed", "knowhereCApiTestsExit": 0,
-                  "knowhereCApiTests": knowhere_c_api_tests(platforms.host()), "auditPolicy": "jvm-load",
+        record = {"audit": "passed", "componentTests": [], "loadEntries": list(ENTRIES), "auditPolicy": "jvm-load",
                   "jvmLoadTests": [
                       {"entries": list(ENTRIES), "exit": 0},
-                      {"entries": list(ENTRIES[::-1]), "exit": 0},
                   ]}
         record.update(changes)
         (path / "provenance.json").write_text(json.dumps(record))
@@ -98,15 +89,14 @@ class BundlePromotionTest(unittest.TestCase):
 
     def test_failed_tests_or_audit_preserve_previous_bundle_and_candidate(self):
         promote_bundle(self.candidate("good"), self.work)
-        for name, changes in (("failed-tests", {"knowhereCApiTestsExit": 1}),
+        for name, changes in (("failed-tests", {"componentTests": [{"exit": 1}]}),
                               ("failed-audit", {"audit": "pending"}),
                               ("old-audit-policy", {"auditPolicy": "standalone"}),
                               ("missing-jvm-loads", {"jvmLoadTests": []}),
                               ("failed-jvm-load", {"jvmLoadTests": [
                                   {"entries": list(ENTRIES), "exit": 1},
-                                  {"entries": list(ENTRIES[::-1]), "exit": 0},
-                              ]}),
-                              ("missing-test", {"knowhereCApiTests": ["knowhere_c_api"]})):
+                                          ]}),
+                              ("duplicate-load", {"jvmLoadTests": [{"entries": list(ENTRIES), "exit": 0}] * 2})):
             with self.subTest(name=name):
                 candidate = self.candidate(name, **changes)
                 with self.assertRaisesRegex(ValueError, "not passed"):
@@ -168,6 +158,49 @@ class ConanLockTest(unittest.TestCase):
     def test_lock_must_match_pinned_direct_recipe_revisions(self):
         with self.assertRaisesRegex(ValueError, "selected direct recipes"):
             validate_conan_lock(self.source, {"grpc": "grpc/1.0#new-patch"})
+
+    def test_seed_pins_transitive_recipes_without_direct_dependencies_or_overrides(self):
+        seed = self.root / "recipe-seed.lock"
+        references = {"c-ares": "c-ares/1.0#transitive"}
+        write_recipe_seed(seed, references)
+        record = json.loads(seed.read_text())
+        self.assertEqual(["c-ares/1.0#transitive"], record["requires"])
+        self.assertNotIn("overrides", record)
+        self.assertEqual([], record["build_requires"])
+
+    def test_supplied_lock_cannot_change_reviewed_transitive_recipe_at_same_version(self):
+        transitive = {"c-ares": "c-ares/1.0#transitive"}
+        prepare_conan_lock(self.source, self.destination, self.identity, self.references,
+                           transitive_references=transitive)
+        self.record["requires"][1] = "c-ares/1.0#new-requirements"
+        self.source.write_text(json.dumps(self.record))
+        with self.assertRaisesRegex(ValueError, "reviewed transitive recipes"):
+            prepare_conan_lock(self.source, self.root / "new.lock", self.root / "new.sha256", self.references,
+                               transitive_references=transitive)
+
+    def test_build_context_cannot_select_another_reviewed_revision(self):
+        self.record["build_requires"] = ["grpc/1.0#other"]
+        self.source.write_text(json.dumps(self.record))
+        with self.assertRaisesRegex(ValueError, "unreviewed recipes in build_requires"):
+            validate_conan_lock(self.source, self.references)
+
+    def test_host_context_cannot_hide_a_second_direct_revision(self):
+        self.record["requires"].append("grpc/1.0#other")
+        self.source.write_text(json.dumps(self.record))
+        with self.assertRaisesRegex(ValueError, "unreviewed recipes in requires"):
+            validate_conan_lock(self.source, self.references)
+
+    def test_seed_entry_cannot_hide_a_different_resolved_transitive_recipe(self):
+        self.record["requires"].append("c-ares/2.0#unreviewed")
+        self.source.write_text(json.dumps(self.record))
+        with self.assertRaisesRegex(ValueError, "unreviewed recipes"):
+            validate_conan_lock(self.source, self.references,
+                                transitive_references={"c-ares": "c-ares/1.0#transitive"})
+
+    def test_complete_lock_must_include_the_reviewed_transitive_dependency(self):
+        with self.assertRaisesRegex(ValueError, "reviewed transitive recipes"):
+            validate_conan_lock(self.source, self.references,
+                                transitive_references={"required": "required/1.0#reviewed"})
 
     def test_lock_must_pin_transitive_recipe_revisions(self):
         self.record["requires"][1] = "c-ares/1.0"

@@ -10,10 +10,10 @@ package com.zilliz.milvus.storage.read
   * needs on the executor. `ReadLimits` carries the validated batch row/byte
   * bounds and per-task Arrow allocation bound; raw user strings never cross
   * this boundary. `SegmentReadTask.provenPhysicalRows` separates a complete
-  * physical row-address bound from the estimates used for search sizing.
-  * Resolved physical column groups carry format-owned names and files through
-  * the same task. `DeleteSource.Deferred` carries a serializable format
-  * decoder; `DeletePlans` supplies its borrowed store on the executor.
+  * physical row-address bound from row-count estimates. Resolved physical
+  * column groups carry format-owned names and files through the same task.
+  * `DeleteSource.Deferred` carries a serializable format decoder; `DeletePlans`
+  * supplies its borrowed store on the executor.
   *
   * `ReadPlan.of` is the planning itself: one fixed `Snapshot` becomes one task
   * per V3 data segment beyond the initial empty state, each with its `fs.*`

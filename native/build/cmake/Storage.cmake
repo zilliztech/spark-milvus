@@ -124,14 +124,6 @@ function(milvus_add_storage)
       ${storage_platform_libraries}
     PRIVATE prsbridge
   )
-  if(NOT APPLE)
-    # The upstream Folly recipe publishes aio to consumers but does not put it
-    # in libfolly's DT_NEEDED list. Keep the provider in this runtime root even
-    # though --as-needed sees no unresolved aio reference in storage's objects.
-    # Folly's async I/O is Linux-only, so macOS has no aio to keep.
-    target_link_libraries(milvus-storage PRIVATE
-      "-Wl,--no-as-needed" aio "-Wl,--as-needed")
-  endif()
 
   # Rust vendors these C implementations. Keep their symbols private while
   # retaining the public storage C, C++, and CXX bridge interfaces. Mach-O has

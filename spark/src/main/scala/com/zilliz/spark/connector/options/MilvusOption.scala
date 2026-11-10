@@ -22,23 +22,17 @@ object MilvusOption {
   val ReadBatchMaxRows = "milvus.read.batch.max.rows"
   val ReadBatchMaxBytes = "milvus.read.batch.max.bytes"
   val ReadArrowMaxBytes = "milvus.read.arrow.max.bytes"
-  val SearchQueriesMaxBytes = "milvus.search.queries.max.bytes"
-  val SearchGroupMaxBytes = "milvus.search.group.max.bytes"
-  val SearchSegmentsMaxBytes = "milvus.search.segments.max.bytes"
-  val SearchCollectThreads = "milvus.search.collect.threads"
-  val SearchQueryRanges = "milvus.search.query.ranges"
-  // Index segments a search task keeps searching at once within one query
-  // group (default 2): the next segment's call fills the tail of the current one
-  val SearchCallsInFlight = "milvus.search.calls.in.flight"
-  // An index's search tuning, given with the base input of a NEAREST BY:
-  // ef for the HNSW family, nprobe for the IVF family.
-  val SearchParams = "milvus.search.params"
   val MilvusFilter = "milvus.filter"
 
   val MilvusExtraColumns = "milvus.extra.columns"
   val MilvusExtraColumnSegmentID = "_segment_id"
   val MilvusExtraColumnRowOffset = "_row_offset"
   val MilvusExtraColumnTimestamp = "_timestamp"
+
+  /** The stored position of a row in its snapshot, requested with
+    * [[ReadIncludeRowId]] rather than [[MilvusExtraColumns]].
+    */
+  val MilvusRowIdColumn = "_milvus_row_id"
   private[connector] val MilvusExtraColumnSegmentIDAlias = "$segment_id"
   private[connector] val MilvusExtraColumnRowOffsetAlias = "$row_offset"
   private val MilvusExtraColumnSegmentIDBareAlias = "segment_id"
@@ -63,8 +57,6 @@ object MilvusOption {
 
   // reader config
   val ReaderFieldIDs = "fieldIDs"
-
-  // vector search config
 
   // s3 config
   val S3Endpoint = "s3.endpoint"
@@ -95,6 +87,24 @@ object MilvusOption {
   val ReadApplyDeletes = "milvus.read.apply.deletes"
   val ReadVectorRaw = "milvus.read.vector.raw"
   val ReadColumnar = "milvus.read.columnar"
+
+  /** What a load reads. Absent: the collection's live rows. `physical`: every
+    * stored row, including rows marked deleted, which a column replacement
+    * write has to cover. `write_result`: the receipt a column replacement write
+    * published at the load path, not collection data.
+    */
+  val ReadMode = "milvus.read.mode"
+  val ReadModePhysical = "physical"
+  val ReadModeWriteResult = "write_result"
+
+  /** `true` adds [[MilvusRowIdColumn]] to a physical read. */
+  val ReadIncludeRowId = "milvus.read.include_row_id"
+
+  /** What a write does. The one operation is [[WriteOperationReplaceColumns]]:
+    * new files for the given columns of every stored row of a fixed snapshot.
+    */
+  val WriteOperation = "milvus.write.operation"
+  val WriteOperationReplaceColumns = "replace_columns"
 
   private def nonEmptyOption(
       getOption: String => Option[String],
@@ -166,21 +176,94 @@ object MilvusOption {
     validateSnapshotModeOptionsFrom(key => Option(options.get(key)))
   }
 
-  /** The search tuning a read names in `milvus.search.params`; none when the
-    * option is absent or blank.
-    */
-  def searchParameters(
-      options: Map[String, String]
-  ): scala.collection.immutable.Map[String, String] =
-    OptionParsing
-      .value(options, SearchParams)
-      .map(OptionParsing.namedValues(_, s"'$SearchParams'"))
-      .getOrElse(scala.collection.immutable.Map.empty)
+  private def readModeFrom(
+      getOption: String => Option[String]
+  ): Option[String] =
+    getOption(ReadMode)
+      .map(_.trim.toLowerCase(java.util.Locale.ROOT))
+      .filter(_.nonEmpty) match {
+      case None                                                  => None
+      case Some(mode @ (ReadModePhysical | ReadModeWriteResult)) => Some(mode)
+      case Some(other) =>
+        throw new IllegalArgumentException(
+          s"Option '$ReadMode' must be '$ReadModePhysical' or '$ReadModeWriteResult', got '$other'; " +
+            "leave it unset to read the collection's live rows"
+        )
+    }
 
+  def isPhysicalRead(options: Map[String, String]): Boolean =
+    readModeFrom(key => OptionParsing.value(options, key))
+      .contains(ReadModePhysical)
+
+  def isPhysicalRead(options: CaseInsensitiveStringMap): Boolean =
+    readModeFrom(key => Option(options.get(key))).contains(ReadModePhysical)
+
+  def isWriteResultRead(options: Map[String, String]): Boolean =
+    readModeFrom(key => OptionParsing.value(options, key))
+      .contains(ReadModeWriteResult)
+
+  def isWriteResultRead(options: CaseInsensitiveStringMap): Boolean =
+    readModeFrom(key => Option(options.get(key)))
+      .contains(ReadModeWriteResult)
+
+  /** A physical read keeps rows marked deleted, so it cannot also be asked to
+    * apply deletes.
+    */
   private def readApplyDeletesFrom(
       getOption: String => Option[String]
   ): Boolean =
-    booleanOption(getOption, ReadApplyDeletes, defaultValue = true)
+    if (readModeFrom(getOption).contains(ReadModePhysical)) {
+      if (booleanOption(getOption, ReadApplyDeletes, defaultValue = false)) {
+        throw new IllegalArgumentException(
+          s"'$ReadMode=$ReadModePhysical' reads every stored row including rows marked deleted; " +
+            s"remove '$ReadApplyDeletes=true'"
+        )
+      }
+      false
+    } else booleanOption(getOption, ReadApplyDeletes, defaultValue = true)
+
+  /** The row identity names a stored position, so only a physical read, whose
+    * rows are exactly the stored ones, can carry it.
+    */
+  private def readIncludeRowIdFrom(
+      getOption: String => Option[String]
+  ): Boolean = {
+    val requested =
+      booleanOption(getOption, ReadIncludeRowId, defaultValue = false)
+    if (requested && !readModeFrom(getOption).contains(ReadModePhysical)) {
+      throw new IllegalArgumentException(
+        s"'$ReadIncludeRowId=true' identifies stored rows and requires '$ReadMode=$ReadModePhysical'"
+      )
+    }
+    requested
+  }
+
+  def readIncludeRowId(options: Map[String, String]): Boolean =
+    readIncludeRowIdFrom(key => OptionParsing.value(options, key))
+
+  def readIncludeRowId(options: CaseInsensitiveStringMap): Boolean =
+    readIncludeRowIdFrom(key => Option(options.get(key)))
+
+  /** The write operation, if the options ask for one. */
+  private def writeOperationFrom(
+      getOption: String => Option[String]
+  ): Option[String] =
+    getOption(WriteOperation)
+      .map(_.trim.toLowerCase(java.util.Locale.ROOT))
+      .filter(_.nonEmpty) match {
+      case None                                    => None
+      case Some(op @ WriteOperationReplaceColumns) => Some(op)
+      case Some(other) =>
+        throw new IllegalArgumentException(
+          s"Option '$WriteOperation' must be '$WriteOperationReplaceColumns', got '$other'"
+        )
+    }
+
+  def writeOperation(options: Map[String, String]): Option[String] =
+    writeOperationFrom(key => OptionParsing.value(options, key))
+
+  def writeOperation(options: CaseInsensitiveStringMap): Option[String] =
+    writeOperationFrom(key => Option(options.get(key)))
 
   def readApplyDeletes(options: Map[String, String]): Boolean = {
     readApplyDeletesFrom(key => OptionParsing.value(options, key))
@@ -212,8 +295,7 @@ object MilvusOption {
   /** Whether the scan hands Spark whole batches instead of rows. Columnar
     * output is the default. Row and columnar readers share the V3 format and
     * delete contracts, covered by fixed read fixtures. `false` selects the row
-    * path. A nearest-by join executed by the connector reads segments directly,
-    * so this option does not affect vector search.
+    * path.
     */
   private def readColumnarFrom(
       getOption: String => Option[String]
@@ -225,7 +307,19 @@ object MilvusOption {
       key: String
   ): Seq[Long] = OptionParsing.nonNegativeLongList(getOption, key)
 
+  /** The synthesized and system columns a read adds to the collection fields:
+    * those [[MilvusExtraColumns]] lists, then the row identity when
+    * [[ReadIncludeRowId]] asks for it.
+    */
   private def extraColumnsFrom(
+      getOption: String => Option[String]
+  ): Seq[String] = {
+    val listed = listedExtraColumnsFrom(getOption)
+    if (readIncludeRowIdFrom(getOption)) listed :+ MilvusRowIdColumn
+    else listed
+  }
+
+  private def listedExtraColumnsFrom(
       getOption: String => Option[String]
   ): Seq[String] = {
     val raw = getOption(MilvusExtraColumns).map(_.trim).getOrElse("")
@@ -237,6 +331,12 @@ object MilvusOption {
       )
     }
     val normalized = values.map(normalizeExtraColumnName)
+    if (normalized.contains(MilvusRowIdColumn)) {
+      throw new IllegalArgumentException(
+        s"Option '$MilvusExtraColumns' cannot request '$MilvusRowIdColumn'; " +
+          s"set '$ReadMode=$ReadModePhysical' and '$ReadIncludeRowId=true'"
+      )
+    }
     val unsupported = normalized.filterNot(SupportedExtraColumns).distinct
     if (unsupported.nonEmpty) {
       throw new IllegalArgumentException(

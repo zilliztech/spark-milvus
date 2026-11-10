@@ -8,8 +8,17 @@ compiler.cppstd=20
 build_type=Release
 
 [conf]
+# Both reviewed milvus-common versions append this list. The library itself
+# owns atomic operations; consumer package metadata is not a DT_NEEDED edge.
+milvus-common/*:tools.cmake.cmaketoolchain:extra_variables={"COMMON_LINKER_LIBS": "atomic"}
+milvus-common/*:tools.info.package_id:confs=["tools.cmake.cmaketoolchain:extra_variables"]
+# Folly compiles Linux AIO after its recipe removes FindLibAIO.cmake. Link the
+# provider in Folly itself and prevent reuse of packages without that DT_NEEDED.
+folly/*:tools.cmake.cmaketoolchain:extra_variables={"LIBAIO_LIBRARIES": "aio"}
+folly/*:tools.info.package_id:confs=["tools.cmake.cmaketoolchain:extra_variables"]
 tools.build:compiler_executables={"c": "gcc-12", "cpp": "g++-12"}
 # Build capacity is independent of the runner's core count and identifies the package.
+
 openblas/*:tools.cmake.cmaketoolchain:extra_variables={"NUM_THREADS": 64}
 openblas/*:tools.info.package_id:confs=["tools.cmake.cmaketoolchain:extra_variables"]
 
@@ -33,7 +42,6 @@ fmt/*:shared=True
 fmt/*:header_only=False
 folly/*:shared=True
 gflags/*:shared=True
-gklib/*:shared=True
 glog/*:shared=True
 google-cloud-cpp/*:shared=True
 grpc/*:shared=True
@@ -47,10 +55,6 @@ liburing/*:shared=True
 libxml2/*:shared=True
 lz4/*:shared=True
 libsodium/*:shared=True
-metis/*:shared=True
-openblas/*:shared=True
-openblas/*:dynamic_arch=True
-openblas/*:target=ARMV8
 openssl/*:shared=True
 opentelemetry-cpp/*:shared=True
 prometheus-cpp/*:shared=True
@@ -64,3 +68,8 @@ xxhash/*:shared=True
 xz_utils/*:shared=True
 zlib/*:shared=True
 zstd/*:shared=True
+
+# milvus-common also requires BLAS for Storage; keep its shared portable baseline.
+openblas/*:shared=True
+openblas/*:dynamic_arch=True
+openblas/*:target=ARMV8

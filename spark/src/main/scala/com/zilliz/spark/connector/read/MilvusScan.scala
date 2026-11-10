@@ -45,17 +45,17 @@ class MilvusScan(
     private[connector] val pushedExpression: Option[PredicateExpr] = None,
     private[read] val pushedLimit: Option[Int] = None,
     private[read] val planningSchema: StructType = null
-) extends SegmentSearchScan
+) extends SegmentScan
     with SupportsReportStatistics
     with SupportsRuntimeV2Filtering
     with Logging {
   private val milvusOption = MilvusOption(options)
-  override def searchSchema = snapshot.schema
-  override def searchOptions: Map[String, String] = milvusOption.options.toMap
-  override def searchPredicate: Option[PredicateExpr] = pushedExpression
-  override def searchSegments =
+  override def collectionSchema = snapshot.schema
+  override def segmentOptions: Map[String, String] = milvusOption.options.toMap
+  override def segmentPredicate: Option[PredicateExpr] = pushedExpression
+  override def segments =
     snapshot.dataSegments.map(segment => segment.id -> segment.indexes)
-  override def searchPartitions(): Seq[MilvusInputPartition] =
+  override def segmentPartitions(): Seq[MilvusInputPartition] =
     planInputPartitions().toSeq.map(_.asInstanceOf[MilvusInputPartition])
   private val predicateSchema = Option(planningSchema).getOrElse(schema)
   private val runtimePrimaryKey =
@@ -312,7 +312,15 @@ class MilvusScan(
       schema,
       MilvusPartitionReaderFactory.readerOptions(options.asScala.toMap),
       pushedExpression,
-      pushedLimit
+      pushedLimit,
+      snapshotId =
+        if (milvusOption.extraColumns.contains(MilvusOption.MilvusRowIdColumn))
+          snapshot.id.getOrElse(
+            throw new IllegalStateException(
+              s"snapshot ${snapshot.name} has no id for '${MilvusOption.MilvusRowIdColumn}'"
+            )
+          )
+        else 0L
     )
 }
 

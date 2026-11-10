@@ -10,7 +10,7 @@ import org.apache.spark.sql.Row;
 /** Query a snapshot through a session-local SQL view and aggregate its live rows. */
 public final class SqlAnalytics {
     public static void main(String[] args) throws Exception {
-        try (DemoSupport demo = DemoSupport.open(args, "SqlAnalytics", true, false, false)) {
+        try (DemoSupport demo = DemoSupport.open(args, "SqlAnalytics", true, false)) {
             Dataset<Row> documents = demo.spark.read().format("milvus").options(demo.options).load();
             documents.createOrReplaceTempView("documents");
 

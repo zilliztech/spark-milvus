@@ -1,55 +1,11 @@
-# Milvus Spark Connector Parameter Reference
+# Connector reference
 
-The public `milvus` data source reads fixed **Storage V3** snapshot files or
-schema-only empty inputs and supports vector search over those
-inputs. It opens storage files directly and does not call the Milvus service.
-Snapshot preparation, selection and retention belong to the caller.
-
-The public table advertises only `BATCH_READ`. A DataFrame write is rejected by
-Spark before it writes segment or snapshot files. Database and collection names
-alone are not a public read input.
-
-## Version compatibility
-
-Compatibility is determined by the files and selected Spark/Scala build, not by
-the Milvus service version alone. Every data segment declared by a public snapshot
-must have Storage V3 metadata and a corresponding V3 manifest. V2 and unknown
-storage versions fail during planning.
-
-| Spark line | Scala build versions |
-| --- | --- |
-| 3.5 | 2.12.20 or 2.13.16 |
-| 4.0, 4.1, 4.2 | 2.13.16 |
-
-The single `spark` module selects a line through `-DsparkVersion` and
-`-DscalaVersion` when building from source. Version 2.0.0 publishes Spark 4.0
-and 4.2 artifacts for Scala 2.13; Spark 3.5 and 4.1 require a source build.
-See the [release guide](releasing.md) for platforms and runtime requirements.
-The 1.x line ended at v1.6.0 and is no longer maintained.
-
-## Install version 2.0.0
-
-For Spark 4.0, resolve the universal entry artifact from Maven Central:
-
-```bash
-spark-submit --packages com.zilliz:spark-milvus-4.0_2.13:2.0.0 ...
-```
-
-For Spark 4.2 use `com.zilliz:spark-milvus-4.2_2.13:2.0.0`. Both entries
-resolve the JVM implementation and all published native platforms; alternatively
-use a [platform-specific entry](releasing.md#maven-coordinates-and-runtime-requirements)
-to resolve one native platform. Resolve the entry and its dependencies through
-Maven or `--packages`: its small entry JAR alone is not sufficient for `--jars`.
-
-For Spark 4.0 on Linux, download the complete assembly for
-[x86_64](https://github.com/zilliztech/spark-milvus/releases/download/v2.0.0/spark-milvus-4.0-bundle-2.0.0-linux-x86_64.jar)
-or [aarch64](https://github.com/zilliztech/spark-milvus/releases/download/v2.0.0/spark-milvus-4.0-bundle-2.0.0-linux-aarch64.jar)
-and pass it with `--jars`. The [release](https://github.com/zilliztech/spark-milvus/releases/tag/v2.0.0)
-also provides checksums. See the [cluster setup guide](cluster-setup.md) for
-driver and executor configuration and the
-[image guide](../docker/README.md) for the Spark 4.0 container.
-
-<a id="31-reading-data"></a>
+The reader consumes fixed Storage V3 snapshots without service calls; the
+[column replacement](column-replacement.md) writes new columns of such a
+snapshot back from a DataFrame. Both support the Spark/Scala combinations in
+[README](../README.md#project-structure).
+Use a verified candidate from this source; the previous 2.0 delivery has a
+different capability and native-component contract.
 
 ## 1. Reading with DataFrames
 
@@ -72,7 +28,6 @@ val snapshotOptions = Map(
 
 val docs = spark.read.format("milvus")
   .options(snapshotOptions)
-  .option("milvus.search.params", "ef=256")
   .load()
 
 docs.select("id", "title").show(false)
@@ -80,13 +35,9 @@ docs.createOrReplaceTempView("docs")
 spark.sql("SELECT id, title FROM docs WHERE category = 1").show(false)
 ```
 
-Replace the snapshot path, storage values and field names with your input. The
-`milvus.search.params` option above is for HNSW searches; omit it for ordinary
-reads or choose parameters supported by your indexes. Schema and segments come
-from the snapshot; no Milvus URI, token or Java SDK is needed. Ordinary `select`
-and `where` operations work on the result. To use vector search, configure the
-[read/search extension](#offline-read-and-search-extension) before creating the
-session.
+Replace the snapshot path, storage values and field names with your input.
+Schema and segments come from the snapshot; no Milvus URI, token or Java SDK
+is needed. Ordinary `select` and `where` operations work on the result.
 
 The caller retains the snapshot and all referenced data, delete and index files
 until every job using them finishes. The reader does not create snapshots,
@@ -257,17 +208,20 @@ fails during planning.
 | `MilvusOption.MilvusSegments` (`milvus.segments`) | String | No | unset | Comma-separated numeric segment IDs. It may be combined with `milvus.partitions`, in which case the scan reads their intersection. Every requested ID must exist. |
 | `MilvusOption.ReaderFieldIDs` (`fieldIDs`) | String | No | unset | Comma-separated numeric field IDs, applied during both schema inference and table creation. Each requested ID must exist in the snapshot schema; Spark projection can further prune this set. With an external `.schema()`, its non-metadata fields must select exactly these IDs and their names and Spark types must match the snapshot. |
 | `MilvusOption.MilvusExtraColumns` (`milvus.extra.columns`) | String | No | "" | Comma-separated metadata columns. The supported names are `_segment_id`, `_row_offset`, and `_timestamp`; see [Output schema](#output-schema). |
-| `MilvusOption.MilvusFilter` (`milvus.filter`) | String | No | unset | Milvus scalar expression for an ordinary table read. It is parsed and validated against the fixed snapshot during planning, evaluated in both row and columnar readers, and combined with Spark predicates and deletes before Limit. On the base of a NEAREST BY the connector executes, it excludes rows before the top k. |
+| `MilvusOption.MilvusFilter` (`milvus.filter`) | String | No | unset | Milvus scalar expression for an ordinary table read. It is parsed and validated against the fixed snapshot during planning, evaluated in both row and columnar readers, and combined with Spark predicates and deletes before Limit. |
+| `MilvusOption.ReadMode` (`milvus.read.mode`) | String | No | unset | What a load reads. Unset reads the collection's live rows. `physical` reads every stored row, rows marked deleted included, which is what a [column replacement](column-replacement.md) must write back; it cannot be combined with `milvus.read.apply.deletes=true`. `write_result` reads the receipt a column replacement published at the load path instead of collection data. |
+| `MilvusOption.ReadIncludeRowId` (`milvus.read.include_row_id`) | Boolean | No | false | Adds `_milvus_row_id` to a `physical` read; see [Output schema](#output-schema). The snapshot must carry a positive `snapshot_info.id`. |
 | `MilvusOption.ReadApplyDeletes` (`milvus.read.apply.deletes`) | Boolean | No | true | Apply all segment-local and applicable L0 deletes visible in the fixed snapshot. L0 deletes apply within the same source channel and partition; partition `-1` covers all partitions of that channel. Setting this to `false` is explicit opt-out; any provided value besides `true` or `false`, including a blank value, is rejected. |
 | `milvus.read.vector.raw` | Boolean | No | false | Output type for vector columns. With the default `false`, vectors are converted to native Spark types (`FloatVector`/`Float16Vector`/`BFloat16Vector` to `ArrayType(FloatType)`, `Int8Vector` to `ArrayType(ShortType)`, `SparseFloatVector` to `MapType(LongType, FloatType)`). Set to `true` and vector columns come out as `BinaryType`, the bytes exactly as stored, for the caller to decode using `dim` and the element type. That path does no per-element conversion, which suits batch jobs that hand the bytes straight to a native library |
 | `milvus.read.columnar` | Boolean | No | true | How the scan delivers rows. With the default `true` Spark gets whole Arrow batches (`ColumnarBatch`) that wrap the native buffers without copying, with vector columns typed as `milvus.read.vector.raw` decides; a batch with deleted rows is delivered through a position map over the surviving rows, still without copying. `false` delivers one row at a time. Row and columnar readers use the same expected-row guard. |
 | `milvus.read.batch.max.rows` | Int | No | 8192 | Positive maximum rows requested from milvus-storage for one record batch; delivered as `reader.record_batch_max_rows`. |
-| `milvus.read.batch.max.bytes` | Long | No | 33554432 | Positive target byte limit for one native record batch; delivered as `reader.record_batch_max_size`. The current upstream maximum is 4294967296 (4 GiB). In an exact search it is also the base block one engine call takes: 32 MiB when unset; the batched distance entry tiles the block internally, so the block only sets the fixed cost per call and the task's memory. The `Search budget` log line reports the choice as `batch=…`. |
+| `milvus.read.batch.max.bytes` | Long | No | 33554432 | Positive target byte limit for one native record batch; delivered as `reader.record_batch_max_size`. The current upstream maximum is 4294967296 (4 GiB). |
 | `milvus.read.arrow.max.bytes` | Long | No | 9223372036854775807 | Positive hard limit of the Arrow child allocator owned by one Spark read task. It covers imported/read Arrow buffers on row, columnar and vector paths, but not milvus-storage's separate native memory pool. |
 
 Provided selector lists reject blanks, empty entries and non-numeric values.
 Boolean read options (`milvus.snapshot.mode`, `milvus.read.apply.deletes`,
-`milvus.read.vector.raw`, `milvus.read.columnar`) accept only `true` or `false`,
+`milvus.read.include_row_id`, `milvus.read.vector.raw`, `milvus.read.columnar`)
+accept only `true` or `false`,
 case-insensitively. Positive integer/long options reject blanks, zero, negative,
 non-decimal and overflowing values, reporting the key and supplied value.
 
@@ -284,8 +238,7 @@ Each predicate tree is pushed only when the connector supports the whole tree.
 Unsupported operators, casts, nested references, JSON, Array, Geometry, vector,
 and synthetic metadata predicates remain in Spark's plan and are evaluated by
 Spark. A predicate-only column is read internally without being added to the
-result schema. On the base of a NEAREST BY the connector executes, a condition
-pushed this way applies before the top k. The DataSource V1 Filter API is not
+result schema. The DataSource V1 Filter API is not
 supported.
 
 #### Milvus scalar filter
@@ -309,362 +262,8 @@ is also pushed, both conditions must pass; deletes are then applied and Limit
 counts only surviving rows. A blank or malformed expression, an unknown field,
 or an incompatible literal fails planning instead of being ignored.
 
-On the base of a NEAREST BY the connector executes, `milvus.filter` excludes
-rows before the top k as well. JSON paths, Array predicates, and `json_contains`
+JSON paths, Array predicates, and `json_contains`
 are not in the current scalar subset.
-
-## Vector search
-
-A vector search is written as a NEAREST BY join: Spark 4.2's own, and on
-Spark 3.5, 4.0 and 4.1 the connector's `nearestByJoin` and `nearest_by_join`,
-which preserve the same join arguments and result shape (the two sections
-below); numerical ranking differences are described below. When the base is a Milvus table, the connector executes the join: it
-finds each query's top k in every segment of the snapshot, through the
-persisted index the snapshot pinned (APPROX) or by computing every distance
-(EXACT), merges them into the global top k and reads the base columns of the
-rows it selected.
-
-APPROX loads the HNSW family (`HNSW`, `HNSW_SQ`, `HNSW_PQ`, `HNSW_PRQ`),
-the IVF family (`IVF_FLAT`, `IVF_SQ8`, `IVF_PQ`) and `FLAT`, over the element type the column carries. A
-nullable column is indexed over the rows that have a value, which its index
-files record in a `valid_data` bitmap; without that bitmap the search fails.
-Indexes containing vector quantization can return
-approximate scores, and the hits are ranked by them; the connector does not
-read the original vectors to recompute them. An index whose segment,
-partition or row count differs from the segment the snapshot pinned fails
-while the join is planned, naming every such segment; corrupt files and
-incompatible formats fail when a task loads the index. Each task owns and
-closes the indexes it loaded; they are not cached across tasks. Search
-parameters follow the index family, in the base's `milvus.search.params`: the
-HNSW family takes `ef`, an integer at least K, defaulting to `max(64, K)`; the
-IVF family takes `nprobe`, a positive integer defaulting to 16; a flat index
-takes none. Public native bundles use open-source Knowhere. Encrypted indexes
-and formats requiring Cardinal are outside the public read contract.
-
-Set `spark.plugins=com.zilliz.spark.connector.extensions.MilvusSparkPlugin`
-before starting Spark, together with the session extension shown below. The
-plugin loads the native libraries on each executor at startup and is required
-for the connector to execute NEAREST BY joins. A cluster-provided
-`spark.plugins.defaultList` containing the same plugin also satisfies this
-requirement. Without it, the join uses the Spark fallback rather than the
-connector's search execution, which can compare every query with every base
-row. Check `hits.explain(true)` for `input=Milvus table` or `input=DataFrame`
-and inspect the search counters in the Spark SQL UI; a successful query alone
-does not establish that persisted indexes were used.
-
-Executors that read persisted indexes from object storage should run with
-glibc's malloc tuned, through the executor environment:
-`spark.executorEnv.MALLOC_ARENA_MAX=2`,
-`spark.executorEnv.MALLOC_MMAP_THRESHOLD_=1048576` and
-`spark.executorEnv.MALLOC_TRIM_THRESHOLD_=134217728`. An index is read as
-many 8 MiB range requests on several native threads, and glibc's default
-dynamic mmap threshold keeps the freed blocks in per-thread arenas, so an
-executor that searches chunk after chunk keeps growing until the container
-limit is hit. A fixed threshold switches that off. Indexes read from local
-disk do not need it.
-
-The options below size the job. They are read options of the base, given as
-`milvus.search.params` is: `.option(...)` on the fixed DataFrame read. To use
-SQL, register that DataFrame as a temporary view. An ordinary DataFrame input
-that is not a direct Milvus scan takes the defaults.
-`milvus.search.queries.max.bytes` (default 1 GiB) decides where the query rows
-go. When the query side's rows fit it, they are fetched to the driver in one
-job, numbered and packed there and broadcast, and every executor keeps the
-packed vectors whole; each hit finds its query row by number. A larger query
-side stays on the executors: its vectors are broadcast when they alone fit,
-and otherwise the executors pack them by query group into a shuffle output,
-which a task reads one group at a time, holding at most two; the hits then
-meet their query rows in a join after the last stage. Every way gives the same
-result. Read by group, a job reads the query vectors once per segment set in
-total, and the executors' local disks need room for about two copies of them.
-
-Computed query rows are first materialized in a Spark local checkpoint, then
-classified and numbered. Search, Spark fallback and result assembly all read
-that fixed input. If an executor loses checkpoint data, the query fails rather
-than rerunning the source and pairing hits with different rows. Local
-checkpoints do not provide recovery from executor loss. The result plan keeps
-its checkpoint for repeated actions; Spark reclaims it when the plan is no
-longer referenced. Driver collection and planning failures release it earlier.
-
-`milvus.search.group.max.bytes` limits one task's query-group heap estimate.
-Serial search counts each query's vector row plus K × 48 bytes for primitive
-and packed candidates. An index search holding every core of a multicore
-executor reserves overlapping search and output: each query counts
-`2 × (vector row bytes + 8 + 128) + K × 72` bytes for two groups' vectors, ids,
-queue metadata, the current primitive/packed candidates and the next merger.
-This estimate applies to the explicit option too. A single query, or an explicit
-limit too small for one overlapping query pair, uses the serial estimate.
-Such a task searches at most
-one group ahead when it retains its segment set; query-resident and streaming
-tasks execute serially and may leave the overlap reserve unused. Spark accounts
-for its shuffle pages separately.
-Left unset, the planner takes the larger of 512 MiB and 8 queries per task
-core, capped at half the task's query heap budget and 2 GiB, with a floor of one
-query. The `Search budget` log line reports the resulting query count. At
-768 float32 dimensions and K=100,000, a 24 GiB-heap, 32-core executor still
-targets 256 queries per call; an explicit 512 MiB holds 74 with overlap
-reserved, compared with 111 under the serial estimate.
-
-For a Milvus snapshot with proven physical row counts, planning caps K in
-these estimates at the total number of physical rows. Each search task retains
-at most the requested K or the sum of rows across its segment set, whichever
-is smaller; the global merge uses the sum across all segments. A single
-segment's row count does not cap the combined answer. If any participating
-segment has an unknown physical row count, that capacity remains K. Index row
-counts and other planning estimates do not establish this bound.
-Native result buffers use the largest single-segment row bound instead of the
-combined candidate capacity: each Knowhere call searches only one segment.
-This bound also sizes the automatic direct-memory group limit and the result
-buffers reserved while prefetching indexes.
-
-Milvus candidate records use a fixed 12-byte encoding: a UInt32 segment
-ordinal, a UInt32 physical row offset and a Float32 score. One dictionary for
-all segments in the search sorts their original signed Long ids and is
-broadcast once; each task retains only its own subset of those global
-ordinals. Physical row counts include deleted rows. A known physical extent
-above 2^32 fails planning. Unknown extents may execute, and every encoded
-offset must be in [0, 2^32); overflow fails without truncation or a wider
-fallback. Every search uses Float32 candidate scores before local top-k
-selection and throughout merging. Distance calculations may still accumulate
-in Double; L2 keeps the squared-distance ranking scale and rounds the square
-to Float32. Values that round together use segment id and row offset to break
-ties, including large L2 squares that overflow to infinity and small squares
-that underflow to zero. This can change near-tie selection compared with Double
-scores. No encoding option is needed. Group and merge planning retain the
-conservative 24-byte candidate estimate and the 48/72-byte reserves above, so
-smaller records do not increase group sizes or reduce merge partitions.
-DataFrame inputs use their nonnegative Spark partition id as the ordinal and
-the same checked UInt32 row offsets and Float32 scores. They carry rows after
-the 12-byte candidate and a 4-byte row length: a 16-byte header plus row bytes.
-Their planning still reserves the previous 28-byte header plus row bytes.
-
-`milvus.search.collect.threads` (default 0, the cores the task holds) is how many
-threads a search task checks, collects and packs a group's candidates on between
-two Knowhere calls; at large K that work is a third of the task, and on one
-thread it left the other cores idle. `milvus.search.calls.in.flight` (default
-2, at most 8) is how many segments of a held set a task searches at once within
-one query group: the second call's queries fill the tail of the first and the
-collection of the first's answers, which took a 32-core executor from 89% to
-95-97% busy at K=10,000 and from 77% to 92-97% at K=100,000; the calls share
-Knowhere's threads, so each one takes longer and the gain is the idle time they
-fill, not twice the throughput. 1 is the sequential search. `milvus.search.query.ranges` (default 0,
-the planner's choice) cuts the first stage into that many query ranges per
-segment set, so that the tasks fill the slots in whole waves; each range task
-loads its segment set again, which pays off when the search itself takes far
-longer than the load.
-`milvus.search.segments.max.bytes` (default automatic) is how many bytes of
-segment data **one executor** keeps off the heap for a search: base vectors for
-EXACT, indexes for APPROX. Unset, it follows the executor's memory:
-`(memory limit − heap − 1 GiB) × 0.5` for EXACT and
-`memory limit − heap − 2 GiB` for APPROX. The limit is the cgroup's or the
-machine's in local mode, and on a cluster it is the container Spark asks for
-(`spark.executor.memory` + memoryOverhead + offHeap). It is never below 64 MiB a
-task. The search tasks running on one executor share it. On a cluster, APPROX
-runs one search task per executor at a time; EXACT divides the
-budget by `spark.executor.cores` ÷ `spark.task.cpus`; a local master divides the
-n of `local[n]` by `spark.task.cpus`. Queries have a budget of their own on the
-heap: the part Spark does not manage, `(heap − 300 MiB) × (1 −
-spark.memory.fraction)`, divided the same way. When a task's queries fit that
-budget, the task keeps its queries and reads each segment once. Otherwise it
-keeps its segment set off the heap and the query groups pass through it one
-by one; when the set does not fit either, the plan cuts more sets. A segment
-set that turns out larger than the budget no longer fails the task: every query
-group reads the set again (I/O × groups). The driver's `Search budget` log
-line states both budgets, the order chosen, the number of sets and whether any
-set streams. Segment data lives in Arrow's or Knowhere's off-heap memory, which
-`-Xmx` does not bound.
-
-On a cluster, APPROX needs no `spark.task.cpus` setting. The connector
-declares that each task of the index search stage takes every core of its executor (an exact search runs its tasks on
-`spark.task.cpus` cores each), and that each task of the stage packing the
-query groups takes as many cores as keeps the groups packed at once inside the
-heap. The other stages run one task per core, as by default. This needs
-dynamic allocation off; in local mode or with dynamic allocation on, set
-`spark.task.cpus` to the executor's cores as before.
-
-`milvus.search.group.max.bytes` stays **per task**: it also decides how many
-query groups there are, which is the shape of the plan and not only memory. One
-task that keeps its segment set peaks at its segment budget plus one query
-group, plus the next group being read when the query set is read by group. A
-task that keeps its queries peaks at the matrices and top-k state of all its
-queries plus one segment and its load peak. A broadcast query set is also kept
-whole on every executor.
-
-The node that executes the join counts into SQL metrics of these names, which
-the SQL tab shows on the node and the stage page lists once a task ends; while
-the join runs, the driver log reports them once a heartbeat. They are
-`milvus.search.segment.searches`, `milvus.search.read.bytes` and
-`milvus.search.read.nanos`, `milvus.search.index.bytes` and
-`milvus.search.index.load.nanos`, `milvus.search.bitmap.nanos`,
-`milvus.search.knowhere.calls` and `milvus.search.knowhere.nanos`,
-`milvus.search.compared.pairs` (EXACT: the query × visible-row pairs scored
-so far; 0 for APPROX), `milvus.search.exact.rescans` (EXACT L2 over float32:
-the batch × query pairs searched again pair by pair because the batched
-entry's error could hide a nearer row; near zero for most data, high for
-vectors far from the origin and near each other), `milvus.search.candidates`,
-and `milvus.search.take.rows` and `milvus.search.take.nanos`. `bruteForce` and index
-searches run in Knowhere's own thread pool, so their time is in
-`milvus.search.knowhere.nanos` rather than in the task's CPU time; the batched
-float32 exact entry runs on the task thread, so its time is in both.
-
-### Offline read and search extension
-
-For fixed V3 snapshot or schema/manifest reads and searches, set
-`spark.sql.extensions=com.zilliz.spark.connector.extensions.MilvusReadSparkSessionExtensions`
-and `spark.plugins=com.zilliz.spark.connector.extensions.MilvusSparkPlugin`.
-The read extension registers vector functions, NEAREST BY and connector search
-strategies. Plain DataFrame reads do not require a search extension. Spark
-Connect uses the same fixed input options and supports the SQL search path
-described below. Configure the extension and plugin on the Connect server.
-
-### NEAREST BY on Spark 4.2
-
-On Spark 4.2 a search is Spark's own NEAREST BY join. With the
-session extension installed
-(`spark.sql.extensions=com.zilliz.spark.connector.extensions.MilvusReadSparkSessionExtensions`)
-and `com.zilliz.spark.connector.extensions.MilvusSparkPlugin` in
-`spark.plugins`, a join whose base is a Milvus table is executed by the
-connector. Here `docs` is the temporary view created in the
-[fixed snapshot example](#1-reading-with-dataframes), with search parameters set
-on that read; `queries` is a temporary view of the query DataFrame:
-
-```sql
-SELECT q.qid, d.id, d.title
-FROM queries q
-JOIN (SELECT * FROM docs WHERE category = 1) d
-  APPROX NEAREST 10 BY SIMILARITY vector_cosine_similarity(q.vec, d.embedding)
-```
-
-In a DataFrame it is `queries.nearestByJoin(docs,
-call_function("vector_cosine_similarity", queries("vec"), docs("embedding")),
-10, "approx", "similarity")`. The result is Spark's NEAREST BY result: each row
-is one query row joined with one base row, at most k rows a query, and no score
-column; select the ranking expression again for the score.
-
-- What is taken over: the ranking is `vector_l2_distance` (BY DISTANCE),
-  `vector_cosine_similarity` or `vector_inner_product` (BY SIMILARITY), one
-  argument computed from the base's columns and the other from the query's
-  columns or constants; `spark.sql.crossJoin.enabled` is true and neither side
-  is a stream. A base that is a Milvus table -- below the join only aliases,
-  views, column projections and filters the Milvus scan takes whole, and the
-  vector a FloatVector, Float16Vector or BFloat16Vector field -- is searched as
-  described below. Any other base is read as a DataFrame and scanned exactly:
-  EXACT on any base, and APPROX when the base contains a Milvus table (a filter
-  the scan cannot take, a computed column, a limit, a join), computed exactly
-  then. APPROX over a base without a Milvus table is left to Spark, or to that
-  base's own data source. A ranking or direction the connector does not
-  compute is executed by Spark (a cross join, then the top k of each query),
-  with a line in the driver log saying why. `explain` names the input:
-  `input=Milvus table`, or `input=DataFrame` with the reason.
-- A DataFrame input has no field dimension. The connector searches the query
-  vectors of the commonest length among those it can search, and leaves the
-  others, as well as query vectors with a NULL element, to Spark itself. A
-  base row whose vector is NULL or has a NULL element ranks nothing; one of
-  another length fails with `VECTOR_DIMENSION_MISMATCH`, as Spark's function
-  does. Its search options are the defaults, and with more query groups than
-  one the base is computed once for each group.
-- APPROX searches the index of each segment that has a usable one and scans
-  the others exactly: no index on the field, no index metadata in the
-  snapshot, an index built for another metric and an index type the connector
-  does not load all leave a segment without a usable index. EXACT scans every
-  segment. `explain` says how many segments APPROX takes through an index and
-  why the others are scanned; the node shows the search's counters, its output
-  rows, how the query rows divided and how many segments each way took in the
-  SQL tab of the Spark UI.
-- `milvus.search.params` is an option of the base read: comma-separated
-  `name=value` pairs, `ef` for the HNSW family and `nprobe` for the IVF family;
-  a parameter the index does not take fails the search. A DataFrame gives it
-  with `.option(...)` on the read.
-- A filter inside the base applies before the top k; a filter above the join
-  applies after it.
-- A query vector that is NULL, or has the field's dimension and a NULL
-  element, has a NULL ranking value and finds nothing: INNER drops the query
-  row, LEFT OUTER keeps it with NULL base columns. A query vector of another
-  length (the empty one included) fails with `VECTOR_DIMENSION_MISMATCH`, as in
-  Spark, unless the base has no row.
-- Query rows whose vector holds NaN or an infinite value, or values outside the
-  range where Knowhere and Spark compute the same (for L2 and the inner
-  product, a magnitude of 2^33 or more; for COSINE, a largest magnitude below
-  2^-25 or at least 2^17, the zero vector included), are executed by Spark
-  itself and their rows join the result. When there are such rows the base is
-  read once more, for Spark's cross join of those rows with it.
-- Base vectors holding NaN, an infinite value or values outside that range are
-  scored by Spark's own function during an exact scan, so they rank as in
-  Spark: NaN above every number, last BY DISTANCE and first BY SIMILARITY. An
-  index search ranks by the scores the index returns.
-- Queries on float16 and bfloat16 fields are converted to the field's element
-  type before Knowhere sees them, as Milvus does; their scores differ from
-  Spark's by more than float32 rounding, and rows of close scores may come in
-  another order than Spark's.
-- An Int8Vector field is searched as a DataFrame input when the ranking casts
-  it, `vector_l2_distance(q.vec, cast(d.embedding AS ARRAY<FLOAT>))`.
-
-### NEAREST BY on Spark 3.5, 4.0 and 4.1
-
-These lines have no NEAREST BY. The same session extension gives them
-`nearestByJoin` with Spark 4.2's signature, a table function
-`nearest_by_join` for SQL, and the three vector functions. The result and the
-rules are those of the section above: a join over a Milvus table is executed by
-the connector under the same conditions. Other joins use the same join semantics
-through operators available on these lines; floating-point ranking can differ as
-described above.
-
-```scala
-import com.zilliz.spark.connector.implicits._   // also harmless on 4.2
-import org.apache.spark.sql.functions.call_function
-
-val hits = queries.nearestByJoin(docs,
-  call_function("vector_cosine_similarity", queries("vec"), docs("embedding")),
-  10, "approx", "similarity")                     // a sixth argument "left_outer" keeps every query
-```
-
-Java writes `new MilvusDataFrame(queries).nearestByJoin(docs, ranking, 10,
-"approx", "similarity")`; `MilvusDataFrame` is in
-`com.zilliz.spark.connector.implicits`.
-
-```sql
-SELECT query.qid, base.id, base.title
-FROM nearest_by_join(
-  TABLE(queries),
-  TABLE(SELECT * FROM docs WHERE category = 1),
-  'vector_cosine_similarity(query.vec, base.embedding)',
-  10, 'approx', 'similarity')                     -- a seventh argument 'left_outer' keeps every query
-```
-
-- The ranking is a string, parsed by the session's parser. In it, and in the
-  columns the function returns, the query side is named `query` and the base
-  `base`. Arguments can also be given by name: `query`, `base`, `ranking`,
-  `num_results`, `mode`, `direction`, `join_type`.
-- `mode` is `approx` or `exact` and `direction` is `distance` or `similarity`,
-  in any case; the join type is `inner` (the default) or `left_outer`, in any
-  case and with or without the underscore; k is at least 1 and has no fixed
-  upper bound here: the planner decides whether merging a given k fits the
-  executors' memory and fails at planning, before any task runs, when it does
-  not, saying what heap it needs and the largest k that fits. Spark 4.2's own
-  `NEAREST k BY` syntax still caps k at 100,000 before the connector sees the
-  join. An argument out of these, cross joins disabled, a streaming side and a
-  ranking that cannot be ordered fail with an `IllegalArgumentException` whose
-  message is Spark 4.2's, after the name of Spark 4.2's error condition, such
-  as `[NEAREST_BY_JOIN.NUM_RESULTS_OUT_OF_RANGE]`.
-- `vector_l2_distance`, `vector_cosine_similarity` and `vector_inner_product`
-  take two `ARRAY<FLOAT>` and return a `FLOAT`, with Spark 4.2's rules: a NULL
-  argument or a NULL element gives NULL, arrays of different lengths fail with
-  `[VECTOR_DIMENSION_MISMATCH]`, two empty arrays give 0 for L2 and the inner
-  product and NULL for the cosine, and so does a zero vector for the cosine.
-  The sums are taken in double and rounded to float once, as Spark 4.3 does
-  them, so values that overflow or underflow Spark 4.2.0's float sums do not.
-- These lines have no other implementation to leave APPROX to, so the
-  connector also takes APPROX over a base without a Milvus table, computed
-  exactly as a DataFrame input.
-- A join the connector does not execute, such as a ranking that is not one of
-  the three functions, gives each query row a `uuid()`, joins it with every
-  base row, and keeps the first k of each query by `row_number()` over a
-  window. Like Spark 4.2's own execution, it forms every pair of a query row
-  and a base row; the driver log says why the connector did not execute the
-  join.
-- On a Spark Connect session of 4.0 or 4.1, `nearestByJoin` fails and points
-  to the table function, which works there. PySpark has no `nearestByJoin` on
-  these lines yet.
 
 ## Output schema
 
@@ -684,6 +283,11 @@ The output schema for `milvus` format depends on the Milvus collection schema an
     segment before delete filtering.
   - `_timestamp` (`LongType`, snapshot nullability): the stored Milvus system
     timestamp field with field ID `1`; it is read from storage, not synthesized.
+- `_milvus_row_id` (non-null struct of `snapshot_id`, `segment_id` and
+  `row_offset`, all `LongType`) last, when `milvus.read.include_row_id=true`
+  asks for it. It binds the row to the snapshot it was read from and to its
+  stored position, and a [column replacement](column-replacement.md) consumes
+  it. Callers carry it unchanged and do not interpret its fields.
 
 The connector does not expose a `partition` metadata column. Partition and
 segment selection uses `milvus.partitions` and `milvus.segments`.
@@ -717,25 +321,9 @@ fails explicitly and reports the unsupported type.
 
 ## Native dependency bundle
 
-Published entry artifacts resolve a JVM artifact and a matching native platform
-bundle; see the [release guide](releasing.md#maven-coordinates-and-runtime-requirements).
-Public bundles contain open-source Knowhere and milvus-storage. For a local fat
-JAR, select the Spark line and use `spark/assembly` with
-`-Dmilvus.native.bundle=/absolute/path/to/platform.jar`. All Spark lines use the
-same packaging rules and leave Spark-supplied Arrow and Jackson modules out.
-Root assembly is not an entry point.
-
-The runtime verifies and extracts the unified native bundle once per class
-loader, checking engine source pins and platform compatibility before JNI
-initialization. An incompatible explicit `knowhere.native.path` is rejected.
-See [building and validation](contributing.md#unified-native-bundle).
-
-One JVM loads one copy of the connector. In local mode (`--master local[*]`),
-leave `spark.executor.userClassPathFirst` unset: the executor runs in the
-driver's JVM, and a second connector class loader conflicts when native
-libraries are used. Cluster executors run in their own JVMs.
-
-Preload the **running JRE's** `libjsig.so` in both the driver and every executor,
-using `LD_PRELOAD` and `spark.executorEnv.LD_PRELOAD` with the paths appropriate
-to each machine. See the [runtime launch example](releasing.md#thin-modules-for-downstream-libraries),
-including how macOS sets `DYLD_INSERT_LIBRARIES` for the JVM alone.
+Use one matching Storage platform bundle on both driver and executor classpaths.
+Native manifest format 2 lives under `native/milvus/2/<platform>/`; each binding
+publishes its component requirement under `META-INF/milvus-native/requirements/`.
+A missing component, mismatched source revision or corrupt library fails loading.
+Thin JARs contain no native libraries. See [releasing](releasing.md) for artifact
+selection and [contributing](contributing.md) for native build checks.

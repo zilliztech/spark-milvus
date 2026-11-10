@@ -18,7 +18,7 @@ object BinlogFixture {
 
   def parquet(name: String): Array[Byte] =
     Files.readAllBytes(
-      Paths.get(s"core/src/test/data/index-codec/$name.parquet")
+      Paths.get(s"core/src/test/data/binlog-codec/$name.parquet")
     )
 
   def encode(

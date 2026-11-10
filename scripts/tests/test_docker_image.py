@@ -80,17 +80,16 @@ sys.exit("Unexpected Docker operation")
         )
 
     def jar(self, platform="linux-x86_64", plugin=True, aliases=False, missing_library=False):
-        prefix = "native/milvus/1/" + platform + "/"
-        properties = "format.version=1\nplatform=" + platform + "\n"
+        prefix = "native/milvus/2/" + platform + "/"
+        properties = "format.version=2\nplatform=" + platform + "\n"
         with ZipFile(self.assembly, "w") as archive:
             if plugin:
-                archive.writestr("com/zilliz/spark/connector/extensions/MilvusSparkPlugin.class", b"plugin")
-            archive.writestr(prefix + "libmilvus-storage-jni.so", b"storage-native")
+                archive.writestr("com/zilliz/spark/connector/sources/MilvusDataSource.class", b"plugin")
             if not missing_library:
-                name = "libknowhere_jni-abcd.so" if aliases else "libknowhere_jni.so"
-                archive.writestr(prefix + name, b"vector-native")
+                name = "libmilvus-storage-jni-abcd.so" if aliases else "libmilvus-storage-jni.so"
+                archive.writestr(prefix + name, b"storage-native")
                 if aliases:
-                    properties += "alias.libknowhere_jni.so=" + name + "\n"
+                    properties += "alias.libmilvus-storage-jni.so=" + name + "\n"
             archive.writestr(prefix + "manifest.properties", properties)
 
     def run_script(self, *arguments, **environment):
@@ -127,9 +126,9 @@ sys.exit("Unexpected Docker operation")
         self.assembly.write_text("This is not a JAR")
         self.assert_rejected(self.build(), "File is not a zip file")
         self.jar(plugin=False)
-        self.assert_rejected(self.build(), "does not contain MilvusSparkPlugin")
+        self.assert_rejected(self.build(), "does not contain MilvusDataSource")
         self.jar(missing_library=True)
-        self.assert_rejected(self.build(), "lacks native library libknowhere_jni.so")
+        self.assert_rejected(self.build(), "lacks native library libmilvus-storage-jni.so")
 
     def test_native_platform_must_match_requested_image(self):
         self.assert_rejected(self.build("--platform", "linux/arm64"),
@@ -168,8 +167,8 @@ sys.exit("Unexpected Docker operation")
         files = context["files"]
         self.assertEqual(files["connector.jar"]["sha256"], digest)
         for required in ("Dockerfile", "LICENSE", "demo/run.sh", "demo/python/common.py",
-                         "demo/config/queries.json", "scripts/ci/check_read_fixtures.py",
-                         "demo/java/src/main/java/com/zilliz/spark/connector/demo/ExactSearch.java",
+                         "scripts/ci/check_read_fixtures.py",
+                         "demo/java/src/main/java/com/zilliz/spark/connector/demo/ReadSnapshot.java",
                          FIXTURE + "/snapshot.json", FIXTURE + "/SHA256SUMS"):
             self.assertIn(required, files)
         self.assertFalse(any(data["has_private_sentinel"] or data["symlink"] for data in files.values()))
@@ -179,7 +178,7 @@ sys.exit("Unexpected Docker operation")
         self.assertEqual(list(self.temporary_contexts.iterdir()), [])
 
     def test_public_source_symlink_and_tampered_fixture_are_rejected(self):
-        path = self.repo / "demo/config/queries.json"
+        path = self.repo / "demo/config/s3-options.json"
         original = path.read_bytes()
         path.unlink()
         private = self.root / "private-options.json"

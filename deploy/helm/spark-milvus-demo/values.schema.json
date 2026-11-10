@@ -21,11 +21,11 @@
       ]
     },
     "language": {"enum": ["python", "java"]},
-    "example": {"enum": ["read", "filter", "sql", "exact", "filtered", "index", "vectors", "partition"]},
+    "example": {"enum": ["read", "filter", "sql", "partition"]},
     "input": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["existingSecret", "optionsKey", "queriesKey"],
+      "required": ["existingSecret", "optionsKey"],
       "properties": {
         "existingSecret": {
           "type": "string",
@@ -33,8 +33,7 @@
           "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
           "description": "Spark appends -volume, so use a DNS label with at most 56 characters."
         },
-        "optionsKey": {"$ref": "#/definitions/inputKey"},
-        "queriesKey": {"anyOf": [{"const": ""}, {"$ref": "#/definitions/inputKey"}]}
+        "optionsKey": {"$ref": "#/definitions/inputKey"}
       }
     },
     "serviceAccounts": {

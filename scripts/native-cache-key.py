@@ -19,8 +19,8 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CACHE_FORMAT = 2
-ENGINES = ("milvus-storage", "knowhere")
+CACHE_FORMAT = 3
+ENGINES = ("milvus-storage",)
 # Platform -> (operating system as platform.system() names it, machine as
 # platform.machine() names it on that system).
 PLATFORMS = {"linux-x86_64": ("Linux", "x86_64"), "linux-aarch64": ("Linux", "aarch64"),
@@ -193,7 +193,8 @@ def fingerprint(root, plan, platform, identity):
         "platform": platform,
         "runner": row["runner"],
         "baseline": baseline,
-        "features": {"with_cardinal": False},
+        "components": ["storage"],
+        "manifestFormat": 2,
         "pins": validate_pins(root, plan),
         "files": source_inputs(root),
         "toolchain": identity,

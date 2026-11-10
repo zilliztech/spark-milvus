@@ -22,8 +22,8 @@ PLATFORMS = {
     "linux-aarch64": {"dockerPlatform": "linux/arm64", "architecture": "arm64"},
 }
 MANIFEST = "assembly-manifest.json"
-PLUGIN = "com/zilliz/spark/connector/extensions/MilvusSparkPlugin.class"
-LIBRARIES = ("libmilvus-storage-jni.so", "libknowhere_jni.so")
+PROVIDER = "com/zilliz/spark/connector/sources/MilvusDataSource.class"
+LIBRARIES = ("libmilvus-storage-jni.so",)
 SHA = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?")
@@ -71,12 +71,12 @@ def image_tag(version, architecture=None):
 
 
 def check_assembly(jar, platform):
-    """Require the connector plugin and this platform's native libraries."""
-    prefix = f"native/milvus/1/{platform}/"
+    """Require the connector provider and this platform's native libraries."""
+    prefix = f"native/milvus/2/{platform}/"
     try:
         with ZipFile(jar) as archive:
             entries = {info.filename: info.file_size for info in archive.infolist()}
-            require(entries.get(PLUGIN, 0) > 0, "Assembly does not contain MilvusSparkPlugin")
+            require(entries.get(PROVIDER, 0) > 0, "Assembly does not contain MilvusDataSource")
             manifest = prefix + "manifest.properties"
             require(manifest in entries, "Assembly lacks native resources for " + platform)
             properties = {}
@@ -86,8 +86,9 @@ def check_assembly(jar, platform):
                     properties[key.strip()] = value.strip()
     except (OSError, BadZipFile, UnicodeError) as error:
         raise VerificationError("Assembly is not a readable JAR: " + str(error)) from error
-    require(properties.get("platform") == platform and properties.get("format.version") == "1",
+    require(properties.get("platform") == platform and properties.get("format.version") == "2",
             "Native manifest does not describe platform " + platform)
+    require(properties.get("components") == "storage", "Public assembly must contain only Storage")
     for library in LIBRARIES:
         name = library if prefix + library in entries else properties.get("alias." + library, "")
         require(LIBRARY_NAME.fullmatch(name) is not None and entries.get(prefix + name, 0) > 0,

@@ -282,7 +282,7 @@ def audit_bundle(bundle, platform):
         raise ValueError("Unsupported ABI audit platform: " + platform)
     family = PLATFORMS[platform][0]
     before = digest(bundle)
-    prefix = f"native/milvus/1/{platform}/"
+    prefix = f"native/milvus/2/{platform}/"
     libraries = {}
     with zipfile.ZipFile(bundle) as archive, tempfile.TemporaryDirectory(prefix="native-abi-") as directory:
         entries = {}
@@ -298,7 +298,7 @@ def audit_bundle(bundle, platform):
         if manifest_name not in entries:
             raise ValueError("Missing native manifest: " + manifest_name)
         manifest = manifest_properties(archive.read(manifest_name))
-        if manifest.get("format.version") != "1" or manifest.get("platform") != platform:
+        if manifest.get("format.version") != "2" or manifest.get("platform") != platform:
             raise ValueError("Native manifest format or platform does not match ABI audit")
         names = manifest.get("libraries", "").split(",")
         if not all(names) or len(names) != len(set(names)):

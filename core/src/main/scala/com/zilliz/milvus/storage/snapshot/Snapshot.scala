@@ -16,6 +16,10 @@ import io.milvus.grpc.schema.{CollectionSchema => ProtoSchema, FieldSchema}
   * @param createdAt
   *   the raw Milvus HybridTS from `snapshot_info.create_ts`; its physical part
   *   is an epoch millisecond and its low 18 bits are the logical clock.
+  * @param id
+  *   the positive `snapshot_info.id` Milvus allocated for this snapshot. It
+  *   tells two snapshots of one collection apart, which a row identity bound to
+  *   its snapshot relies on. A source without one leaves it empty.
   */
 final case class Snapshot(
     name: String,
@@ -27,8 +31,13 @@ final case class Snapshot(
     origin: SnapshotOrigin,
     bucket: String,
     indexes: Option[Vector[CollectionIndex]] = None,
-    buildIds: Option[Vector[Long]] = None
+    buildIds: Option[Vector[Long]] = None,
+    id: Option[Long] = None
 ) {
+  require(
+    id.forall(_ > 0L),
+    s"snapshot id must be positive, got ${id.getOrElse(0L)}"
+  )
 
   /** The schema as the bytes every `SegmentReadTask` carries. */
   def schemaBytes: Array[Byte] = schema.toByteArray

@@ -80,8 +80,7 @@ spec:
 
 {{- define "spark-milvus-demo.arguments" -}}
 {{- $name := include "spark-milvus-demo.fullname" . -}}
-{{- $search := has .Values.example (list "exact" "filtered" "index") -}}
-{{- if and (ne .Values.example "vectors") (empty .Values.input.existingSecret) -}}
+{{- if empty .Values.input.existingSecret -}}
 {{- fail "input.existingSecret is required for snapshot examples" -}}
 {{- end -}}
 {{- $conf := dict
@@ -101,8 +100,6 @@ spec:
   "spark.kubernetes.driver.reusePersistentVolumeClaim" "false"
   "spark.kubernetes.submission.waitAppCompletion" "true"
   "spark.dynamicAllocation.enabled" "false"
-  "spark.sql.extensions" "com.zilliz.spark.connector.extensions.MilvusReadSparkSessionExtensions"
-  "spark.plugins" "com.zilliz.spark.connector.extensions.MilvusSparkPlugin"
   "spark.pyspark.python" "/usr/bin/python3"
   "spark.pyspark.driver.python" "/usr/bin/python3"
   "spark.driver.memory" .Values.spark.driver.memory
@@ -129,9 +126,7 @@ spec:
 {{- $_ := set $conf (printf "%s.%s" $scope $key) $value -}}
 {{- end -}}
 {{- end -}}
-{{- if ne .Values.example "vectors" -}}
 {{- $_ := set $conf (printf "spark.kubernetes.driver.secrets.%s" .Values.input.existingSecret) "/etc/spark-milvus/input" -}}
-{{- end -}}
 {{- range $key, $value := .Values.extraSparkConf -}}
 {{- if hasKey $conf $key -}}
 {{- fail (printf "extraSparkConf cannot override chart-managed setting %s" $key) -}}
@@ -152,26 +147,16 @@ spec:
 - --jars
 - local:///opt/spark-milvus/connector.jar
 {{- if eq .Values.language "python" }}
-{{- $examples := dict "read" "01_read_snapshot.py" "filter" "02_filter_project.py" "sql" "03_sql_analytics.py" "exact" "04_exact_search.py" "filtered" "05_filtered_search.py" "index" "06_index_search.py" "vectors" "07_vector_functions.py" "partition" "08_partition_selection.py" }}
+{{- $examples := dict "read" "01_read_snapshot.py" "filter" "02_filter_project.py" "sql" "03_sql_analytics.py" "partition" "08_partition_selection.py" }}
 - --py-files
 - local:///opt/spark-milvus/demo/python/common.py
 - {{ printf "local:///opt/spark-milvus/demo/python/%s" (index $examples .Values.example) | quote }}
 {{- else }}
-{{- $examples := dict "read" "ReadSnapshot" "filter" "FilterProject" "sql" "SqlAnalytics" "exact" "ExactSearch" "filtered" "FilteredSearch" "index" "IndexSearch" "vectors" "VectorFunctions" "partition" "PartitionSelection" }}
+{{- $examples := dict "read" "ReadSnapshot" "filter" "FilterProject" "sql" "SqlAnalytics" "partition" "PartitionSelection" }}
 - --class
 - {{ printf "com.zilliz.spark.connector.demo.%s" (index $examples .Values.example) | quote }}
 - local:///opt/spark-milvus/demo-java.jar
 {{- end }}
-{{- if ne .Values.example "vectors" }}
 - --options
 - {{ printf "/etc/spark-milvus/input/%s" .Values.input.optionsKey | quote }}
-{{- end }}
-{{- if $search }}
-- --queries
-{{- if .Values.input.queriesKey }}
-- {{ printf "/etc/spark-milvus/input/%s" .Values.input.queriesKey | quote }}
-{{- else }}
-- /opt/spark-milvus/demo/config/queries.json
-{{- end }}
-{{- end }}
 {{- end -}}

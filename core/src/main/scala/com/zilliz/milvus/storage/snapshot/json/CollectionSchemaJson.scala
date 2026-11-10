@@ -168,7 +168,8 @@ case class CollectionSchemaJson(
       enableDynamicField = enableDynamicField.getOrElse(false),
       properties = properties.getOrElse(Seq.empty).map { prop =>
         KeyValuePair(key = prop.key, value = prop.value)
-      }
+      },
+      version = version
     ).toByteArray
   }
 }

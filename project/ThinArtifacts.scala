@@ -10,21 +10,13 @@ import sbt._
 import sbt.Keys._
 
 /** Exports the existing module graph as independently consumable JVM artifacts.
-  * Only read/search modules belong in the public candidate.
+  * The reader modules have an explicit dependency closure.
   */
 object ThinArtifacts {
   val releaseThinArtifacts = taskKey[Seq[File]](
-    "Export the selected Spark line's thin module JARs, sources, documentation, POMs and metadata"
+    "Export selected thin module JARs, sources, documentation, POMs and metadata"
   )
   val thinModule = taskKey[Module]("Collect one module's thin release inputs")
-
-  /** Only the `spark` module's coordinates name a Spark line. The four modules
-    * below it are published once per release, from this line's export: their
-    * Arrow API compiles against it, and their POMs keep the versions it
-    * resolves. Every other release line exports its `spark` module alone, which
-    * depends on those same coordinates.
-    */
-  val sharedModulesLine = "4.0"
 
   final case class Module(
       projectId: String,
@@ -55,8 +47,13 @@ object ThinArtifacts {
     )
   )
 
-  def outputDirectory(root: File, line: Versions.SparkLine): File =
-    root / "target" / "release-thin" / line.id
+  def outputDirectory(
+      root: File,
+      line: String,
+      scalaBinary: String,
+      product: String
+  ): File =
+    root / "target" / "release-thin" / line / scalaBinary / product
 
   def export(
       root: File,
@@ -65,7 +62,6 @@ object ThinArtifacts {
       scalaBinary: String,
       modules: Seq[Module],
       resolvedClasspath: Classpath,
-      knowhereApi: File,
       jdk: File,
       log: Logger
   ): Seq[File] = {
@@ -76,28 +72,15 @@ object ThinArtifacts {
       sourceSha.matches("[a-f0-9]{40}"),
       "Thin release source must have an exact Git commit"
     )
-    val releaseLines = Versions.releaseConsumers.keys.toSeq.sorted
-    require(
-      releaseLines.contains(line.id) && scalaBinary == "2.13",
-      s"Thin releases support Spark ${releaseLines.mkString(" and ")} with Scala 2.13"
-    )
-    val expected = Set(
-      "native-runtime",
-      "native-storage",
-      "native-vector",
-      "core",
-      "spark"
-    )
+    val product = "reader"
+    val expected = Set("native-runtime", "native-storage", "core", "spark")
     require(
       modules
         .map(_.projectId)
         .toSet == expected && modules.size == expected.size,
-      "The thin candidate must include the complete five-module closure"
+      s"The $product candidate must include its complete module closure"
     )
-    val published =
-      if (line.id == sharedModulesLine) modules
-      else modules.filter(_.projectId == "spark")
-    val destination = outputDirectory(root, line)
+    val destination = outputDirectory(root, line.id, scalaBinary, product)
     IO.createDirectory(destination)
     val work = destination / "export-work"
     IO.delete(work)
@@ -133,44 +116,13 @@ object ThinArtifacts {
       .map { case (key, candidates) =>
         key -> candidates.head
       }
-    // A consumer resolves the whole closure, so every line checks it for
-    // duplicate classes, including the shared modules it does not export.
-    val binaryInputs = modules.map { module =>
-      val moduleWork = work / module.projectId
-      val moduleInputs = unpack(module.binary, moduleWork / "binary")
-      val apiInputs =
-        if (module.projectId == "native-vector")
-          unpack(knowhereApi, moduleWork / "knowhere-api").filterNot(
-            _._2 == "META-INF/MANIFEST.MF"
-          )
-        else Seq.empty
-      module.projectId -> (moduleInputs ++ apiInputs)
-    }.toMap
-    val duplicates = binaryInputs.toSeq
-      .flatMap { case (projectId, inputs) =>
-        inputs
-          .map(_._2)
-          .filter(_.endsWith(".class"))
-          .distinct
-          .map(_ -> names(projectId))
-      }
-      .groupBy(_._1)
-      .collect {
-        case (name, owners) if owners.size > 1 =>
-          s"$name: ${owners.map(_._2).sorted.mkString(", ")}"
-      }
-      .toSeq
-      .sorted
-    require(
-      duplicates.isEmpty,
-      s"Thin modules contain duplicate classes: ${duplicates.mkString("; ")}"
-    )
-    val exported = published.map { module =>
+    val exported = modules.map { module =>
       val artifact = names(module.projectId)
       val directory = destination / artifact
       IO.createDirectory(directory)
       val stem = s"$artifact-$version"
       val moduleWork = work / module.projectId
+      val binaryInputs = unpack(module.binary, moduleWork / "binary")
       val manifestFile = moduleWork / "binary" / "META-INF" / "MANIFEST.MF"
       val input = new FileInputStream(manifestFile)
       val manifest =
@@ -188,16 +140,12 @@ object ThinArtifacts {
       try manifest.write(manifestOutput)
       finally manifestOutput.close()
       val binary = directory / s"$stem.jar"
-      ReleaseArtifacts.archive(binaryInputs(module.projectId), binary)
+      ReleaseArtifacts.archive(binaryInputs, binary)
       verifyBinary(binary, module.projectId)
 
       val sources = directory / s"$stem-sources.jar"
-      val upstreamSources =
-        if (module.projectId == "native-vector")
-          ReleaseArtifacts.upstreamSources(root)
-        else Seq.empty
       ReleaseArtifacts.archive(
-        unpack(module.sources, moduleWork / "sources") ++ upstreamSources,
+        unpack(module.sources, moduleWork / "sources"),
         sources
       )
       val documentation = directory / s"$stem-javadoc.jar"
@@ -205,26 +153,7 @@ object ThinArtifacts {
         (module.documentation / "index.html").isFile,
         s"Missing API documentation: ${module.projectId}"
       )
-      if (module.projectId == "native-vector") {
-        val knowhereDocs = ReleaseArtifacts.upstreamDocumentation(
-          root,
-          jdk,
-          moduleWork / "knowhere-doc"
-        )
-        val index = moduleWork / "index.html"
-        IO.write(
-          index,
-          "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Native vector API</title><h1>Native vector API</h1><ul><li><a href=\"api/native-vector/index.html\">Connector adapters</a></li><li><a href=\"api/knowhere/index.html\">Knowhere Java API</a></li></ul></html>"
-        )
-        ReleaseArtifacts.archive(
-          files(module.documentation, "api/native-vector/") ++ files(
-            knowhereDocs,
-            "api/knowhere/"
-          ) :+ (index -> "index.html"),
-          documentation
-        )
-      } else
-        ReleaseArtifacts.archive(files(module.documentation), documentation)
+      ReleaseArtifacts.archive(files(module.documentation), documentation)
 
       val pom = rewritePom(
         poms(module.projectId),
@@ -234,7 +163,6 @@ object ThinArtifacts {
         resolved,
         module.providedDependencies,
         module.projectId,
-        line,
         sourceSha
       )
       val pomFile = directory / s"$stem.pom"
@@ -283,10 +211,34 @@ object ThinArtifacts {
       )
       metadata -> outputs.map(_._3)
     }
+    val classes = exported.flatMap { case (_, outputs) =>
+      val binary = outputs.head
+      val jar = new JarFile(binary)
+      try
+        jar.entries.asScala
+          .map(_.getName)
+          .filter(_.endsWith(".class"))
+          .map(_ -> binary.getName)
+          .toVector
+      finally jar.close()
+    }
+    val duplicates = classes
+      .groupBy(_._1)
+      .collect {
+        case (name, owners) if owners.size > 1 =>
+          s"$name: ${owners.map(_._2).mkString(", ")}"
+      }
+      .toSeq
+      .sorted
+    require(
+      duplicates.isEmpty,
+      s"Thin modules contain duplicate classes: ${duplicates.mkString("; ")}"
+    )
     val metadata = JSONObject(
       Map(
         "schemaVersion" -> 1,
         "kind" -> "thin",
+        "product" -> product,
         "groupId" -> "com.zilliz",
         "version" -> version,
         "sourceSha" -> sourceSha,
@@ -300,7 +252,7 @@ object ThinArtifacts {
     val metadataFile = destination / "thin-artifacts.json"
     IO.write(metadataFile, metadata.toString() + "\n", StandardCharsets.UTF_8)
     IO.delete(work)
-    log.info(s"Exported read-only thin release candidate: $destination")
+    log.info(s"Exported $product thin release candidate: $destination")
     exported.flatMap(_._2) :+ metadataFile
   }
 
@@ -312,7 +264,6 @@ object ThinArtifacts {
       resolved: Map[(String, String), ModuleID],
       declaredProvided: Set[(String, String)],
       projectId: String,
-      line: Versions.SparkLine,
       sourceSha: String
   ): Elem = {
     val sparkModule = projectId == "spark"
@@ -338,12 +289,20 @@ object ThinArtifacts {
                 )
               )
             case None =>
-              val selected = resolved.getOrElse(
-                identity,
-                sys.error(
-                  s"Thin POM dependency is not on the resolved classpath: $identity"
-                )
-              )
+              val selected =
+                if (!sparkModule)
+                  ModuleID(
+                    identity._1,
+                    identity._2,
+                    (dependency \ "version").text
+                  )
+                else
+                  resolved.getOrElse(
+                    identity,
+                    sys.error(
+                      s"Thin POM dependency is not on the resolved classpath: $identity"
+                    )
+                  )
               val declaredScope = (dependency \ "scope").text
               // Lower modules keep their standalone library dependencies. Only
               // the Spark surface can rely on its distribution to provide them.
@@ -359,7 +318,11 @@ object ThinArtifacts {
                 else "compile"
               fields(
                 dependency,
-                Map("version" -> selected.revision, "scope" -> scope)
+                Map(
+                  "version" -> (if (sparkModule) selected.revision
+                                else (dependency \ "version").text),
+                  "scope" -> scope
+                )
               )
           }
       }
@@ -393,7 +356,7 @@ object ThinArtifacts {
         "artifactId" -> artifact,
         "version" -> version,
         "name" -> artifact,
-        "description" -> publicationDescription(projectId, line),
+        "description" -> publicationDescription(projectId),
         "url" -> "https://github.com/zilliztech/spark-milvus"
       )
     )
@@ -418,24 +381,19 @@ object ThinArtifacts {
     })
   }
 
-  private def publicationDescription(
-      projectId: String,
-      line: Versions.SparkLine
-  ): String = {
+  private def publicationDescription(projectId: String): String = {
     val purpose = projectId match {
       case "native-runtime" =>
         "Shared native loader and source compatibility checks."
       case "native-storage" =>
         "Milvus Storage JVM bindings for segment file access."
-      case "native-vector" =>
-        "Knowhere Java bindings and vector search/index adapters."
       case "core" =>
-        "Milvus V3 schemas, storage formats and read/search computation."
+        "Milvus V3 schemas, storage formats and read/write primitives."
       case "spark" =>
-        s"Spark ${line.id} read-only DataSource and vector search interfaces."
+        "Spark snapshot DataSource, column replacement write and Arrow interfaces."
       case other => sys.error(s"Unknown thin module: $other")
     }
-    s"Read-only Spark Milvus thin module. $purpose"
+    s"Spark Milvus thin module. $purpose"
   }
 
   private def fields(element: Elem, replacements: Map[String, String]): Elem = {
@@ -490,15 +448,10 @@ object ThinArtifacts {
         forbidden.isEmpty,
         s"Thin JAR contains native or Spark resources: ${forbidden.toSeq.sorted.mkString(", ")}"
       )
-      if (projectId == "native-vector")
+      if (projectId == "native-storage")
         require(
-          names("io/knowhere/Knowhere.class"),
-          "Thin native-vector JAR must contain the Knowhere Java API"
-        )
-      if (projectId == "native-runtime")
-        require(
-          names("META-INF/milvus-native/compatibility.properties"),
-          "Thin native-runtime JAR must preserve source compatibility metadata"
+          names("META-INF/milvus-native/requirements/storage.properties"),
+          "Thin native-storage JAR must preserve its component contract"
         )
     } finally jar.close()
   }

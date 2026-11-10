@@ -20,23 +20,9 @@ import platforms  # noqa: E402  -- the path above makes this importable
 FORMAT = platforms.host()
 
 
-REQUIRED_ENTRIES = (
-    FORMAT.library_name("milvus-storage-jni"),
-    FORMAT.library_name("milvus-storage"),
-    FORMAT.library_name("knowhere_jni"),
-    FORMAT.library_name("knowhere_c", "1"),
-    FORMAT.library_name("knowhere"),
-)
-LOAD_ENTRIES = (FORMAT.library_name("milvus-storage-jni"),
-                FORMAT.library_name("knowhere_jni"))
+REQUIRED_ENTRIES = (FORMAT.library_name("milvus-storage-jni"), FORMAT.library_name("milvus-storage"))
+LOAD_ENTRIES = (FORMAT.library_name("milvus-storage-jni"),)
 AUDIT_DLOPEN_ENTRIES = REQUIRED_ENTRIES
-PLUGIN_PARENTS = {FORMAT.library_name("cardinalv1"): FORMAT.library_name("knowhere"),
-                  FORMAT.library_name("cardinalv2"): FORMAT.library_name("knowhere")}
-# The DiskANN acceptance fixture exists where DiskANN does.
-C_API_TESTS = sorted(
-    ["knowhere_c_api", "knowhere_c_api_concurrency"]
-    + (["knowhere_c_api_diskann_acceptance"] if FORMAT.builds_diskann() else [])
-)
 EVIDENCE_ENTRIES = {
     "NativeLoadCheck.java",
     "jvm_load.py",
@@ -57,8 +43,6 @@ EVIDENCE_ENTRIES = {
         "direct-references.json",
         "host-profile",
         "java.txt",
-        "knowhere-source-files.json",
-        "knowhere-source-identity.json",
         "rustc.txt",
         "storage-source-files.json",
         "storage-source-identity.json",
@@ -92,7 +76,7 @@ def safe_name(value):
                          for part in value.split("/"))
 
 
-def inventory(directory, platform=None):
+def inventory(directory, platform=None, required_entries=REQUIRED_ENTRIES):
     """Group actual aliases by SONAME and bytes; reject conflicting implementations."""
     directory = directory.resolve(strict=True)
     groups = {}
@@ -131,7 +115,7 @@ def inventory(directory, platform=None):
         permitted = {origin, origin + "/.." * depth}
         if record["needed"] and (not paths or any(item not in permitted for item in paths[0].split(":"))):
             raise ValueError(f"Library must resolve its dependencies from the bundle: {name}: {paths}")
-    for entry in REQUIRED_ENTRIES:
+    for entry in required_entries:
         if entry not in records:
             raise ValueError(f"Missing JNI/engine entry: {entry}")
     libraries, aliases = {}, {}
@@ -156,14 +140,14 @@ def validate_provenance(provenance, libraries, aliases):
         raise ValueError("Provenance must identify the jvm-load audit policy")
     if provenance.get("audit") != "passed":
         raise ValueError("Provenance must record a passed native audit")
-    validate_jvm_load_tests(provenance.get("jvmLoadTests"), "Provenance", exact_fields=True)
-    test_exit = provenance.get("knowhereCApiTestsExit")
-    if type(test_exit) is not int or test_exit != 0:
-        raise ValueError("Provenance must record successful Knowhere C API tests")
-    if provenance.get("knowhereCApiTests") != C_API_TESTS:
-        raise ValueError("Provenance must record the complete expected Knowhere C API test set")
-    if provenance.get("dlopenEntries") != list(AUDIT_DLOPEN_ENTRIES):
-        raise ValueError("Provenance must record every native load entry")
+    validate_jvm_load_tests(provenance.get("jvmLoadTests"), "Provenance", exact_fields=True, load_entries=provenance["loadEntries"])
+    for test in provenance.get("componentTests", []):
+        if test.get("component") not in provenance["components"] or type(test.get("exit")) is not int or test["exit"] != 0:
+            raise ValueError("Provenance must record successful component tests")
+        if not test.get("tests") or len(set(test["tests"])) != len(test["tests"]):
+            raise ValueError("Invalid component test names")
+    if not set(provenance["loadEntries"]).issubset(provenance["dlopenEntries"]):
+        raise ValueError("Every JNI entry must be audited")
 
     recorded_libraries = provenance.get("libraries")
     if not isinstance(recorded_libraries, dict) or set(recorded_libraries) != set(libraries):
@@ -180,23 +164,16 @@ def validate_provenance(provenance, libraries, aliases):
     if provenance.get("aliases") != aliases:
         raise ValueError("Native aliases differ from the audited provenance")
 
-    actual_cardinal = set(libraries).intersection(PLUGIN_PARENTS)
-    expected_cardinal = set(PLUGIN_PARENTS) if provenance["with_cardinal"] else set()
-    if actual_cardinal != expected_cardinal:
-        raise ValueError("Cardinal libraries do not match the provenance with_cardinal flag")
+
+def expected_jvm_load_tests(load_entries=LOAD_ENTRIES):
+    return [{"entries": list(order), "exit": 0}
+            for order in dict.fromkeys((tuple(load_entries), tuple(reversed(load_entries))))]
 
 
-def expected_jvm_load_tests():
-    return [
-        {"entries": list(LOAD_ENTRIES), "exit": 0},
-        {"entries": list(reversed(LOAD_ENTRIES)), "exit": 0},
-    ]
-
-
-def validate_jvm_load_tests(tests, source, exact_fields=False):
-    expected = expected_jvm_load_tests()
+def validate_jvm_load_tests(tests, source, exact_fields=False, load_entries=LOAD_ENTRIES):
+    expected = expected_jvm_load_tests(load_entries)
     if not isinstance(tests, list) or len(tests) != len(expected):
-        raise ValueError(f"{source} must record both JVM load orders")
+        raise ValueError(f"{source} must record every distinct JVM load order")
     for index, (record, expected_record) in enumerate(zip(tests, expected)):
         if not isinstance(record, dict):
             raise ValueError(f"{source} JVM load record {index} must be an object")
@@ -208,7 +185,7 @@ def validate_jvm_load_tests(tests, source, exact_fields=False):
             raise ValueError(f"{source} JVM load record {index} must record exit 0: {record}")
 
 
-def check_jvm_loads(directory, output=None):
+def check_jvm_loads(directory, output=None, load_entries=LOAD_ENTRIES):
     """Load the shared JVM probe lazily so this script remains directly executable."""
     helper_path = Path(__file__).resolve().parents[1] / "native" / "build" / "jvm_load.py"
     spec = importlib.util.spec_from_file_location("milvus_native_jvm_load", helper_path)
@@ -216,7 +193,7 @@ def check_jvm_loads(directory, output=None):
         raise ValueError(f"Cannot load JVM native validation helper: {helper_path}")
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
-    return helper.check_jvm_loads(directory, output=output)
+    return helper.check_jvm_loads(directory, output=output, load_entries=load_entries)
 
 
 def put(archive, name, data):
@@ -262,7 +239,12 @@ def package(directory, provenance_path, output, licenses=None, evidence=None):
     provenance_bytes = provenance_path.read_bytes()
     provenance = json.loads(provenance_bytes)
     reject_absolute_paths(provenance)
-    for key in ("storage.revision", "knowhere.revision"):
+    components = provenance.get("components")
+    if (not isinstance(components, list) or not components or "storage" not in components
+            or len(set(components)) != len(components)
+            or any(not re.fullmatch(r"[a-z][a-z0-9-]*", name) for name in components)):
+        raise ValueError("Invalid native component closure")
+    for key in (name + ".revision" for name in components):
         if not re.fullmatch(r"[a-f0-9]{40}", provenance.get(key, "")):
             raise ValueError(f"Missing exact source pin: {key}")
     platform = provenance.get("platform")
@@ -271,31 +253,41 @@ def package(directory, provenance_path, output, licenses=None, evidence=None):
     profiles = Path(__file__).resolve().parents[1] / "native" / "build" / "profiles"
     if not platform or not (profiles / platform).is_file():
         raise ValueError("Unsupported native bundle platform: " + str(platform))
-    for feature in ("with_cardinal", "with_diskann"):
-        if not isinstance(provenance.get(feature), bool):
-            raise ValueError("Provenance must record the actual " + feature + " boolean")
-    if provenance["with_diskann"] != FORMAT.builds_diskann():
-        raise ValueError("Provenance with_diskann does not match this platform's Knowhere build")
+    features = provenance.get("features", {})
+    if not isinstance(features, dict) or any(not re.fullmatch(r"[a-z][a-z0-9.-]*", name) or type(value) is not bool
+                                             for name, value in features.items()):
+        raise ValueError("Native features must be explicit booleans")
+    load_entries = provenance.get("loadEntries", [])
+    dlopen_entries = provenance.get("dlopenEntries", [])
+    if (not load_entries or not dlopen_entries or any(not safe_name(name) for name in load_entries + dlopen_entries)
+            or len(set(load_entries)) != len(load_entries) or len(set(dlopen_entries)) != len(dlopen_entries)):
+        raise ValueError("Invalid native component load entries")
     if provenance.get("dependency.mode") != "shared":
         raise ValueError("Provenance must identify the unified shared dependency build")
-    libraries, aliases = inventory(directory, platform)
+    libraries, aliases = inventory(directory, platform, dlopen_entries)
     validate_provenance(provenance, libraries, aliases)
-    current_jvm_loads = check_jvm_loads(directory, output=None)
-    validate_jvm_load_tests(current_jvm_loads, "Current", exact_fields=False)
-    manifest = {"format.version": "1", "platform": platform,
-                "storage.revision": provenance["storage.revision"],
-                "knowhere.revision": provenance["knowhere.revision"],
-                "with_cardinal": str(provenance["with_cardinal"]).lower(),
-                # The platforms differ in what Knowhere carries, and the bundle
-                # says so rather than a consumer inferring it from the platform.
-                "with_diskann": str(provenance["with_diskann"]).lower(),
+    current_jvm_loads = check_jvm_loads(directory, output=None, load_entries=load_entries)
+    validate_jvm_load_tests(current_jvm_loads, "Current", exact_fields=False, load_entries=load_entries)
+    # Recheck the bytes being packaged, including dependencies that JNI's lazy
+    # symbol resolution can leave unchecked. Declared engine plugins retain
+    # their verified parent-provider context.
+    import stage
+    with tempfile.TemporaryDirectory(prefix="milvus-native-relocations-") as temporary_audit:
+        failures = stage._run_native_diagnostics(
+            directory, tuple(sorted(set(libraries) | set(aliases))), tuple(load_entries), tuple(dlopen_entries),
+            Path(temporary_audit), provenance.get("parentProviders", {}))
+        if failures:
+            raise ValueError("Current native relocation audit failed: " + ", ".join(failures))
+    manifest = {"format.version": "2", "platform": platform, "components": ",".join(components),
                 "provenance.sha256": hashlib.sha256(provenance_bytes).hexdigest(),
-                "load.entries": ",".join(LOAD_ENTRIES),
+                "load.entries": ",".join(load_entries),
                 "libraries": ",".join(sorted(libraries)),
                 "aliases": ",".join(sorted(aliases))}
+    manifest.update((name + ".revision", provenance[name + ".revision"]) for name in components)
+    manifest.update(("feature." + name, str(value).lower()) for name, value in features.items())
     manifest.update((f"sha256.{name}", record["sha256"]) for name, record in libraries.items())
     manifest.update((f"alias.{name}", canonical) for name, canonical in aliases.items())
-    prefix = f"native/milvus/1/{platform}/"
+    prefix = f"native/milvus/2/{platform}/"
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=output.parent, suffix=".jar", delete=False) as stream:
         temporary = Path(stream.name)
@@ -315,7 +307,9 @@ def package(directory, provenance_path, output, licenses=None, evidence=None):
             if licenses is not None:
                 add_directory(archive, licenses, "META-INF/milvus-native/licenses/")
             if evidence is not None:
-                add_directory(archive, evidence, "META-INF/milvus-native/provenance/", EVIDENCE_ENTRIES)
+                add_directory(archive, evidence, "META-INF/milvus-native/provenance/", EVIDENCE_ENTRIES |
+                              {"build/" + name + suffix for name in components
+                               for suffix in ("-source-files.json", "-source-identity.json", "-extension-files.json", "-cpu-requirements.json")})
         temporary.replace(output)
         output.chmod(0o644)
     finally:

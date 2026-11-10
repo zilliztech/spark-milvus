@@ -3,24 +3,49 @@
 import hashlib
 import json
 from pathlib import Path
+import platform
 import subprocess
 import tempfile
 import urllib.request
 
 BASE_IMAGE = 'debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8'
-PLATFORM = 'linux/amd64'
-BINARIES = {
-    'minio': {
-        'url': 'https://github.com/minio/minio/releases/download/RELEASE.2024-11-07T00-52-20Z/'
-               'minio.linux-amd64.RELEASE.2024-11-07T00-52-20Z',
-        'sha256': 'c27873d791b56d33518de11f12c5bfae4be88ebac00e12c6dd0027b08123fd80',
+RELEASES = {
+    # SDK 2.30 sends CRC32 for DeleteObjects; older MinIO requires Content-MD5.
+    # https://github.com/minio/minio/issues/20849
+    'minio': 'RELEASE.2025-04-22T22-12-26Z',
+    'mc': 'RELEASE.2024-10-29T15-34-59Z',
+}
+CHECKSUMS = {
+    'amd64': {
+        'minio': '53e2a2cb16c5366ea6fbbc479c19ddb4c6a0948273e752f740fb1fbf27bb817c',
+        'mc': 'a8a31621b4ad257583fb569fe31cfd72cf40e0b9b636971963c4815852c26914',
     },
-    'mc': {
-        'url': 'https://github.com/minio/mc/releases/download/RELEASE.2024-10-29T15-34-59Z/'
-               'mc.linux-amd64.RELEASE.2024-10-29T15-34-59Z',
-        'sha256': 'a8a31621b4ad257583fb569fe31cfd72cf40e0b9b636971963c4815852c26914',
+    'arm64': {
+        'minio': '6c2f3142c94240206123177f4ba1e360daa5d1e0a4962e90757ef4f92c3ab57c',
+        'mc': 'a0312659c887da8e7f2427a7829bca34cdd29bd4c4af19bd7c4155156d00f543',
     },
 }
+
+
+def host_architecture(machine=None):
+    selected = machine or platform.machine()
+    aliases = {'x86_64': 'amd64', 'amd64': 'amd64', 'aarch64': 'arm64', 'arm64': 'arm64'}
+    if selected not in aliases:
+        raise ValueError('Unsupported MinIO fixture architecture: ' + selected)
+    return aliases[selected]
+
+
+def binaries(architecture):
+    return {name: {
+        'url': f'https://github.com/minio/{name}/releases/download/{release}/'
+               f'{name}.linux-{architecture}.{release}',
+        'sha256': CHECKSUMS[architecture][name],
+    } for name, release in RELEASES.items()}
+
+
+ARCHITECTURE = host_architecture()
+PLATFORM = 'linux/' + ARCHITECTURE
+BINARIES = binaries(ARCHITECTURE)
 DOCKERFILE = (f'FROM {BASE_IMAGE}\n'
               'COPY minio mc /usr/local/bin/\n'
               'ENTRYPOINT ["/usr/local/bin/minio"]\n')

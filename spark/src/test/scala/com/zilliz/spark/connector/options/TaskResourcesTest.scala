@@ -5,16 +5,18 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 /** The task cores a stage declares for itself: every core for a stage of
-  * Knowhere calls, enough to bound how many run at once for a stage bounded by
-  * the heap, and nothing where Spark would not run it or the default already
-  * does.
+  * parallel native calls, enough to bound how many run at once for a stage
+  * bounded by the heap, and nothing where Spark would not run it or the default
+  * already does.
   */
 class TaskResourcesTest extends AnyFunSuite with Matchers {
 
   private def cores(profile: Option[ResourceProfile]): Option[Double] =
     profile.map(_.taskResources(ResourceProfile.CPUS).amount)
 
-  test("a Knowhere stage takes every core, so one task runs per executor") {
+  test(
+    "a stage requesting all cores takes every core, so one task runs per executor"
+  ) {
     val resources = TaskResources(2, 8, 1, declarable = true)
     cores(resources.wholeExecutor) shouldBe Some(8.0)
     resources.tasksPerExecutor shouldBe 8

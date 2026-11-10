@@ -78,7 +78,7 @@ private[connector] object MilvusTables {
     milvusOption
   }
 
-  private def sparkSchemaOf(
+  private[connector] def sparkSchemaOf(
       schema: CollectionSchema,
       rawVectors: Boolean,
       selectedFieldIds: Seq[Long]

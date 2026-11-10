@@ -229,8 +229,7 @@ class MatrixTest(unittest.TestCase):
         for project in ("spark", "integration", "core"):
             self.assertEqual(validation.report_directory(project),
                              validation.ROOT / project / "target/test-reports")
-        for project, directory in (("native-runtime", "native/runtime"), ("native-storage", "native/storage"),
-                                   ("native-vector", "native/vector")):
+        for project, directory in (("native-runtime", "native/runtime"), ("native-storage", "native/storage")):
             self.assertEqual(validation.report_directory(project),
                              validation.ROOT / directory / "target/test-reports")
 
@@ -325,6 +324,35 @@ class MatrixTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.run_source_check(lambda: validation.spark_checks(matrix, "3.5", "2.12.20", None),
                                           **options)
+
+    def test_column_write_check_runs_its_suites_with_the_object_store(self):
+        root = Path(self.temporary.name)
+        bundle = root / "bundle.jar"
+        store = {name: "value" for name in validation.OBJECT_STORE_VARIABLES}
+        with mock.patch.dict(os.environ, store), \
+                mock.patch.object(validation, "ROOT", root), \
+                mock.patch.object(validation, "run_sbt", return_value="log") as run, \
+                mock.patch.object(validation, "signal_environment", return_value={}), \
+                mock.patch.object(validation, "check_reports", return_value={}) as reports, \
+                mock.patch.object(validation, "check_execution", return_value={"spark": {}}) as execution, \
+                mock.patch.object(validation, "save_report") as saved:
+            validation.column_write_checks(self.matrix, "4.0", "2.13.16", bundle)
+        name = "column-write-4.0-2.13.16"
+        self.assertEqual(run.call_args.args,
+                         (name, ["spark/Test/testOnly " + " ".join(validation.COLUMN_WRITE_SUITES)]))
+        self.assertEqual((run.call_args.kwargs["line"], run.call_args.kwargs["scala"]), ("4.0", "2.13.16"))
+        self.assertEqual(run.call_args.kwargs["bundle"], bundle)
+        self.assertEqual(reports.call_args.args[1], validation.COLUMN_WRITE_SUITES)
+        # Object-store cases cancel without the store, so cancellations fail.
+        self.assertNotIn("allow_skipped", execution.call_args.kwargs)
+        self.assertEqual(saved.call_args.args[0], name)
+        for missing in validation.OBJECT_STORE_VARIABLES:
+            partial = {key: value for key, value in store.items() if key != missing}
+            with self.subTest(missing=missing), mock.patch.dict(os.environ, partial, clear=True), \
+                    self.assertRaisesRegex(ValueError, "missing " + missing):
+                validation.column_write_checks(self.matrix, "4.0", "2.13.16", bundle)
+        with mock.patch.dict(os.environ, store), self.assertRaisesRegex(ValueError, "requires --native-bundle"):
+            validation.column_write_checks(self.matrix, "4.0", "2.13.16", None)
 
     def test_native_checks_leave_cleaning_to_the_source_jobs(self):
         matrix = self.source_matrix()

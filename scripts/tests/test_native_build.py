@@ -173,12 +173,10 @@ class NativeBuildSourceTest(unittest.TestCase):
         (self.repository / "native" / "build" / "profiles").mkdir(parents=True)
         shutil.copy2(HOST_PROFILE, self.repository / "native" / "build" / "profiles" / HOST_PROFILE.name)
         self.storage = self.repository / "milvus-storage"
-        self.knowhere = self.repository / "knowhere"
         self.storage_revision = self.create_repository(self.storage, "cpp/source.cc", "int storage = 1;\n")
-        self.knowhere_revision = self.create_repository(self.knowhere, "source.cc", "int knowhere = 2;\n")
-        self.git(self.repository, "add", "milvus-storage", "knowhere")
+        self.git(self.repository, "add", "milvus-storage")
         (self.repository / "native" / "build" / "dependencies.json").write_text(
-            json.dumps({"references": {}, "cardinal": {}}), encoding="ascii",
+            json.dumps({"references": {}, "version_policy": {}, "platform_scope": {}, "static_on": {}}), encoding="ascii",
         )
         # The historical bug discarded every source whenever an ancestor of
         # the snapshot directory had this perfectly valid name.
@@ -205,13 +203,14 @@ class NativeBuildSourceTest(unittest.TestCase):
         self.git(directory, "commit", "--quiet", "-m", "Initial test source")
         return self.git(directory, "rev-parse", "HEAD")
 
-    def invoke_snapshot(self, knowhere_source=None):
+    def invoke_snapshot(self, components=None):
         arguments = [
             str(SCRIPT), "--work-dir", str(self.work), "--storage-source", str(self.storage),
             "--jobs", "2",
         ]
-        if knowhere_source is not None:
-            arguments.extend(("--knowhere-source", str(knowhere_source)))
+
+        if components is not None:
+            arguments.extend(("--components", str(components)))
 
         def guard(command, *args, **kwargs):
             executable = str(command[0])
@@ -245,35 +244,6 @@ class NativeBuildSourceTest(unittest.TestCase):
         identity = json.loads((self.work / "provenance" / "storage-source-identity.json").read_text())
         self.assertEqual(self.storage_revision, identity["revision"])
         self.assertEqual(recorded, identity["files"])
-        knowhere_identity = json.loads((self.work / "provenance" / "knowhere-source-identity.json").read_text())
-        self.assertEqual(self.knowhere_revision, knowhere_identity["revision"])
-        self.assertEqual(
-            {"source.cc": hashlib.sha256(b"int knowhere = 2;\n").hexdigest()}, knowhere_identity["files"],
-        )
-
-    def test_matching_alternate_knowhere_object_source_is_accepted(self):
-        alternate = self.root / "knowhere-cache"
-        SUBPROCESS_RUN(["git", "clone", "--quiet", str(self.knowhere), str(alternate)], check=True)
-
-        with self.assertRaises(SnapshotComplete):
-            self.invoke_snapshot(alternate)
-
-        self.assertEqual(self.knowhere_revision, self.git(self.work / "sources" / "knowhere", "rev-parse", "HEAD"))
-
-    def test_alternate_knowhere_object_source_must_match_recorded_gitlink(self):
-        alternate = self.root / "wrong-knowhere"
-        self.create_repository(alternate, "source.cc", "int knowhere = 9;\n")
-
-        with self.assertRaisesRegex(ValueError, "object source HEAD differs"):
-            self.invoke_snapshot(alternate)
-
-    def test_knowhere_submodule_head_must_match_recorded_gitlink(self):
-        (self.knowhere / "source.cc").write_text("int knowhere = 10;\n", encoding="ascii")
-        self.git(self.knowhere, "add", ".")
-        self.git(self.knowhere, "commit", "--quiet", "-m", "Move submodule HEAD")
-
-        with self.assertRaisesRegex(ValueError, "submodule HEAD differs from the recorded gitlink"):
-            self.invoke_snapshot()
 
     def test_storage_submodule_head_must_match_recorded_gitlink(self):
         (self.storage / "cpp" / "source.cc").write_text("int storage = 10;\n", encoding="ascii")
@@ -341,40 +311,40 @@ class NativeBuildSourceTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "snapshot is unverified"):
             self.invoke_snapshot()
 
-    def test_tracked_knowhere_modification_is_rejected_on_resume(self):
-        self.initial_snapshot()
-        snapshot = self.work / "sources" / "knowhere"
-        (snapshot / "source.cc").write_text("int modified_knowhere = 6;\n", encoding="ascii")
+    def component_descriptor(self):
+        source = self.root / "component-source"
+        source.mkdir()
+        (source / "native.c").write_text("int component_entry;\n")
+        extension = self.root / "extension"
+        extension.mkdir()
+        (extension / "Component.cmake").write_text("# explicit external component\n")
+        descriptor = self.root / "components.json"
+        descriptor.write_text(json.dumps({"components": [{
+            "name": "compute", "revision": "b" * 40, "sourceDirectory": str(source),
+            "cmake": str(extension / "Component.cmake"),
+            "loadEntries": ["libcompute_jni.so"], "dlopenEntries": ["libcompute_jni.so"],
+        }]}))
+        return source, descriptor
 
-        with self.assertRaisesRegex(RuntimeError, "Recorded source checkout was modified"):
-            self.invoke_snapshot()
+    def test_external_component_snapshot_is_bound_to_source_and_extension_bytes(self):
+        source, descriptor = self.component_descriptor()
+        with self.assertRaises(SnapshotComplete):
+            self.invoke_snapshot(descriptor)
+        record = json.loads((self.work / "provenance/compute-source-identity.json").read_text())
+        self.assertEqual("b" * 40, record["revision"])
+        self.assertEqual(NATIVE_BUILD.tree_hashes(source), record["files"])
+        self.assertTrue((self.work / "provenance/compute-extension-files.json").is_file())
+        (source / "native.c").write_text("changed\n")
+        with self.assertRaisesRegex(ValueError, "component source changed"):
+            self.invoke_snapshot(descriptor)
 
-    def test_untracked_knowhere_modification_is_rejected_on_resume(self):
-        self.initial_snapshot()
-        snapshot = self.work / "sources" / "knowhere"
-        (snapshot / "injected.cc").write_text("int added_knowhere = 7;\n", encoding="ascii")
-
-        with self.assertRaisesRegex(RuntimeError, "Recorded source checkout was modified"):
-            self.invoke_snapshot()
-
-    def test_knowhere_snapshot_remains_pristine_across_resume(self):
-        self.initial_snapshot()
-        snapshot = self.work / "sources" / "knowhere"
-        source = snapshot / "source.cc"
-        manifest = self.work / "provenance" / "knowhere-source-files.json"
-        recorded = manifest.read_bytes()
-        self.assertEqual("int knowhere = 2;\n", source.read_text())
-        self.assertEqual(self.knowhere_revision, self.git(snapshot, "rev-parse", "HEAD"))
-        self.assertEqual("", self.git(snapshot, "status", "--porcelain"))
-        self.assertFalse((self.work / "provenance" / "knowhere-working-tree.patch").exists())
-
-        self.initial_snapshot()
-
-        self.assertEqual(recorded, manifest.read_bytes())
-        self.assertEqual("int knowhere = 2;\n", source.read_text())
-        source.write_text("int unreviewed_knowhere = 10;\n", encoding="ascii")
-        with self.assertRaisesRegex(RuntimeError, "Recorded source checkout was modified"):
-            self.invoke_snapshot()
+    def test_external_component_cannot_replace_storage_identity(self):
+        _, descriptor = self.component_descriptor()
+        value = json.loads(descriptor.read_text())
+        value["components"][0]["name"] = "storage"
+        descriptor.write_text(json.dumps(value))
+        with self.assertRaisesRegex(ValueError, "distinct names other than storage"):
+            self.invoke_snapshot(descriptor)
 
     def test_hashes_ignore_only_relative_build_artifacts(self):
         source = self.root / "build" / "sources"

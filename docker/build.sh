@@ -107,12 +107,12 @@ try:
     shutil.copyfile(assembly, staged_jar)
     staged_jar.chmod(0o644)
     native_platform = {"linux/amd64": "linux-x86_64", "linux/arm64": "linux-aarch64"}[platform]
-    prefix = "native/milvus/1/" + native_platform + "/"
+    prefix = "native/milvus/2/" + native_platform + "/"
     with ZipFile(staged_jar) as archive:
         entries = set(archive.namelist())
-        plugin = "com/zilliz/spark/connector/extensions/MilvusSparkPlugin.class"
+        plugin = "com/zilliz/spark/connector/sources/MilvusDataSource.class"
         if plugin not in entries or archive.getinfo(plugin).file_size == 0:
-            raise ValueError("Assembly does not contain MilvusSparkPlugin")
+            raise ValueError("Assembly does not contain MilvusDataSource")
         manifest_path = prefix + "manifest.properties"
         if manifest_path not in entries:
             raise ValueError("Assembly lacks native resources for " + native_platform)
@@ -121,9 +121,9 @@ try:
             key, separator, value = line.partition("=")
             if separator:
                 properties[key.strip()] = value.strip()
-        if properties.get("platform") != native_platform or properties.get("format.version") != "1":
+        if properties.get("platform") != native_platform or properties.get("format.version") != "2":
             raise ValueError("Native manifest does not describe platform " + native_platform)
-        for library in ("libmilvus-storage-jni.so", "libknowhere_jni.so"):
+        for library in ("libmilvus-storage-jni.so",):
             name = library if prefix + library in entries else properties.get("alias." + library, "")
             if (not re.fullmatch(r"[A-Za-z0-9_.+-]+", name)
                     or prefix + name not in entries or archive.getinfo(prefix + name).file_size == 0):
@@ -136,16 +136,14 @@ try:
     copy_public("demo/run.sh")
     for name in (
         "00_snapshot_path.py", "01_read_snapshot.py", "02_filter_project.py",
-        "03_sql_analytics.py", "04_exact_search.py", "05_filtered_search.py",
-        "06_index_search.py", "07_vector_functions.py", "08_partition_selection.py", "common.py",
+        "03_sql_analytics.py", "08_partition_selection.py", "common.py",
     ):
         copy_public("demo/python/" + name)
-    for name in ("local-options.json", "s3-options.json", "queries.json"):
+    for name in ("local-options.json", "s3-options.json"):
         copy_public("demo/config/" + name)
     for name in (
         "DemoSupport.java", "SnapshotPath.java", "ReadSnapshot.java", "FilterProject.java",
-        "SqlAnalytics.java", "ExactSearch.java", "FilteredSearch.java", "IndexSearch.java",
-        "VectorFunctions.java", "PartitionSelection.java", "package-info.java",
+        "SqlAnalytics.java", "PartitionSelection.java", "package-info.java",
     ):
         copy_public("demo/java/src/main/java/com/zilliz/spark/connector/demo/" + name)
     copy_public("scripts/ci/check_read_fixtures.py")

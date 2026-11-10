@@ -56,6 +56,8 @@ class MilvusColumnarPartitionReader(
     rawVectors: Boolean,
     segmentId: Long,
     requestedExtraColumns: Set[String] = Set.empty,
+    // The snapshot's Milvus id; required only when `_milvus_row_id` is requested.
+    snapshotId: Long = 0L,
     pushedExpression: Option[PredicateExpr] = None,
     columnNameFor: Long => Option[String] = (_: Long) => None,
     taskAllocatorOwner: Option[AutoCloseable] = None,
@@ -202,7 +204,7 @@ class MilvusColumnarPartitionReader(
     val name = field.name
     val metadataColumn =
       if (requestedExtraColumns.contains(name))
-        MetadataColumns.columnFor(name, segmentId, startOffset)
+        MetadataColumns.columnFor(name, segmentId, startOffset, snapshotId)
       else None
     metadataColumn
       .getOrElse {

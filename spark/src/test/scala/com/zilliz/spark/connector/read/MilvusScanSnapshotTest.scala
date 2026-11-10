@@ -47,6 +47,7 @@ import com.zilliz.milvus.storage.snapshot.{
   DeleteFiles,
   DeltaLogFile,
   Segment,
+  SegmentIndexes,
   SegmentStatistics,
   Snapshot,
   SnapshotCatalog,
@@ -214,6 +215,59 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
     deletes = DeleteFiles.Empty,
     statistics = statistics
   )
+
+  test(
+    "SegmentScan exposes fixed metadata without opening storage and excludes delete-only segments"
+  ) {
+    val collection = ProtoSchema(
+      name = "contract",
+      fields = Seq(
+        FieldSchema(
+          fieldID = 100L,
+          name = "id",
+          dataType = MilvusDataType.Int64,
+          isPrimaryKey = true
+        ),
+        FieldSchema(fieldID = 101L, name = "n", dataType = MilvusDataType.Int64)
+      )
+    )
+    val data = plannedSegment(30L, 20L, 2L)
+      .copy(indexes = SegmentIndexes.Unindexed)
+    val l0 = plannedSegment(99L, 20L, 0L).copy(isDeleteOnly = true)
+    val snapshot =
+      snapshotOf(segments = Seq(data, l0), schemaBytes = collection.toByteArray)
+    val raw = new ju.HashMap[String, String]()
+    raw.put(MilvusOption.ReadApplyDeletes, "false")
+    raw.put("fs.storage_type", "local")
+    raw.put("fs.root_path", "/segment-contract-unused")
+    val options = new CaseInsensitiveStringMap(raw)
+    val schema = MilvusTable(snapshot, MilvusOption(options), None).schema()
+    val predicate = Comparison(
+      FieldRef(101L, MilvusDataType.Int64),
+      ComparisonOperator.EqualTo,
+      Literal.IntegerValue(7L)
+    )
+    val contract: SegmentScan =
+      new MilvusScan(schema, options, snapshot, Some(predicate)) {
+        override private[read] def openPlanningStore(): ObjectStore =
+          fail(
+            "Describing segments and planning known-empty deletes must not open storage"
+          )
+      }
+    assert(contract.collectionSchema == collection)
+    assert(
+      contract.segmentOptions("fs.root_path") == "/segment-contract-unused"
+    )
+    assert(contract.segmentPredicate.contains(predicate))
+    assert(contract.segments == Seq(data.id -> data.indexes))
+    assert(contract.readSchema() == schema && (contract.toBatch eq contract))
+    val partitions = contract.segmentPartitions()
+    assert(partitions.map(_.task.segmentId) == Seq(30L))
+    assert(partitions.head.task.layout == data.layout)
+    assert(partitions.head.task.indexes == data.indexes)
+    assert(partitions.head.task.snapshotRows.contains(2L))
+    assert(partitions == contract.planInputPartitions().toSeq)
+  }
 
   private def metadata(
       entries: (String, Long)*
@@ -1341,11 +1395,10 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
       (Seq[Expression](Expressions.column("id")) ++
         selected.map(Expressions.literal)).toArray
     )
+    val contract: SegmentScan = scan
+    val originalDescriptors = contract.segments
     def plannedSegmentIds(): Seq[Long] =
-      scan
-        .planInputPartitions()
-        .map(_.asInstanceOf[MilvusInputPartition].task.segmentId)
-        .toSeq
+      contract.segmentPartitions().map(_.task.segmentId)
 
     scan.filter(Array(in(101L, 202L)))
     assert(plannedSegmentIds() == Seq(30L, 31L))
@@ -1362,6 +1415,8 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
     val cached = scan.planInputPartitions()
     scan.filter(Array(in(202L, 303L)))
     assert(scan.planInputPartitions() eq cached)
+    assert(contract.segments == originalDescriptors)
+    assert(contract.segmentPartitions().map(_.task.segmentId) == Seq(31L))
   }
 
   test(

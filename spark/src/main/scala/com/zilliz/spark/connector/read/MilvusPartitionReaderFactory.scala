@@ -25,10 +25,12 @@ object MilvusPartitionReaderFactory {
       options: Map[String, String]
   ): Map[String, String] = {
     val keys = Set(
-      MilvusOption.MilvusExtraColumns.toLowerCase(java.util.Locale.ROOT),
-      MilvusOption.ReadColumnar.toLowerCase(java.util.Locale.ROOT),
-      MilvusOption.ReadVectorRaw.toLowerCase(java.util.Locale.ROOT)
-    )
+      MilvusOption.MilvusExtraColumns,
+      MilvusOption.ReadMode,
+      MilvusOption.ReadIncludeRowId,
+      MilvusOption.ReadColumnar,
+      MilvusOption.ReadVectorRaw
+    ).map(_.toLowerCase(java.util.Locale.ROOT))
     options.filter { case (key, _) =>
       keys(key.toLowerCase(java.util.Locale.ROOT))
     }
@@ -64,7 +66,10 @@ class MilvusPartitionReaderFactory(
     optionsMap: Map[String, String],
     pushedExpression: Option[PredicateExpr] = None,
     // A pushed-down limit, applied per partition. None when Spark pushed none.
-    limit: Option[Int] = None
+    limit: Option[Int] = None,
+    // The snapshot's Milvus id, which `_milvus_row_id` carries; zero when the
+    // read does not request it.
+    snapshotId: Long = 0L
 ) extends PartitionReaderFactory
     with Logging {
 
@@ -140,6 +145,7 @@ class MilvusPartitionReaderFactory(
           rawVectors = MilvusOption.readVectorRaw(optionsMap),
           segmentId = p.task.segmentId,
           requestedExtraColumns = requestedExtraColumns,
+          snapshotId = snapshotId,
           pushedExpression = pushedExpression,
           milvusFilter = p.milvusFilter,
           columnNameFor = setup.columnNameFor,
@@ -190,7 +196,8 @@ class MilvusPartitionReaderFactory(
           rowReader,
           schema,
           requestedExtraColumns,
-          p.task.segmentId
+          p.task.segmentId,
+          snapshotId
         )
       } catch {
         case failure: Throwable =>

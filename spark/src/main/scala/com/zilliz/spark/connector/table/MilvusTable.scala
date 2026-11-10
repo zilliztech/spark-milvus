@@ -21,7 +21,7 @@ import com.zilliz.milvus.storage.schema.{FieldMetadata, SchemaMapper}
 import com.zilliz.milvus.storage.snapshot.Snapshot
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.read.MilvusScanBuilder
-import com.zilliz.spark.connector.types.SparkTypes
+import com.zilliz.spark.connector.types.{RowIdentity, SparkTypes}
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 /** One collection as one table load sees it: the [[Snapshot]] `MilvusTables`
@@ -257,6 +257,15 @@ case class MilvusTable(
         nullable = false
       )
     )
+    if (milvusOption.extraColumns.contains(MilvusOption.MilvusRowIdColumn)) {
+      if (snapshot.id.isEmpty) {
+        throw new IllegalArgumentException(
+          s"Snapshot '${snapshot.name}' has no snapshot_info.id, so its rows cannot carry " +
+            s"'${MilvusOption.MilvusRowIdColumn}'; read a snapshot file that Milvus created"
+        )
+      }
+      addIfRequested(MilvusOption.MilvusRowIdColumn, RowIdentity.field)
+    }
     if (
       milvusOption.extraColumns.contains(
         MilvusOption.MilvusExtraColumnTimestamp

@@ -141,16 +141,6 @@ class Format:
         """
         return 120
 
-    def builds_diskann(self):
-        """Whether the Knowhere build includes DiskANN here.
-
-        Its only aligned reader is built on libaio and io_uring, so a platform
-        that has neither cannot carry the index or its acceptance fixture. The
-        bundle declares the answer, rather than a consumer inferring it from the
-        platform name.
-        """
-        return True
-
     def library_stem(self, name):
         """A library file name without its lib prefix, version and suffix."""
         raise NotImplementedError
@@ -188,8 +178,8 @@ class Elf(Format):
         return "libz.so.1"
 
     def library_glob(self, stem="*"):
-        # The stem is a family, not one file: "libknowhere" has to reach
-        # libknowhere_c.so.1 and libknowhere_jni.so as well, the way the
+        # The stem is a family, not one file: "libengine" has to reach
+        # libengine_c.so.1 and libengine_jni.so as well, the way the
         # Mach-O pattern does.
         return ("" if stem == "*" else stem) + "*.so*"
 
@@ -334,18 +324,6 @@ class MachO(Format):
 
     def library_stem(self, name):
         return re.sub(r"(?:\.[0-9][^.]*)*\.dylib$", "", name.removeprefix("lib"))
-
-    def builds_diskann(self):
-        # macOS has neither libaio nor io_uring, and DiskANN's aligned reader is
-        # built on them; cmake/Knowhere.cmake drops the index sources here the
-        # way upstream does when the option is off.
-        return False
-
-    # Apple Clang has no OpenMP runtime of its own, and a Homebrew libomp
-    # bottle is built for the macOS release it was poured on, not for the
-    # deployment-target baseline. libomp therefore comes from the Conan graph
-    # (llvm-openmp), audited like every other dependency; there is no compiler
-    # runtime to locate on this host.
 
     def system_libraries(self):
         # Names a binary can record without a path; anything with a system path

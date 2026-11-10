@@ -4,7 +4,6 @@ import java.net.URI
 import scala.collection.{Map => CollectionMap}
 
 import org.apache.hadoop.conf.Configuration
-import org.apache.spark.internal.Logging
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.sql.SparkSession
 
@@ -19,7 +18,7 @@ import com.zilliz.milvus.storage.snapshot.json.SnapshotJson
   * the one place the driver opens an `ObjectStore`. Used by the table (schema
   * rehydration from fixed metadata) and by every scan planner.
   */
-object StorageOptions extends Logging {
+object StorageOptions {
 
   /** Owns a driver-side store until its operation completes, preserving the
     * primary failure if releasing the store also fails.
@@ -339,14 +338,6 @@ object StorageOptions extends Logging {
       conf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
     }
     conf.set("fs.s3a.impl.disable.cache", "true")
-    if (
-      !useIam && (accessKey
-        .forall(_.trim.isEmpty) || secretKey.forall(_.trim.isEmpty))
-    ) {
-      logWarning(
-        "Snapshot S3 credentials were not provided; Hadoop S3A will use the default AWS credential provider chain."
-      )
-    }
     configureS3A("fs.s3a")
 
     snapshotBucketsToConfigure(

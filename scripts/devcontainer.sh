@@ -30,10 +30,10 @@ init_inside() {
   # Runs inside the container. Idempotent.
   cd /workspace
   git config --global --add safe.directory /workspace
-  for submodule in milvus-proto milvus-storage knowhere; do
+  for submodule in milvus-proto milvus-storage; do
     git config --global --add safe.directory "/workspace/${submodule}"
   done
-  git submodule update --init milvus-proto milvus-storage knowhere
+  git submodule update --init milvus-proto milvus-storage
   if [ ! -f "${CONAN_HOME}/profiles/default" ]; then
     conan profile detect --force
   fi

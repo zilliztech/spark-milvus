@@ -3,19 +3,18 @@ import ast
 import re
 
 
-def selected_references(constraints, *, conan_os, with_cardinal):
-    """The direct graph selected by the platform and explicit engine feature."""
-    if type(with_cardinal) is not bool:
-        raise ValueError("with_cardinal must be an explicit boolean")
-    features = {"with_cardinal": with_cardinal}
+def selected_references(constraints, *, conan_os):
+    """Select the explicit component graph for this operating system."""
     scope = constraints.get("platform_scope", {})
-    feature_scope = constraints.get("feature_scope", {})
-    for name, feature in feature_scope.items():
-        if name != "_comment" and (name not in constraints["references"] or feature not in features):
-            raise ValueError("Unknown dependency feature scope: " + name)
     return {name: reference for name, reference in constraints["references"].items()
-            if (not scope.get(name) or conan_os in scope[name])
-            and (name not in feature_scope or features[feature_scope[name]])}
+            if not scope.get(name) or conan_os in scope[name]}
+
+
+def selected_transitive_references(constraints, *, conan_os):
+    """Pin reviewed transitive recipes without replacing their version requirements."""
+    scope = constraints.get("platform_scope", {})
+    return {name: reference for name, reference in constraints.get("transitive_references", {}).items()
+            if not scope.get(name) or conan_os in scope[name]}
 
 
 def _requirements(source, *, conan_os, options):
@@ -92,16 +91,12 @@ def _requirements(source, *, conan_os, options):
     return result
 
 
-def validate_upstream_versions(constraints, storage_recipe, knowhere_recipe, *, conan_os, with_cardinal):
-    """Require the top-level graph to select the newer pinned engine version."""
-    references = selected_references(constraints, conan_os=conan_os, with_cardinal=with_cardinal)
-    options = {
-        "storage": {"with_crt": False, "with_ut": False, "with_benchmark": False},
-        "knowhere": {"with_cardinal": with_cardinal, "with_light": False,
-                     "with_ut": False, "with_benchmark": False, "with_faiss_tests": False},
-    }
+def validate_upstream_versions(constraints, recipes, *, conan_os):
+    """Require the graph to select the newest reviewed component requirement."""
+    references = selected_references(constraints, conan_os=conan_os)
+    options = {name: values for name, (_, values) in recipes.items()}
     upstream = {name: _requirements(source, conan_os=conan_os, options=options[name])
-                for name, source in (("storage", storage_recipe), ("knowhere", knowhere_recipe))}
+                for name, (source, _) in recipes.items()}
     selected = _requirements("\n".join("self.requires(" + repr(reference) + ")"
                                       for reference in references.values()), conan_os=conan_os, options={})
     policy = constraints["version_policy"]

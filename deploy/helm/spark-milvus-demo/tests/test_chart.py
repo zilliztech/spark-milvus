@@ -14,17 +14,15 @@ EXAMPLES = {
     "read": ("01_read_snapshot.py", "ReadSnapshot"),
     "filter": ("02_filter_project.py", "FilterProject"),
     "sql": ("03_sql_analytics.py", "SqlAnalytics"),
-    "exact": ("04_exact_search.py", "ExactSearch"),
-    "filtered": ("05_filtered_search.py", "FilteredSearch"),
-    "index": ("06_index_search.py", "IndexSearch"),
-    "vectors": ("07_vector_functions.py", "VectorFunctions"),
     "partition": ("08_partition_selection.py", "PartitionSelection"),
 }
 
 
 def render(overrides=None, release="demo-a", namespace="demo-tests"):
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml") as values:
-        yaml.safe_dump(overrides or {}, values)
+        configured = dict(overrides or {})
+        configured["input"] = {"existingSecret": "snapshot-input", **configured.get("input", {})}
+        yaml.safe_dump(configured, values)
         values.flush()
         return subprocess.run(["helm", "template", release, str(CHART), "--namespace", namespace,
                                "--values", values.name], text=True, capture_output=True,
@@ -56,7 +54,7 @@ def configuration(docs):
 
 
 class ChartTest(unittest.TestCase):
-    def test_default_chart_submits_vectors_without_storage_secret_or_operator(self):
+    def test_chart_submits_reads_using_an_existing_secret_without_operator(self):
         docs = resources()
         self.assertEqual(sorted(doc["kind"] for doc in docs),
                          ["ConfigMap", "Job", "Role", "RoleBinding", "ServiceAccount", "ServiceAccount", "ServiceAccount"])
@@ -66,7 +64,7 @@ class ChartTest(unittest.TestCase):
         self.assertEqual(args[:5], ["/opt/spark/bin/spark-submit", "--master", "k8s://https://kubernetes.default.svc:443",
                                     "--deploy-mode", "cluster"])
         self.assertNotIn("command", spec["containers"][0], "retain the Spark image's entrypoint")
-        self.assertNotIn("--options", args)
+        self.assertIn("--options", args)
         self.assertNotIn("--queries", args)
         self.assertTrue(all("secret" not in volume for volume in spec["volumes"]))
         self.assertTrue(all(doc["metadata"]["namespace"] == "demo-tests" for doc in docs))
@@ -92,39 +90,25 @@ class ChartTest(unittest.TestCase):
                         self.assertEqual(args[args.index("--class") + 1],
                                          "com.zilliz.spark.connector.demo." + java_class)
                         self.assertIn("local:///opt/spark-milvus/demo-java.jar", args)
-                    if example == "vectors":
-                        self.assertNotIn("--options", args)
-                        self.assertFalse(any(key.startswith("spark.kubernetes.driver.secrets.")
-                                             for key in configuration(docs)))
-                    else:
-                        self.assertEqual(args[args.index("--options") + 1], "/etc/spark-milvus/input/read-options.json")
-                    if example in ("exact", "filtered", "index"):
-                        self.assertEqual(args[args.index("--queries") + 1], "/etc/spark-milvus/input/queries.json")
-                    else:
-                        self.assertNotIn("--queries", args)
+                    self.assertEqual(args[args.index("--options") + 1], "/etc/spark-milvus/input/read-options.json")
+                    self.assertNotIn("--queries", args)
 
-    def test_snapshot_and_query_keys_share_one_driver_mount(self):
-        docs = resources(overrides={"example": "exact", "input": {"existingSecret": "existing-input",
-                                                                  "optionsKey": "options.json", "queriesKey": "vectors.json"}})
+    def test_snapshot_options_use_one_driver_mount(self):
+        docs = resources(overrides={"example": "read", "input": {"existingSecret": "existing-input",
+                                                                  "optionsKey": "options.json"}})
         conf = configuration(docs)
         mounts = {key: value for key, value in conf.items() if ".secrets." in key}
         self.assertEqual(mounts, {"spark.kubernetes.driver.secrets.existing-input": "/etc/spark-milvus/input"})
-        self.assertEqual(arguments(docs)[-4:], ["--options", "/etc/spark-milvus/input/options.json",
-                                               "--queries", "/etc/spark-milvus/input/vectors.json"])
+        self.assertEqual(arguments(docs)[-2:], ["--options", "/etc/spark-milvus/input/options.json"])
         self.assertNotIn("Secret", [doc["kind"] for doc in docs])
         self.assertFalse(any("secret" in volume for volume in pod(resource(docs, "Job"))["volumes"]))
 
-    def test_baked_queries_require_an_explicit_empty_query_key(self):
-        docs = resources(overrides={"example": "exact", "input": {"existingSecret": "existing-input", "queriesKey": ""}})
-        self.assertEqual(arguments(docs)[-2:], ["--queries", "/opt/spark-milvus/demo/config/queries.json"])
-
     def test_snapshot_examples_require_an_existing_secret(self):
         for example in EXAMPLES:
-            if example != "vectors":
-                with self.subTest(example=example):
-                    result = render({"example": example})
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("input.existingSecret is required", result.stderr)
+            with self.subTest(example=example):
+                result = render({"example": example, "input": {"existingSecret": ""}})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("input.existingSecret is required", result.stderr)
 
     def test_scoped_rbac_binds_submitter_and_driver_but_not_executor(self):
         docs = resources()
@@ -206,7 +190,8 @@ class ChartTest(unittest.TestCase):
             self.assertEqual(conf[prefix + ".LD_PRELOAD"], "/opt/java/openjdk/lib/libjsig.so")
             self.assertEqual(conf[prefix + ".LD_BIND_NOW"], "1")
             self.assertEqual(conf[prefix + ".MALLOC_ARENA_MAX"], "2")
-        self.assertEqual(conf["spark.plugins"], "com.zilliz.spark.connector.extensions.MilvusSparkPlugin")
+        self.assertNotIn("spark.plugins", conf)
+        self.assertNotIn("spark.sql.extensions", conf)
 
     def test_image_digest_architecture_and_resources_reach_all_processes(self):
         digest = "sha256:" + "a" * 64
@@ -248,7 +233,7 @@ class ChartTest(unittest.TestCase):
         docs = resources(overrides={"extraSparkConf": {"spark.sql.shuffle.partitions": "7"}})
         self.assertEqual(configuration(docs)["spark.sql.shuffle.partitions"], "7")
         for key in ("spark.kubernetes.namespace", "spark.kubernetes.container.image", "spark.kubernetes.driver.podTemplateFile",
-                    "spark.kubernetes.authenticate.driver.serviceAccountName", "spark.plugins", "spark.executor.memory"):
+                    "spark.kubernetes.authenticate.driver.serviceAccountName", "spark.executor.memory"):
             with self.subTest(key=key):
                 result = render({"extraSparkConf": {key: "unmanaged-value"}})
                 self.assertNotEqual(result.returncode, 0)

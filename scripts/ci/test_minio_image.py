@@ -10,6 +10,17 @@ import minio_image
 
 
 class MinioImageTest(unittest.TestCase):
+    def test_native_architecture_selects_matching_pinned_binaries(self):
+        for machine, architecture in (('x86_64', 'amd64'), ('amd64', 'amd64'),
+                                      ('aarch64', 'arm64'), ('arm64', 'arm64')):
+            self.assertEqual(minio_image.host_architecture(machine), architecture)
+            for name, artifact in minio_image.binaries(architecture).items():
+                self.assertIn(f'{name}.linux-{architecture}.RELEASE.', artifact['url'])
+                self.assertRegex(artifact['sha256'], r'^[a-f0-9]{64}$')
+        self.assertNotEqual(minio_image.binaries('amd64'), minio_image.binaries('arm64'))
+        with self.assertRaisesRegex(ValueError, 'Unsupported'):
+            minio_image.host_architecture('unsupported')
+
     def test_identity_is_independent_and_binds_build_inputs(self):
         first = minio_image.identity()
         first['binaries']['minio']['sha256'] = 'changed'
@@ -67,7 +78,7 @@ class MinioImageTest(unittest.TestCase):
             self.assertEqual(minio_image.ensure_image(Path(temporary)), minio_image.IMAGE)
             self.assertEqual([call.args[1] for call in verify.call_args_list], ['minio', 'mc'])
             build = docker.call_args_list[1].args
-            self.assertEqual(build[:5], ('build', '--platform', 'linux/amd64', '--tag', minio_image.IMAGE))
+            self.assertEqual(build[:5], ('build', '--platform', minio_image.PLATFORM, '--tag', minio_image.IMAGE))
             directory = Path(build[5])
             self.assertIn(minio_image.BASE_IMAGE, (directory / 'Dockerfile').read_text())
             self.assertEqual((directory / '.dockerignore').read_text(), '*\n!Dockerfile\n!minio\n!mc\n')

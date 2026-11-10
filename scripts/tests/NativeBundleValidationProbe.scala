@@ -12,28 +12,10 @@ import sbt.IO
 /** Exercises native bundle checks in the compiled sbt build. */
 object NativeBundleValidationProbe {
   private val storageRevision = "a" * 40
-  private val knowhereRevision = "b" * 40
   private val platform = "linux-x86_64"
-  private val auditEntries = Vector(
-    "libmilvus-storage-jni.so",
-    "libmilvus-storage.so",
-    "libknowhere_jni.so",
-    "libknowhere_c.so.1",
-    "libknowhere.so"
-  )
-  private val cardinalPlugins =
-    Vector("libcardinalv1.so", "libcardinalv2.so")
-  private val aliases =
-    Map("libstorage-alias.so" -> "libmilvus-storage.so")
-  private val tests = Vector(
-    "knowhere_c_api",
-    "knowhere_c_api_concurrency",
-    "knowhere_c_api_diskann_acceptance"
-  )
-  private val loadOrders = Vector(
-    Vector("libmilvus-storage-jni.so", "libknowhere_jni.so"),
-    Vector("libknowhere_jni.so", "libmilvus-storage-jni.so")
-  )
+  private val auditEntries = Vector("libmilvus-storage-jni.so", "libmilvus-storage.so")
+  private val aliases = Map("libstorage-alias.so" -> "libmilvus-storage.so")
+  private val loadOrders = Vector(Vector("libmilvus-storage-jni.so"))
 
   private def quote(value: String): String =
     "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
@@ -54,18 +36,14 @@ object NativeBundleValidationProbe {
   private def provenance(
       libraries: Vector[String] = auditEntries,
       aliasRecords: Map[String, String] = aliases,
-      withCardinal: Boolean = false,
       audit: String = "passed",
       auditPolicy: String = "jvm-load",
       jvmOrders: Vector[Vector[String]] = loadOrders,
       jvmExit: Int = 0,
-      testExit: Int = 0,
-      testNames: Vector[String] = tests,
       dependencyMode: String = "shared",
       relocationRoots: Vector[String] = auditEntries,
       dlopenEntries: Vector[String] = auditEntries,
       storagePin: String = storageRevision,
-      knowherePin: String = knowhereRevision,
       recordedPlatform: String = platform
   ): String = {
     val libraryRecords = libraries
@@ -82,28 +60,23 @@ object NativeBundleValidationProbe {
       .mkString("[", ",", "]")
     s"""{"audit":${quote(
         audit
-      )},"auditPolicy":${quote(auditPolicy)},"jvmLoadTests":$jvmRecords,"knowhereCApiTestsExit":$testExit,"knowhereCApiTests":${array(
-        testNames
-      )},"dependency.mode":${quote(dependencyMode)},"relocationRoots":${array(
+      )},"auditPolicy":${quote(auditPolicy)},"jvmLoadTests":$jvmRecords,"dependency.mode":${quote(dependencyMode)},"relocationRoots":${array(
         relocationRoots
       )},"dlopenEntries":${array(dlopenEntries)},"storage.revision":${quote(
         storagePin
-      )},"knowhere.revision":${quote(knowherePin)},"platform":${quote(
+      )},"platform":${quote(
         recordedPlatform
-      )},"with_cardinal":$withCardinal,"libraries":$libraryRecords,"aliases":$aliasValues}"""
+      )},"libraries":$libraryRecords,"aliases":$aliasValues}"""
   }
 
   private def manifest(
       provenanceJson: String,
       libraries: Vector[String] = auditEntries,
-      aliasRecords: Map[String, String] = aliases,
-      withCardinal: Boolean = false
+      aliasRecords: Map[String, String] = aliases
   ): Properties = {
     val result = new Properties()
     result.setProperty("storage.revision", storageRevision)
-    result.setProperty("knowhere.revision", knowhereRevision)
     result.setProperty("platform", platform)
-    result.setProperty("with_cardinal", withCardinal.toString)
     result.setProperty("libraries", libraries.mkString(","))
     result.setProperty(
       "aliases",
@@ -148,14 +121,12 @@ object NativeBundleValidationProbe {
       provenanceJson: String,
       manifestLibraries: Vector[String] = auditEntries,
       manifestAliases: Map[String, String] = aliases,
-      manifestCardinal: Boolean = false,
       mutateManifest: Properties => Unit = _ => ()
   ): Unit = {
     val properties = manifest(
       provenanceJson,
       manifestLibraries,
-      manifestAliases,
-      manifestCardinal
+      manifestAliases
     )
     mutateManifest(properties)
     withArchive(Some(provenanceJson))(archive =>
@@ -163,7 +134,6 @@ object NativeBundleValidationProbe {
         archive,
         properties,
         storageRevision,
-        knowhereRevision,
         platform,
         manifestLibraries,
         manifestAliases.keys.toVector.sorted
@@ -191,7 +161,6 @@ object NativeBundleValidationProbe {
           archive,
           properties,
           storageRevision,
-          knowhereRevision,
           platform,
           auditEntries,
           aliases.keys.toVector
@@ -217,16 +186,10 @@ object NativeBundleValidationProbe {
       validate(provenance(jvmExit = 1))
     }
     reject("missing JVM load order") {
-      validate(provenance(jvmOrders = loadOrders.take(1)))
+      validate(provenance(jvmOrders = Vector.empty))
     }
     reject("repeated JVM load order") {
       validate(provenance(jvmOrders = Vector.fill(2)(loadOrders.head)))
-    }
-    reject("Knowhere C API exit") {
-      validate(provenance(testExit = 1))
-    }
-    reject("Knowhere C API test set") {
-      validate(provenance(testNames = tests.dropRight(1)))
     }
     reject("dependency mode") {
       validate(provenance(dependencyMode = "static"))
@@ -251,7 +214,7 @@ object NativeBundleValidationProbe {
       )
     }
 
-    val engineLibrary = "libknowhere.so.1"
+    val engineLibrary = "libmilvus-storage.so.1"
     val aliasedLibraries = auditEntries.dropRight(1) :+ engineLibrary
     val aliasedEntries = aliases + (auditEntries.last -> engineLibrary)
     validate(
@@ -266,14 +229,8 @@ object NativeBundleValidationProbe {
     reject("storage revision") {
       validate(provenance(storagePin = "c" * 40))
     }
-    reject("Knowhere revision") {
-      validate(provenance(knowherePin = "c" * 40))
-    }
     reject("platform") {
       validate(provenance(recordedPlatform = "linux-aarch64"))
-    }
-    reject("Cardinal flag") {
-      validate(provenance(withCardinal = true), manifestCardinal = false)
     }
     reject("library set") {
       validate(provenance(libraries = auditEntries.dropRight(1)))
@@ -285,29 +242,6 @@ object NativeBundleValidationProbe {
     }
     reject("aliases") {
       validate(provenance(aliasRecords = Map.empty))
-    }
-
-    val cardinalLibraries = auditEntries ++ cardinalPlugins
-    validate(
-      provenance(
-        libraries = cardinalLibraries,
-        withCardinal = true,
-        relocationRoots = cardinalLibraries
-      ),
-      manifestLibraries = cardinalLibraries,
-      manifestCardinal = true
-    )
-    reject("missing Cardinal plugins") {
-      validate(provenance(withCardinal = true), manifestCardinal = true)
-    }
-    reject("unexpected Cardinal plugins") {
-      validate(
-        provenance(
-          libraries = cardinalLibraries,
-          relocationRoots = cardinalLibraries
-        ),
-        manifestLibraries = cardinalLibraries
-      )
     }
   }
 
@@ -366,12 +300,12 @@ object NativeBundleValidationProbe {
         message => messages :+= message
       )
       assert(
-        messages.exists(_.startsWith("Verified both JVM native load orders:")),
-        s"Expected both JVM load orders to pass, got: $messages"
+        messages.exists(_.startsWith("Verified JVM native load entries:")),
+        s"Expected JVM load entries to pass, got: $messages"
       )
 
       Files.delete(new File(directory, auditEntries.last).toPath)
-      reject("missing fifth native entry") {
+      reject("missing Storage engine entry") {
         NativeLibraries.validateUnifiedLinux(directory, repository, _ => ())
       }
       compile(auditEntries.last, "int fixture(void) { return 1; }\n")

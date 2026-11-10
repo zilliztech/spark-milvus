@@ -5,7 +5,7 @@ from common import bounded_rows, demo_session
 
 
 def main():
-    with demo_session(__doc__, filtering=True) as (spark, args, options, _):
+    with demo_session(__doc__, filtering=True) as (spark, args, options):
         documents = spark.read.format("milvus").options(**options).load()
 
         # A Spark predicate filters rows while select requests only these fields.

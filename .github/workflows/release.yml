@@ -18,6 +18,7 @@ env:
 
 jobs:
   identity:
+    if: github.repository == 'zilliztech/spark-milvus'
     runs-on: ubuntu-22.04
     outputs:
       version: ${{ steps.identity.outputs.version }}

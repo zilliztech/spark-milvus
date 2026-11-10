@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify both JNI load orders in fresh JVM processes."""
+"""Verify component JNI load orders in fresh JVM processes."""
 
 import argparse
 import json
@@ -16,8 +16,7 @@ import platforms
 
 
 _FORMAT = platforms.host()
-JVM_LOAD_ENTRIES = (_FORMAT.library_name("milvus-storage-jni"),
-                    _FORMAT.library_name("knowhere_jni"))
+JVM_LOAD_ENTRIES = (_FORMAT.library_name("milvus-storage-jni"),)
 JAVA_TIMEOUT_SECONDS = _FORMAT.jvm_load_timeout_seconds()
 # Options a JVM reads from the environment. The loader's own variables are the
 # platform's business and the adapter removes them.
@@ -96,13 +95,14 @@ def _validated_exit(exit_code, log, order):
     return exit_code, log
 
 
-def check_jvm_loads(directory, output=None):
+def check_jvm_loads(directory, output=None, load_entries=None):
     """Return the exit code from each fresh-JVM JNI load order."""
     directory = Path(directory).resolve(strict=True)
     if not directory.is_dir():
         raise ValueError("Native library directory is not a directory: " + str(directory))
     source = Path(__file__).with_name("NativeLoadCheck.java").resolve(strict=True)
-    entries = {name: directory / name for name in JVM_LOAD_ENTRIES}
+    load_entries = tuple(load_entries or JVM_LOAD_ENTRIES)
+    entries = {name: directory / name for name in load_entries}
     missing = [name for name, path in entries.items() if not path.is_file()]
     if missing:
         raise ValueError("Native library directory is missing JVM load entries: " + ", ".join(missing))
@@ -116,7 +116,7 @@ def check_jvm_loads(directory, output=None):
     environment = _clean_environment()
     environment["JAVA_HOME"] = str(java_home)
     environment[_FORMAT.preload_variable] = str(libjsig)
-    orders = (JVM_LOAD_ENTRIES, tuple(reversed(JVM_LOAD_ENTRIES)))
+    orders = dict.fromkeys((load_entries, tuple(reversed(load_entries))))
     records = []
     with tempfile.TemporaryDirectory(prefix="milvus-native-load-check-") as temporary:
         for index, order in enumerate(orders):
@@ -161,8 +161,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lib-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--entry", action="append", help="JNI library name; may be repeated")
     args = parser.parse_args()
-    records = check_jvm_loads(args.lib_dir, args.output)
+    records = check_jvm_loads(args.lib_dir, args.output, args.entry)
     print(json.dumps(records, indent=2))
     return 0 if all(record["exit"] == 0 for record in records) else 1
 

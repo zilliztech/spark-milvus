@@ -10,13 +10,13 @@ Read [AGENTS.md](../../../AGENTS.md).
 The connector reaches object storage through milvus-storage's C filesystem: see
 [spark-milvus-storage-access](../spark-milvus-storage-access/SKILL.md). Hadoop
 keys survive only as translation input in `HadoopStorageKeys`; Spark's own
-reads of the query side of a search still go through Hadoop. This skill covers
+reads of a job's other input data still go through Hadoop. This skill covers
 that residue. A change here should not make it harder to delete.
 
 ## Before changing anything
 
 The credential code looks redundant and is not. Three of its branches exist for
-scenarios that are easy to miss: a job may span a query-side bucket and the
+scenarios that are easy to miss: a job may span an input bucket and the
 Milvus bucket, which can belong to different accounts; a managed runtime may
 already have selected an AssumeRole provider that must not be replaced by the
 pod's ambient identity; and static keys need their provider pinned or a global
@@ -37,15 +37,15 @@ and the commit messages behind the fix are usually explicit.
 5. One copy of the logic. `core.credential.StorageProperties` is the only
    output and `HadoopStorageKeys` the only translation. Do not add another.
 
-## Both sides or neither
+## Keep input and target identities independent
 
 The connector reaches object storage through milvus-storage's filesystem
-(`core.io.NativeObjectStore`); only Spark's own reads of the query side still
-go through Hadoop in the same pod. Both discover the same
-identity when neither is explicitly configured. They diverge when one side is
-configured and the other is not, so configure both consistently or leave both
-alone. The native side takes
-location and mode and, when IAM is in use, no secrets.
+(`core.io.NativeObjectStore`); Spark's reads of a job's other input data use Hadoop
+in the same pod. Configure each side for its own bucket and identity. Do not
+copy Milvus storage credentials into the input reader or modify shared Hadoop
+configuration to switch identities. An explicitly selected provider must remain
+selected on that side. The native side takes location and mode and, when IAM
+is in use, no secrets.
 
 ## Verifying a change
 

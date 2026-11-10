@@ -1,288 +1,235 @@
-# Unified native build
+# Storage native build
 
-`scripts/build-native.sh` builds the pinned milvus-storage and Knowhere sources,
-including their upstream JNI implementations, with this directory's CMake
-project. `cmake/Storage.cmake`, `cmake/Knowhere.cmake` and `cmake/Cardinal.cmake`
-define the targets; the build does not execute the engines' or Cardinal's
-upstream CMake files. A configuration trace checks that boundary.
+`scripts/build-native.sh` builds the pinned milvus-storage source and its
+upstream JNI implementation with this directory's CMake project. The public
+bundle contains the Storage component only. `cmake/Storage.cmake` defines its
+targets; a configuration trace rejects executing the engine's upstream CMake
+files. Optional native components can extend this build through the descriptor
+contract below, so consumers reuse the Storage implementation and resolve one
+shared dependency graph. The driver owns Storage source, licenses, build settings
+and dependency options. Extensions may add component-owned inputs and reviewed
+shared dependency versions; they cannot replace Storage-owned inputs. Native
+acceptance requires dependency relocations (or declared parent-plugin resolution)
+and fresh JVM loads; diagnostic failures block bundle promotion.
 
-The official storage pin includes Tencent's OIDC assume-role chain. Its source
-graph requires Talon's C++ filesystem, Rust feature and generated CXX bridge,
-so all three are compiled and provenance records `storage.talon=true`. Talon
-read routing remains disabled by the upstream default `fs.talon.mode=0`.
-Storage's C++ CRT transport remains disabled (`storage.crt=false`), so its
-optional `aws-c-s3` package is excluded from the unified dependency graph.
-Changing the storage gitlink requires a fresh native bundle; an older bundle
-does not provide the new authentication implementation.
+The Storage pin includes Tencent's OIDC assume-role chain. Its source graph
+requires Talon's C++ filesystem, Rust feature and generated CXX bridge; all
+three are compiled and provenance records `storage.talon=true`. Talon routing
+keeps the upstream default `fs.talon.mode=0`. Storage's C++ CRT transport remains
+disabled (`storage.crt=false`), excluding its optional `aws-c-s3` requirement.
+Changing the Storage gitlink requires a fresh native bundle.
 
-Both engines use one Conan host dependency graph. `dependencies.json` pins
-upstream provenance and selects the newer version when their requirements
-conflict. Every direct package reference includes its exact upstream recipe
-revision. The build consumes those recipes without patching or exporting a
-project-owned replacement. Integration-specific link relationships are declared
-on the consuming targets in this project's CMake files. The build does not
-select an unpinned latest release.
-`dependencies.json` also pins the AWS CRT libraries that `aws-sdk-cpp` requires
-transitively (`aws-crt-cpp`, `aws-c-*`, `aws-checksums` and `s2n`), at the
-revisions the last passing native builds resolved. Conan looks in ConanCenter
-before the Milvus remote. In late October 2026 ConanCenter revised
-`aws-c-event-stream/0.7.1` and `aws-checksums/0.2.10` to require
-`aws-c-common/0.14.5`, while the rest of that graph requires 0.14.0, so locking
-the unpinned family fails with a version conflict.
-`profiles/linux-x86_64` and `profiles/linux-aarch64` select GCC 12, C++20 and
-shared host dependencies; the two differ only in `arch`. `profiles/darwin-aarch64`
-and `profiles/darwin-x86_64` select Apple clang and differ in `arch`, the Apple
-clang each was validated with, and one line of `darwin-x86_64`: folly builds
-against the macOS 14.5 SDK, because its CMake compiles
-`crypto/detail/MathOperation_Simple.cpp` with `-mno-sse2` on x86_64 and clang
-then rejects the `_Float16` functions the macOS 15 SDK's `math.h` declares. The
-Command Line Tools install that SDK; Xcode alone does not.
-OpenBLAS uses `dynamic_arch=True` with an explicit common-code target:
-`NEHALEM` on x86 and `ARMV8` on ARM. An automatic target can let the build host's
-AVX512 flags leak into the ZEN kernel. Its compiled thread capacity is fixed at
-64; the package-scoped CMake configuration participates in Conan's package ID
-so caches cannot reuse a package with different capacity. Runtime thread
-settings still control concurrency. Header-only dependencies and the internal
-Rust bridge do not expose a shared-library option.
+## Toolchain and dependency graph
 
-A platform is built when `native/build/profiles/` holds its Conan profile and
-`platforms.py` holds its adapter. `build.py` names the missing one rather than
-refusing an operating system.
+`dependencies.json` pins exact upstream recipe revisions. Its
+`transitive_references` records Folly's reviewed double-conversion, fast_float
+and libevent recipes and the AWS CRT recipe family validated with the
+pinned Milvus AWS SDK recipe. Conan Center can publish a different recipe for the
+same version with incompatible dependency requirements; an empty cache must
+resolve the same reviewed family as an existing cache. The driver supplies these
+revisions through a partial seed lock, without adding direct dependencies or
+forcing different upstream versions. The resulting complete lock must retain
+every selected recipe revision. The build consumes
+those recipes without patching them or exporting project-owned replacements.
+`profiles/` and `platforms.py` supply the Conan profile and platform adapter;
+a platform needs both. Linux profiles select GCC 12 and C++20. Darwin profiles
+select Apple Clang and C++20, with `llvm-openmp` from the same dependency graph.
+The Darwin x86 profile uses the macOS 14.5 SDK for Folly's affected math sources.
+The release matrix determines which of these platforms are distributed and
+which consumer operating systems validate their artifacts.
 
-Every platform requires Conan 2, a CMake 3 whose version the profile's
-`[platform_tool_requires]` declares, Ninja, Python 3.9+, Git, a JDK selected by
-`JAVA_HOME`, Rust/Cargo, libclang and ccache. `toolchain.json` pins the Rust
-and Java versions CI uses: the runner preparation installs that Rust through
-rustup and requires `JAVA_HOME` to report that Java, the native workflow
-selects the same Java, and the Dockerfile defaults `RUST_TOOLCHAIN` to the same
-Rust. Rust bindgen loads libclang while
-building the storage bridge's `custom-labels` dependency. Conan remotes must
-provide each pinned upstream recipe that is absent from the local cache. A
-CMake 4 rejects the `cmake_minimum_required` of several pinned upstream
-recipes, so the declared version is the one that must be on `PATH`.
+Every platform needs Conan 2, the CMake 3 version declared by its profile,
+Ninja, Python 3.9+, Git, a JDK selected by `JAVA_HOME`, Rust/Cargo, libclang and
+ccache. [toolchain.json](toolchain.json) pins the Rust and Java versions used by
+CI. Conan remotes must supply pinned recipes missing from the local cache.
+CMake 4 rejects several pinned upstream recipes, so put the profile's CMake 3
+on `PATH`. Conan's settings must also accept the compiler version in the
+selected profile.
 
-Conan's own settings must accept the compiler version its profile names. The
-`darwin-aarch64` profile names the Apple clang it was validated with, and
-Conan's `settings.yml` stops a few releases behind Xcode, so a
-`settings_user.yml` in the Conan home extends the list:
+| Platform | Additional tools and dependencies |
+| --- | --- |
+| Linux x86_64 and aarch64 | GCC/G++/gfortran 12, patchelf, readelf, ldd, binutils and the libaio development package |
+| Darwin x86_64 and aarch64 | Apple Clang from the selected profile, otool, install_name_tool and codesign; no Fortran or Linux I/O libraries |
 
-```yaml
-compiler:
-    apple-clang:
-        version: ["18", "19", "20", "21"]
-```
+Storage's Linux dependency graph includes OpenBLAS through milvus-common.
+OpenBLAS uses `dynamic_arch=True`, with common-code targets `NEHALEM` on x86
+and `ARMV8` on ARM to prevent build-host AVX512 flags entering common kernels.
+Its compiled thread capacity is 64; the package-scoped CMake configuration
+participates in Conan's package ID. Runtime thread settings still control
+concurrency. Folly's recipe removes its `FindLibAIO.cmake`; Linux profiles provide
+`LIBAIO_LIBRARIES=aio` to Folly's own CMake build and include that setting in
+its package ID. Folly must carry its own `libaio` dependency instead of relying
+on another library to make its unresolved AIO calls loadable.
+Linux milvus-common also links its own atomic operations through the upstream
+`COMMON_LINKER_LIBS` input. On Linux, for the exact pinned gRPC and OpenTelemetry recipes,
+`cmake/DependencyLinkage.cmake` supplies missing target dependencies after their
+CMake targets exist: OpenTelemetry's gRPC proto library links the Conan gRPC
+wrapper, and the generated upb descriptor table belongs to the shared lower
+provider used by both JSON/textformat and gRPC. The hook rejects unreviewed
+recipe/source shapes. Both Conan contexts include its content hash in package
+identity; incidental build paths do not decide cached binary identity.
+Header-only dependencies and the internal Rust bridge do not
+expose shared-library options.
 
-That is a Conan configuration, not a recipe change. The pinned recipes are used
-as published: boost's and avro's first source URL is dead and Conan falls back
-to the mirror each recipe already lists, and thrift and arrow compile unpatched
-against the macOS 26 SDK.
+## Build and resume
 
-No package manager ships that CMake next to a current one, so put it in a
-virtual environment of its own and prepend that to `PATH` for the build. It is
-the machine's, not the checkout's: a directory under `/tmp` is emptied by the
-system and takes the toolchain with it.
-
-```bash
-python3 -m venv ~/toolchain/cmake3venv
-~/toolchain/cmake3venv/bin/pip install cmake==3.31.10 ninja   # 3.31.10 for the darwin profiles, 3.27.5 for the linux profiles; use the version your host profile names
-PATH=~/toolchain/cmake3venv/bin:$PATH scripts/build-native.sh --work-dir ...
-```
-
-| Platform | Compilers | Binary tools | Also |
-| --- | --- | --- | --- |
-| `linux-x86_64`, `linux-aarch64` | GCC/G++/gfortran 12 | patchelf, readelf, ldd, binutils | the libaio development package, which Folly's async I/O needs; Ubuntu supplies libclang in `libclang-dev` |
-| `darwin-x86_64`, `darwin-aarch64` | Apple Clang 17 or later, since Knowhere uses `std::atomic_ref`, which libc++ provides from LLVM 19; the OpenMP runtime is the graph's `llvm-openmp`, macOS only; no Fortran | otool, install_name_tool, codesign | no libaio, liburing or OpenBLAS: `dependencies.json` scopes those to Linux, as the engines' own conanfiles do, and faiss takes Accelerate for BLAS |
-
-Where the platforms differ in what an engine carries, the bundle declares it:
-`with_diskann` is false on a platform whose adapter reports no DiskANN, because
-its only aligned reader is built on libaio and io_uring. The required C API test
-set follows the same flag rather than the platform name.
-
-The build records tool versions and never reads a native library from an older
-connector JAR.
-
-Public CI fingerprints tracked files in this directory and the native entry,
-packaging, ABI, cache and toolchain scripts. Markdown documentation and the
-top-level `test_*.py` driver unit tests do not affect the native bundle cache
-key. All other files remain inputs, including newly staged files, Conan
-profiles, dependency pins, CMake source lists, linker maps and JVM load checks.
-The C acceptance sources under `tests/` remain inputs because the native build
-compiles and runs them before promoting a bundle. Engine revisions, platform
-ABI requirements and the prepared toolchain also participate in the key.
-Documentation-only changes reuse the original audited bundle and its build
-provenance; ABI and consumer checks still run on every cache hit. The complete
-build-input snapshot and resume validation remain unchanged.
+Run from the repository root:
 
 ```bash
 scripts/build-native.sh \
-  --work-dir /absolute/path/to/new-build \
-  --cardinal-repository /absolute/path/to/authorized/cardinal-checkout \
-  --with-cardinal --jobs 50
+  --work-dir /absolute/path/to/storage-build \
+  --jobs 8
 ```
 
-Omit `--with-cardinal` for the open-source variant. The Knowhere revision comes
-from the root `knowhere` submodule gitlink, and the Cardinal tag of each
-generation is read from that checkout's `cmake/libs/cardinal/v1/CMakeLists.txt`
-and `v2/CMakeLists.txt` (`set(CARDINAL_VERSION ...)`), the same place Knowhere's
-own build reads it; `--cardinal-version v1=<ref>` or `v2=<ref>` replaces one
-generation's ref with a tag or commit when Knowhere's pin lags its own API, and
-the override is recorded as that generation's tag. The commit each ref resolved
-to is recorded in `provenance/cardinal-source-identity.json` and the bundle
-provenance. Cardinal
-sources require authorization. The build uses the
-initialized Knowhere submodule as a Git object source and creates an isolated
-checkout at the gitlink revision. `--knowhere-source` may name another Git
-object source only when its HEAD is the same revision. Storage is copied from
-the selected submodule working tree and its complete source manifest and diff
-are recorded. An exported storage tree must
-specify `--storage-revision`; `--storage-patch` preserves its Git diff.
+Storage is copied from the selected submodule working tree. Its complete source
+manifest and Git diff are recorded. An exported source tree requires
+`--storage-source`, `--storage-revision` and, when applicable, `--storage-patch`.
+The driver never reads native libraries from an older connector JAR.
 
-`--cargo-cache` copies an existing Cargo target directory; Cargo determines
-which artifacts remain valid. `--corrosion-source` selects a clean checkout of
-the exact Corrosion revision in `dependencies.json`, used to generate and build
-the Rust/CXX bridge. The driver snapshots and verifies it before CMake uses it;
-the recorded tool versions include Rust and Cargo.
-`--no-remote` resolves Conan recipes and binary packages only from the cache;
-recipe source downloads still run. These options do not select prebuilt engine libraries.
+`--cargo-cache` copies a Cargo target directory; Cargo decides which artifacts
+remain valid. `--corrosion-source` must identify a clean checkout of the exact
+Corrosion revision in `dependencies.json`. Without it, the driver fetches that
+revision. Both sources are snapshotted and verified before CMake uses them.
+`--no-remote` restricts Conan recipe and package resolution to its cache;
+recipe source downloads can still run.
 
-The driver records source identities, locks the dependency graph before
-installing packages, and rejects a resumed build if its source tree or
-dependency inputs changed. Use a new work directory for changed inputs. Conan
-can still reuse packages from the previous build. `--conan-lock /path/conan.lock`
-reuses a reviewed full dependency lock in a new work directory. Its direct
-recipes must match the current selected revisions, and every resolved host and
-build dependency must remain in that lock. Without this argument, the first run
-resolves and writes `provenance/conan.lock`; use that lock for later builds to
-preserve transitive versions as well as direct requirements. Jobs must be between 1 and
-50. Both engines share one `cmake-build/` Ninja tree. The driver first builds
-`milvus-storage-rust` with one Ninja job and the requested Cargo job count, then
-builds the C++ targets with the requested Ninja job count. Any Cargo recheck in
-that second phase uses one Cargo job, so independent Rust and C++ schedulers
-cannot each start 50 compilation jobs at the same time.
+Use a new work directory when sources or dependency inputs change. Resuming a
+work directory checks its source manifests, build implementation and dependency
+inputs before using prior outputs. Conan and ccache can reuse matching packages
+and object files across work directories. A build lock prevents concurrent
+writers to the same work directory.
 
-Conan reuses compatible cached binaries when the recipe revision, configuration
-and package ID all match. `build.py` copies `conanfile.py` and
-`dependencies.json` into the work directory, checks the dependency declarations
-from both pinned engine revisions for the selected OS and `--with-cardinal`,
-and rejects a selected conflict version unless it is the newer upstream
-requirement. Unknown conditions or dynamic requirements fail validation.
-`platform_scope` and `feature_scope` select the same direct graph for validation
-and Conan; for example, METIS is required only with Cardinal. Conan then resolves
-only the selected exact recipe references in `dependencies.json`; the full lock
-covers every host and build dependency. The driver writes the host and build profiles it passes to Conan
-into the work directory: the checked-in profile of the host platform plus a
-`[replace_requires]` section naming every selected reference in `dependencies.json`,
-without the `[options]` section for the build profile. The consumer's
-`force=True` requirements pin the host context only; without the replacements,
-build-context tools such as protoc resolve their zlib and openssl ranges to the
-newest remote revision, and the lock's context-free overrides then rewrite those
-ranges to host revisions that its `build_requires` does not contain, so
-`conan install --lockfile` fails on a fresh cache.
+The driver checks upstream dependency declarations, selects pinned references,
+and writes a full Conan lock before installing packages. `--conan-lock` can
+reuse a reviewed lock in a new work directory; its direct and reviewed transitive recipes must match the
+current selection and it must cover every resolved host and build dependency.
+The generated host and build profiles replace dependency ranges with the exact
+selected references, including tool dependencies in the build context.
 
-The independent CMake targets state the additional integration link edges that
-the unified consumers need. For example, storage links its public dependency
-set and keeps `aio` in the runtime closure explicitly, while Knowhere, DiskANN
-and Cardinal name their direct shared-library providers. These declarations do
-not modify Conan cache entries or dependency source trees. Provenance records
-the direct references, the two upstream dependency declarations, the selected
-versions, the complete lock and the resolved package graph.
+All components share one CMake/Ninja tree. The driver builds the Storage Rust
+bridge first with one Ninja job and the requested Cargo concurrency, then
+builds C++ with the requested Ninja concurrency. A Cargo recheck during C++
+compilation uses one Cargo job. `--jobs` accepts values from 1 through 50.
 
-The general and concurrency C API tests compile the pinned Knowhere test
-sources unchanged. The project-owned DiskANN acceptance fixture under
-`tests/knowhere/` requests unquantized refinement so its exact-distance
-assertions test that contract in both engine variants. The build never modifies
-the pinned Knowhere checkout, and the fixture changes no production default.
+The Rust bridge links privately into Storage. Linux linker rules hide vendored
+compression and prefixed AWS-LC symbols while preserving public Storage APIs.
+Rust `openssl-sys` uses the Conan OpenSSL headers and shared libraries through
+`OPENSSL_DIR`, `OPENSSL_STATIC=0` and `OPENSSL_NO_VENDOR=1`. Cargo's internal
+compression implementations retain their own pins. This build produces no
+Python bindings.
 
-The Rust bridge is linked privately into the storage engine. Public C++ headers
-retain their generated bridge include directories without propagating the
-static archives into JNI consumers. On Linux JNI builds, a linker map hides
-vendored LZ4, XXHash, Zstandard and prefixed AWS-LC symbols while preserving the
-public `loon_*` C API and C++/CXX runtime symbols. These rules live in our CMake
-targets and `cmake/storage-private-symbols.map`; they do not require changes to
-storage's upstream build files. This build does not produce Python bindings.
-Rust `openssl-sys` uses the same Conan OpenSSL headers and shared libraries
-through `OPENSSL_DIR`, `OPENSSL_STATIC=0` and `OPENSSL_NO_VENDOR=1`. Cargo's pinned
-internal compression implementations are not replaced with a different version.
+## Component extension contract
 
-Upstream Cardinal uses host-native CPU compiler flags. This local validation
-build can require the builder's instruction set; a `linux-<arch>` classifier
-does not promise compatibility with every CPU of that architecture (an aarch64
-bundle built on a Graviton4 host requires SVE2). The provenance records the
-host CPU, the compiler's native target and actual compile/link flags.
-`cmake/cardinal/Sources.cmake` lists Cardinal's sources as a common part plus
-one list per architecture, following the `x86_64` and `arm` blocks of each
-pinned tag's `CMakeLists.txt`; `cmake/Cardinal.cmake` selects the list by
-`CMAKE_SYSTEM_PROCESSOR` and gives the AVX-512 or SVE kernels the per-file
-flags upstream gives them.
+A consumer that owns another native engine prepares immutable source snapshots
+and passes `--components /absolute/path/to/components.json`. The consumer owns
+its engine source selection, CMake targets, acceptance tests and JVM binding.
+The public driver owns Storage, Conan resolution, staging, platform handling
+and provenance. An extension includes its targets into the same CMake tree and
+installs its libraries into the common install directory. It must not replace
+or rename the `storage` component.
 
-The resulting files are:
+The descriptor's `components` array has these fields for each component:
+
+| Field | Meaning |
+| --- | --- |
+| `name`, `revision` | Distinct lowercase component name and exact 40-character Git revision |
+| `sourceDirectory`, `sourceObjectDirectory` | Immutable source snapshot and original Git object source |
+| `recipe`, `recipeOptions` | Upstream Conan recipe path and options used when validating its requirements |
+| `cmake`, `cmakeVariables` | Component CMake file and cache variables; driver namespaces (`CMAKE_`, `MILVUS_`, `STORAGE_`, `FETCHCONTENT_`) are reserved |
+| `loadEntries` | Platform-specific JNI filenames; JVM acceptance loads the combined entries in forward and reverse order, omitting duplicate orders |
+| `dlopenEntries`, `parentProviders` | Engine/plugin entry libraries and explicit plugin-to-provider relationships for staging diagnostics |
+| `testNames` | Exact CTest names required before a bundle can be promoted |
+| `sourceLicenseDirectories` | Map from license owner to `{ "directory": "/source/snapshot", "files": ["LICENSE"] }`; owners must be the component name or begin with that name plus `-`; documents must be nonempty and remain inside the component snapshot |
+
+The driver computes source manifests and source identities itself, hashes the
+extension CMake directory, and rejects changed inputs on resume. Supplied source
+hashes do not replace these checks. Component source and extension manifests
+are included with the normalized evidence delivered in the bundle.
+
+Top-level `references` adds or selects exact Conan recipe revisions.
+`transitiveReferences` can extend the reviewed recipe seed without adding direct
+requirements; platform scopes apply to both kinds of pin.
+`versionPolicy` supplies version ordering and excluded requirement rules;
+its nested maps extend the Storage policy. `platformScope` and `staticOn`
+apply platform restrictions. `conanOptions` and `conanConf` become explicit
+Conan host options and configuration, including package-ID inputs where needed.
+Existing Storage dependency options and configuration cannot be overridden;
+shared OpenBLAS configuration, for example, remains in the public profile.
+Extensions cannot replace a recipe revision at the same version or alter an
+existing platform/version policy. These inputs participate in the dependency
+identity. Dependency conflicts must
+satisfy the same newer-upstream-version policy as the public graph.
+
+`featureOptions` contains boolean features. `metadata` records consumer-owned
+provenance, such as the exact public native-tools revision; it cannot override
+driver-owned identities. The resulting bundle contains every component in one
+resource JAR. Consumers must not place a Storage-only bundle beside an extended
+bundle on the same classpath.
+
+## Outputs and acceptance
 
 | Path below the work directory | Contents |
 | --- | --- |
 | `status.json` | Current phase and failure details |
-| `sources/` | Isolated engine source snapshots |
-| `dependency-input/`, `dependencies/` | Pinned direct requirements and Conan-generated CMake dependencies |
-| `provenance/` | Source identities, dependency selection, tool versions, lock, graph, compiler commands and full configuration trace |
-| `provenance/build-input/` | Full backup of this build implementation and its inputs |
-| `cmake-build/` | One CMake/Ninja tree for the Rust bridge, both engines, JNI and C API tests |
-| `install/lib/` | Installed engine, JNI and optional Cardinal libraries before dependency staging |
-| `bundle/lib/` | Runtime dependency closure with SONAME aliases and relative RPATH |
-| `bundle-candidates/` | Unpromoted staging attempts, including failed audit evidence |
-| `bundle-history/` | Previous successful bundles retained when a new candidate is promoted |
-| `bundle/provenance.json` | Normalized source and package identities, features and library hashes |
-| `bundle/provenance/` | Digests and normalized summaries that associate the JAR with external build evidence |
-| `bundle/licenses/` | Collected upstream licenses |
-| `bundle/audit/` | Per-library relocation and fresh loader diagnostics |
+| `sources/` | Isolated Storage and Corrosion source snapshots |
+| `dependency-input/`, `dependencies/` | Exact requirements and Conan-generated CMake dependencies |
+| `provenance/` | Source identities, dependency selection, tool versions, lock, graph, commands and configuration trace |
+| `provenance/build-input/` | Snapshot of the native build implementation |
+| `cmake-build/`, `install/lib/` | CMake/Ninja outputs and installed libraries before staging |
+| `bundle/lib/` | Runtime closure with SONAME aliases and relative RPATH |
+| `bundle/provenance.json`, `bundle/provenance/` | Normalized identities and evidence digests |
+| `bundle/licenses/`, `bundle/audit/` | Upstream licenses and loader diagnostics |
+| `bundle-candidates/`, `bundle-history/` | Unpromoted attempts and previous successful bundles |
 
-The resource JAR's provenance includes only normalized source and package
-identities, including the exact direct recipe references, and digests of the
-native-build inputs, dependency lock and graph, libraries, audit results and
-external evidence. Collected licenses are packaged alongside it. The JAR does
-not include build-machine absolute paths. Full source snapshots, the complete
-Conan graph, `compile_commands.json`, native build commands, the build-input
-backup and the expanded `cmake-trace.jsonl` remain in the external work
-directory (`NATIVE_WORK_DIR` when Make invokes the build). Their recorded hashes
-associate that external evidence with the delivered libraries.
+Staging rejects conflicting SONAMEs and dependencies outside the selected graph,
+except explicitly audited compiler runtimes and libaio. Only staged copies
+receive relative RPATHs; source libraries and Conan packages are unchanged.
+glibc, the platform C++ runtime and system zlib remain system dependencies. The
+bundle records required zlib symbol versions and the validation host's provider.
 
-Staging rejects conflicting SONAMEs and any dependency outside the selected
-graph, apart from an explicit list of compiler runtimes and libaio. The latter
-are copied with their source hashes and package origin recorded. glibc, the
-platform C++ runtime and the system zlib (`libz.so.1` / `libz.1.dylib`) stay
-system dependencies. Some JDKs load
-system zlib before JNI initialization, so packaging another implementation
-cannot determine which zlib symbols the process uses. The bundle records its
-consumers' required ZLIB symbol versions and the validation host's provider
-path, package version and SHA; target machines must satisfy that ABI.
-Only staged copies receive
-`$ORIGIN` RPATH; inputs and cached Conan packages remain unchanged.
+Native acceptance runs fresh JVMs using `jvm_load.py` and `NativeLoadCheck.java`.
+A public bundle loads the Storage JNI entry; an extended bundle tests each
+unique forward/reverse order. The checker uses the selected JRE's `libjsig`,
+clears additional library paths and JVM injection options, and rejects a failed
+load. Provenance records `auditPolicy: jvm-load` and the exact `jvmLoadTests`.
+Per-library relocation, private-symbol and `RTLD_NOW` checks must also pass.
+Plugins may resolve declared parent-engine symbols only when their recorded
+parent provides every unresolved symbol and the parent-context check succeeds.
+A missing diagnostic tool or failed dependency check blocks acceptance even
+when both JVM loads succeed. The packager repeats these checks on its input bytes. JNI load success does not establish query or
+write correctness; native fixtures and object-storage integration remain
+separate acceptance steps.
 
-Native acceptance uses two fresh JVMs that call `System.load` on both JNI
-entries, in storage-first and Knowhere-first order. Staging, packaging and sbt
-share `jvm_load.py` and `NativeLoadCheck.java`. The checker uses the selected
-JRE's `libjsig`, clears additional library paths and JVM injection options, and
-rejects either failed load order. Provenance records `auditPolicy: jvm-load` and
-both `jvmLoadTests`; an older standalone audit is not JVM loading evidence.
+Only a candidate whose declared component tests, relocations and JVM loading pass replaces
+`bundle/`. A failed retry preserves the previous successful bundle. Package a
+validated directory with:
 
-Per-library GNU stack, relocation, private-symbol and `RTLD_NOW` results remain
-diagnostics. Their failures are recorded unchanged and do not block packaging.
-JNI loading does not establish that JNI calls or Spark queries work; functional
-storage/vector fixture tests and disposable object-storage integration checks
-remain separate acceptance steps.
-Every run stages in a fresh candidate directory. Only a candidate whose C API
-tests and JVM loading passed replaces `bundle/`; the old bundle is retained in
-`bundle-history/`. A failed retry preserves the last successful bundle. A
-build-directory lock prevents two builders from changing the same work tree.
-The engine and storage JNI diagnostics also record exported private LZ4, XXHash,
-Zstandard, OpenSSL and AWS-LC symbols from the Rust archive.
+```bash
+python3 scripts/package-native.py \
+  --lib-dir /absolute/path/to/storage-build/bundle/lib \
+  --provenance /absolute/path/to/storage-build/bundle/provenance.json \
+  --licenses /absolute/path/to/storage-build/bundle/licenses \
+  --evidence /absolute/path/to/storage-build/bundle/provenance \
+  --output /absolute/path/to/milvus-native-linux-x86_64.jar
+```
 
-Package the validated directory with `scripts/package-native.py`. Packaging
-requires exact agreement with the audited provenance's files, hashes, aliases,
-recorded dependencies (ELF or Mach-O), each library's architecture against the
-declared platform, and Cardinal features, and successful required C API tests;
-the result is recorded in `META-INF/milvus-native/binaries.json`.
-This build
-does not install resources into the connector or modify compatibility records.
-Run its focused regression tests with:
+Packaging verifies hashes, aliases, dependencies, architectures, component test
+records and fresh JVM loads. The format-2 manifest lives under
+`native/milvus/2/<platform>/`, names its components and records their revisions.
+JVM bindings declare independent requirements under
+`META-INF/milvus-native/requirements/`, indexed by `requirements.list`. The
+shared runtime checks all binding requirements against the single bundle.
+
+The resource JAR contains normalized evidence and licenses, without build-host
+absolute paths. Full source snapshots, the Conan graph, compiler commands and
+expanded CMake trace remain in the work directory; recorded hashes associate
+them with the delivered libraries. CI cache identities include component
+revisions, platform ABI requirements, toolchain and functional build inputs.
+Markdown and top-level Python driver tests do not change the bundle cache key;
+strict local resume still checks the complete build snapshot. ABI and consumer
+checks run on cache hits too.
+
+Run focused driver regression tests with:
 
 ```bash
 python3 -m unittest discover -s native/build -p 'test_*.py' -v

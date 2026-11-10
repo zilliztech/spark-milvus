@@ -3,11 +3,19 @@ package com.zilliz.milvus.storage
 /** Opens files in object storage and owns the single native session.
   * NativeObjectStore owns the upstream MilvusStorageFileSystem and its
   * MilvusStorageProperties until close, and offers readAll, readAt, size, list,
-  * exists and a scoped low-level filesystem operation. Business mutations
-  * belong to external adapters borrowing the same session. The upstream binding
-  * owns JNI and library loading. It is a wrapper, not an implementation: the
-  * seven cloud backends, their credential providers and the filesystem itself
-  * all live in the C layer.
+  * exists and a scoped low-level filesystem operation. WritableObjectStore adds
+  * file output and cleanup through the same session; NativeWritableObjectStore
+  * borrows its existing filesystem. File writes create parent directories only
+  * for the local backend; remote object writes do not request bucket or
+  * directory creation. Explicit createDir retains the upstream filesystem
+  * semantics, except in object-storage mode, which
+  * NativeWritableObjectStore.open selects for every backend but the local one:
+  * object storage has no directories, and the native recursive create starts
+  * with a bucket check (S3 HeadBucket), which a role scoped to a key prefix
+  * cannot run. Every operation still requires an open store. The upstream
+  * binding owns JNI and library loading. It is a wrapper, not an
+  * implementation: the seven cloud backends, their credential providers and the
+  * filesystem itself all live in the C layer.
   *
   * A handle is a pointer inside this process. It must never reach an
   * InputPartition, which Spark serializes and ships; partitions carry the
@@ -30,7 +38,8 @@ package com.zilliz.milvus.storage
   * trip and one connection's rate. `ObjectStore.readAt` is safe to call from
   * several threads at once.
   *
-  * Main types: ObjectStore, ObjectStoreFactory, NativeObjectStore, FileInfo,
+  * Main types: ObjectStore, ObjectStoreFactory, NativeObjectStore,
+  * WritableObjectStore, NativeWritableObjectStore, FileInfo,
   * ConcurrentRangeReads.
   */
 package object io

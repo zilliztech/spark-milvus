@@ -28,6 +28,11 @@ on:
   push:
     branches: [main, '[0-9]*.[0-9]*']
   workflow_dispatch:
+    inputs:
+      version:
+        description: Optional version; must equal 2.1.0-rc.<run-id>.<run-attempt>
+        type: string
+        required: false
 
 permissions:
   actions: read
@@ -80,7 +85,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: false
-      - run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+      - run: git submodule update --init --recursive milvus-proto milvus-storage
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -105,6 +110,7 @@ jobs:
           if-no-files-found: error
 
   spark-sources:
+    # This check name is required by the upstream main/release rulesets.
     name: Spark source and spill checks (${{ matrix.line }}, Scala ${{ matrix.scala }})
     needs: read-matrix
     strategy:
@@ -117,7 +123,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: false
-      - run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+      - run: git submodule update --init --recursive milvus-proto milvus-storage
       - uses: actions/setup-java@v5
         id: test-java
         with:
@@ -134,7 +140,7 @@ jobs:
           name: source-build-matrix
       # Also compiles the integration tests, then cleans from the default
       # selection, which must remove this combination's products.
-      - name: Compile sources, require the spill suite and clean them
+      - name: Compile sources, require the read suites and clean them
         env:
           SPARK35_TEST_JAVA_HOME: ${{ steps.test-java.outputs.path }}
         run: python3 scripts/ci/read_validation.py spark --matrix build-matrix.json --line '${{ matrix.line }}' --scala '${{ matrix.scala }}'
@@ -151,7 +157,7 @@ jobs:
   artifacts:
     uses: ./.github/workflows/build-artifacts.yml
     with:
-      version: ${{ inputs.version || format('2.0.0-ci.{0}.{1}', github.run_id, github.run_attempt) }}
+      version: ${{ inputs.version || format('2.1.0-rc.{0}.{1}', github.run_id, github.run_attempt) }}
       # Pull requests and merge queue entries run the ordinary checks; pushes,
       # dispatches and reusable callers run the full gate. Direct fork PRs have
       # no workflow_call inputs.
@@ -194,23 +200,34 @@ jobs:
           deploy/helm/spark-milvus-integration/tests/run-test.sh
 
       - name: Lint the Spark demo chart
-        run: helm lint --strict deploy/helm/spark-milvus-demo
+        run: helm lint --strict deploy/helm/spark-milvus-demo --set input.existingSecret=read-input
 
       - name: Test Spark demo templates
         run: python3 deploy/helm/spark-milvus-demo/tests/test_chart.py
 
-  # Match the image's Ubuntu Git package: newer upload-pack versions no longer
-  # perform the ownership check that can reject local submodule fetches.
+  # Verify mounted source/gitlink ownership with the native image's Git baseline.
+  # The check name is retained by the upstream main/release rulesets.
   docker-git-ownership:
     name: Docker Git ownership regression
     runs-on: ubuntu-latest
     container: ubuntu:22.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
+      # The container reaches the Ubuntu archive directly. An update that stalls
+      # or meets an index in mid-sync fails only its own attempt, so each one is
+      # bounded and retried before the job gives up.
       - name: Install the image's Git version and Python
         run: |
-          apt-get update -qq
-          apt-get install -y -qq --no-install-recommends ca-certificates git python3
+          for attempt in 1 2 3; do
+            if timeout 150 apt-get update -qq; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep 30
+          done
+          apt-get install -y -qq -o Acquire::Retries=3 --no-install-recommends ca-certificates git python3
           dpkg-query -W git
 
       - uses: actions/checkout@v5
@@ -225,14 +242,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      # The build needs exactly the three native source submodules; initialize
+      # The build needs the protocol and Storage source submodules; initialize
       # them by name rather than recursively.
       - uses: actions/checkout@v5
         with:
           submodules: false
 
       - name: Initialize the native source submodules
-        run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+        run: git submodule update --init --recursive milvus-proto milvus-storage
 
       - uses: actions/setup-java@v5
         with:
@@ -271,7 +288,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: false
-      - run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+      - run: git submodule update --init --recursive milvus-proto milvus-storage
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -297,7 +314,7 @@ jobs:
           if-no-files-found: error
 
   spark-native:
-    name: Offline reads and search (${{ matrix.line }}, Scala ${{ matrix.scala }})
+    name: Offline reads (${{ matrix.line }}, Scala ${{ matrix.scala }})
     needs: [read-matrix, artifacts]
     if: (github.event_name != 'pull_request' && github.event_name != 'merge_group') || inputs.full_validation == true
     strategy:
@@ -313,7 +330,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+      - run: git submodule update --init --recursive milvus-proto milvus-storage
       - uses: actions/setup-java@v5
         id: test-java
         with:
@@ -332,7 +349,7 @@ jobs:
         with:
           name: native-linux-x86_64
           path: native-input
-      - name: Require every read/search suite without cancellations
+      - name: Require every read suite without cancellations
         env:
           SPARK35_TEST_JAVA_HOME: ${{ steps.test-java.outputs.path }}
         run: python3 scripts/ci/read_validation.py spark --matrix build-matrix.json --line '${{ matrix.line }}' --scala '${{ matrix.scala }}' --native-bundle native-input/milvus-native-linux-x86_64.jar
@@ -345,6 +362,17 @@ jobs:
           MILVUS_READ_IT_OPTIONS: ${{ runner.temp }}/read-storage/a.json
           MILVUS_READ_IT_OPTIONS_B: ${{ runner.temp }}/read-storage/b.json
         run: python3 scripts/ci/read_validation.py integration --matrix build-matrix.json --native-bundle native-input/milvus-native-linux-x86_64.jar
+      # Every line replaces columns of real V3 files and reads them back, on
+      # local storage and on object storage under a prefix-scoped identity.
+      - name: Prepare a prefix-scoped object-storage identity
+        run: python3 scripts/ci/input_storage.py start --env-file "$RUNNER_TEMP/column-write.env"
+      - name: Require column writes, readback and identity scope
+        env:
+          SPARK35_TEST_JAVA_HOME: ${{ steps.test-java.outputs.path }}
+        run: python3 scripts/ci/read_validation.py column-write --matrix build-matrix.json --line '${{ matrix.line }}' --scala '${{ matrix.scala }}' --native-bundle native-input/milvus-native-linux-x86_64.jar
+      - name: Remove the object-storage identity fixture
+        if: always()
+        run: python3 scripts/ci/input_storage.py stop --env-file "$RUNNER_TEMP/column-write.env"
       - name: Remove the isolated input store
         if: always() && matrix.line == '4.0'
         run: python3 scripts/ci/read_storage.py stop --directory "$RUNNER_TEMP/read-storage"
@@ -366,14 +394,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      # The build needs exactly the three native source submodules; initialize
+      # The build needs the protocol and Storage source submodules; initialize
       # them by name rather than recursively.
       - uses: actions/checkout@v5
         with:
           submodules: false
 
       - name: Initialize the native source submodules
-        run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+        run: git submodule update --init --recursive milvus-proto milvus-storage
 
       - uses: actions/setup-python@v5
         with:

@@ -15,15 +15,11 @@ Run one example on Linux with Spark 4.0 / Scala 2.13 and Java 21:
   01_read_snapshot.py        ReadSnapshot        Read snapshot schema and rows
   02_filter_project.py       FilterProject       Filter rows and select columns
   03_sql_analytics.py        SqlAnalytics        Query with Spark SQL
-  04_exact_search.py         ExactSearch         Find exact nearest neighbors
-  05_filtered_search.py      FilteredSearch      Filter before vector search
-  06_index_search.py         IndexSearch         Search persisted indexes
-  07_vector_functions.py     VectorFunctions     Compare vector scores
   08_partition_selection.py  PartitionSelection  Select snapshot partitions
 
 The Python .py suffix is optional. For example-specific arguments:
-  ./demo/run.sh python 04_exact_search.py --help
-  ./demo/run.sh java ExactSearch --help
+  ./demo/run.sh python 01_read_snapshot.py --help
+  ./demo/run.sh java ReadSnapshot --help
 
 Set SPARK_HOME and JAVA_HOME, then choose exactly one connector source:
   CONNECTOR_JAR=/absolute/path/to/spark-milvus-4.0-bundle-<version>.jar
@@ -37,8 +33,7 @@ JAR or starts Spark. Use MILVUS_URI and MILVUS_TOKEN for the API identity.
 
 Optional environment: MASTER=local[2], PYTHON=python3.
 Snapshot examples use the committed local snapshot by default. For a cluster,
-provide --options with shared storage settings. VectorFunctions and Python
-example 07 use in-memory vectors. The launcher uses Spark client deploy mode.
+provide --options with shared storage settings. The launcher uses Spark client deploy mode.
 Java sources compile into an owned temporary directory under demo/target;
 that directory is removed when the command exits. Dependencies are not downloaded.
 HELP
@@ -59,8 +54,7 @@ shift
 if [[ "$LANGUAGE" == python ]]; then
   EXAMPLE="${EXAMPLE%.py}.py"
   case "$EXAMPLE" in
-    00_snapshot_path.py|01_read_snapshot.py|02_filter_project.py|03_sql_analytics.py|04_exact_search.py|\
-    05_filtered_search.py|06_index_search.py|07_vector_functions.py|08_partition_selection.py) ;;
+    00_snapshot_path.py|01_read_snapshot.py|02_filter_project.py|03_sql_analytics.py|08_partition_selection.py) ;;
     *) echo "Unknown Python example: $EXAMPLE. Run ./demo/run.sh --help." >&2; exit 1 ;;
   esac
   test -f "$SCRIPT_DIR/python/$EXAMPLE" || {
@@ -69,7 +63,7 @@ if [[ "$LANGUAGE" == python ]]; then
   }
 else
   case "$EXAMPLE" in
-    SnapshotPath|ReadSnapshot|FilterProject|SqlAnalytics|ExactSearch|FilteredSearch|IndexSearch|VectorFunctions|PartitionSelection) ;;
+    SnapshotPath|ReadSnapshot|FilterProject|SqlAnalytics|PartitionSelection) ;;
     *) echo "Unknown Java example: $EXAMPLE. Run ./demo/run.sh --help." >&2; exit 1 ;;
   esac
 fi
@@ -93,20 +87,11 @@ HELP
       exit 0
     fi
     echo "  --explain          Print the Spark execution plan"
-    if [[ "$EXAMPLE" != VectorFunctions ]]; then
       echo "  --options FILE     Snapshot options JSON; default: committed sample"
       echo "  --max-rows N       Driver verification limit (default/max: 10000)"
-    fi
     case "$EXAMPLE" in
-      FilterProject|ExactSearch|FilteredSearch|IndexSearch)
+      FilterProject)
         echo "  --where SQL        Predicate applied before processing" ;;
-    esac
-    case "$EXAMPLE" in
-      ExactSearch|FilteredSearch|IndexSearch)
-        echo "  --queries FILE     Query vectors JSON; required with --options"
-        echo "  --id-column NAME   Primary-key column (default: id)"
-        echo "  --vector-column NAME  Vector column (default: vector)"
-        echo "  --k N              Neighbors per query (default: 3)" ;;
     esac
     exit 0
   fi
@@ -170,7 +155,7 @@ for argument in "$@"; do
     CUSTOM_INPUT=true
   fi
 done
-if [[ "$EXAMPLE" != 07_vector_functions.py && "$EXAMPLE" != VectorFunctions && "$CUSTOM_INPUT" == false &&
+if [[ "$CUSTOM_INPUT" == false &&
       ! "$MASTER" =~ ^local(\[([1-9][0-9]*|\*)(,[1-9][0-9]*)?\])?$ ]]; then
   echo "The default snapshot requires MASTER=local or local[...]; use --options with shared storage for a cluster" >&2
   exit 1
@@ -210,8 +195,8 @@ try:
             raise ValueError('CONNECTOR_JAR must name a regular JAR file')
         platform = 'linux-' + machine
         with ZipFile(path) as archive:
-            required = {'com/zilliz/spark/connector/extensions/MilvusSparkPlugin.class',
-                        f'native/milvus/1/{platform}/manifest.properties'}
+            required = {'com/zilliz/spark/connector/sources/MilvusDataSource.class',
+                        f'native/milvus/2/{platform}/manifest.properties'}
             if not required.issubset(archive.namelist()):
                 raise ValueError('CONNECTOR_JAR must be a spark/assembly JAR with native libraries for ' + platform)
         selected = [str(path)]
@@ -237,8 +222,6 @@ JSIG="$JAVA_HOME/lib/libjsig.so"
 test -f "$JSIG" || { echo "Missing Java signal-chaining library" >&2; exit 1; }
 SPARK_ARGUMENTS=(
   --master "$MASTER" --jars "$JARS" --deploy-mode client
-  --conf spark.sql.extensions=com.zilliz.spark.connector.extensions.MilvusReadSparkSessionExtensions
-  --conf spark.plugins=com.zilliz.spark.connector.extensions.MilvusSparkPlugin
   --conf 'spark.redaction.regex=(?i)secret|password|token|access[._]?key'
   --conf "spark.executorEnv.LD_PRELOAD=$JSIG"
   --conf spark.executorEnv.LD_BIND_NOW=1

@@ -29,7 +29,8 @@ import java.util.stream.Stream;
 /** Verifies and extracts one complete native bundle without loading JNI. */
 public final class NativeLibraries {
     private static final String BUNDLE_MARKER = "META-INF/milvus-native/provenance.json";
-    private static final String COMPATIBILITY = "META-INF/milvus-native/compatibility.properties";
+    private static final String REQUIREMENTS = "META-INF/milvus-native/requirements/";
+    private static final String REQUIREMENTS_LIST = "META-INF/milvus-native/requirements.list";
     private static final Loader LOADER = new Loader(
             NativeLibraries.class.getClassLoader(), Paths.get(System.getProperty("java.io.tmpdir")));
 
@@ -43,22 +44,46 @@ public final class NativeLibraries {
         return LOADER.get();
     }
 
+    /**
+     * Returns the shared bundle after validating the contracts visible to the
+     * binding's defining loader, even when another loader already extracted it.
+     * The component must have its own contract; a parent's unrelated contract
+     * cannot establish compatibility for this binding.
+     */
+    public static Optional<Bundle> bundled(Class<?> binding, String component) {
+        if (binding == null || binding.getClassLoader() == null) {
+            throw new IllegalArgumentException("A native binding needs a defining class loader");
+        }
+        if (component == null || !component.matches("[a-z][a-z0-9-]*")) {
+            throw new IllegalArgumentException("Invalid native component: " + component);
+        }
+        return LOADER.get(binding.getClassLoader(), component);
+    }
+
     /** An immutable result published only after every library has been verified. */
     public static final class Bundle {
         private final Path directory;
         private final Set<String> names;
-        private final boolean cardinal;
-        private final String storageRevision;
-        private final String knowhereRevision;
+        private final Map<String, String> revisions;
+        private final Set<String> features;
         private final Set<String> loadEntries;
 
         private Bundle(Path directory, Set<String> names, Set<String> loadEntries, Properties manifest) {
             this.directory = directory;
             this.names = Collections.unmodifiableSet(new HashSet<>(names));
             this.loadEntries = Collections.unmodifiableSet(new LinkedHashSet<>(loadEntries));
-            this.cardinal = Boolean.parseBoolean(manifest.getProperty("with_cardinal"));
-            this.storageRevision = manifest.getProperty("storage.revision");
-            this.knowhereRevision = manifest.getProperty("knowhere.revision");
+            Map<String, String> components = new LinkedHashMap<>();
+            for (String component : manifest.getProperty("components").split(",")) {
+                components.put(component, manifest.getProperty(component + ".revision"));
+            }
+            this.revisions = Collections.unmodifiableMap(components);
+            Set<String> enabled = new HashSet<>();
+            for (String key : manifest.stringPropertyNames()) {
+                if (key.startsWith("feature.") && Boolean.parseBoolean(manifest.getProperty(key))) {
+                    enabled.add(key.substring("feature.".length()));
+                }
+            }
+            this.features = Collections.unmodifiableSet(enabled);
         }
 
         public Path directory() {
@@ -94,17 +119,17 @@ public final class NativeLibraries {
             return directory.resolve(mappedLibraryName);
         }
 
-        public boolean cardinalEnabled() {
-            return cardinal;
+        public boolean featureEnabled(String feature) {
+            return features.contains(feature);
         }
 
-        public String storageRevision() {
-            return storageRevision;
+        public String revision(String component) {
+            if (!revisions.containsKey(component)) {
+                throw new IllegalArgumentException("Native bundle declares no component " + component);
+            }
+            return revisions.get(component);
         }
 
-        public String knowhereRevision() {
-            return knowhereRevision;
-        }
     }
 
     // The injectable resource loader also lets tests verify JAR and directory
@@ -112,7 +137,7 @@ public final class NativeLibraries {
     static final class Loader {
         private final ClassLoader resources;
         private final Path temporaryRoot;
-        private boolean initialized;
+        private URL origin;
         private Optional<Bundle> result;
         private UnsatisfiedLinkError failure;
 
@@ -122,20 +147,23 @@ public final class NativeLibraries {
         }
 
         synchronized Optional<Bundle> get() {
-            if (!initialized) {
-                try {
-                    result = discover();
-                } catch (IOException | RuntimeException error) {
-                    failure = new UnsatisfiedLinkError("Cannot prepare Milvus native bundle: " + error.getMessage());
-                    failure.initCause(error);
-                }
-                initialized = true;
-            }
-            if (failure != null) throw failure;
-            return result;
+            return get(resources, null);
         }
 
-        private Optional<Bundle> discover() throws IOException {
+        synchronized Optional<Bundle> get(ClassLoader bindingResources, String component) {
+            if (failure != null) throw failure;
+            try {
+                return discover(bindingResources, component);
+            } catch (IOException | RuntimeException error) {
+                UnsatisfiedLinkError wrapped = new UnsatisfiedLinkError(
+                        "Cannot prepare Milvus native bundle: " + error.getMessage());
+                wrapped.initCause(error);
+                if (result == null && bindingResources == resources) failure = wrapped;
+                throw wrapped;
+            }
+        }
+
+        private Optional<Bundle> discover(ClassLoader resources, String component) throws IOException {
             String platform = platform();
             boolean bundleMarkerPresent = resources.getResources(BUNDLE_MARKER).hasMoreElements();
             if (platform == null) {
@@ -143,9 +171,10 @@ public final class NativeLibraries {
                         + System.getProperty("os.name") + "/" + System.getProperty("os.arch"));
                 return Optional.empty();
             }
-            String name = "native/milvus/1/" + platform + "/manifest.properties";
+            String name = "native/milvus/2/" + platform + "/manifest.properties";
             Enumeration<URL> manifests = resources.getResources(name);
             if (!manifests.hasMoreElements()) {
+                require(result == null, "Native binding cannot see the already extracted bundle");
                 require(!bundleMarkerPresent, "Milvus native bundle is present but has no manifest for " + platform);
                 return Optional.empty();
             }
@@ -161,26 +190,76 @@ public final class NativeLibraries {
                         + " spark.executor.userClassPathFirst=true loads a second copy beside the driver's;"
                         + " leave it unset. Otherwise keep one jar that carries the native bundle on the classpath.");
             }
-            return Optional.of(extract(manifest, platform, temporaryRoot, compatibility()));
+            Map<String, Properties> expected = requirements(resources);
+            require(component == null || expected.containsKey(component),
+                    "Missing JVM native component contract for binding: " + component);
+            if (result != null) {
+                require(origin.equals(manifest), "Native binding selects a different bundle from the extracted bundle");
+                Bundle bundle = result.get();
+                validateBindings(bundle.revisions, bundle.loadEntries, platform, expected);
+                return result;
+            }
+            try {
+                result = Optional.of(extract(manifest, platform, temporaryRoot, expected));
+                origin = manifest;
+                return result;
+            } catch (IOException | RuntimeException error) {
+                // Extraction failures remain sticky; a rejected later binding
+                // never invalidates the already verified bundle for its owner.
+                failure = new UnsatisfiedLinkError("Cannot prepare Milvus native bundle: " + error.getMessage());
+                failure.initCause(error);
+                throw failure;
+            }
         }
 
-        private Properties compatibility() throws IOException {
-            Enumeration<URL> entries = resources.getResources(COMPATIBILITY);
-            require(entries.hasMoreElements(), "Missing JVM native compatibility resource: " + COMPATIBILITY);
-            URL resource = entries.nextElement();
-            require(!entries.hasMoreElements(), "Multiple JVM native compatibility resources: " + COMPATIBILITY);
-            Properties expected = new UniqueProperties();
-            try (InputStream input = resource.openStream()) {
-                expected.load(input);
+        private Map<String, Properties> requirements(ClassLoader resources) throws IOException {
+            Enumeration<URL> lists = resources.getResources(REQUIREMENTS_LIST);
+            Set<String> components = new LinkedHashSet<>();
+            while (lists.hasMoreElements()) {
+                try (java.io.BufferedReader lines = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(lists.nextElement().openStream(), java.nio.charset.StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = lines.readLine()) != null) {
+                        String component = line.trim();
+                        if (component.isEmpty()) continue;
+                        require(component.matches("[a-z][a-z0-9-]*"), "Invalid native component: " + component);
+                        components.add(component);
+                    }
+                }
             }
-            require("1".equals(expected.getProperty("format.version")),
-                    "Unsupported JVM native compatibility format.version");
-            for (String engine : new String[] {"storage", "knowhere"}) {
-                String key = engine + ".revision";
-                require(expected.getProperty(key, "").matches("[a-f0-9]{40}"),
-                        "Invalid JVM native compatibility " + key);
+            require(!components.isEmpty(), "Missing JVM native component requirements");
+            Map<String, Properties> expected = new LinkedHashMap<>();
+            for (String component : components) {
+                String name = REQUIREMENTS + component + ".properties";
+                Enumeration<URL> entries = resources.getResources(name);
+                require(entries.hasMoreElements(), "Missing JVM native component contract: " + name);
+                URL resource = entries.nextElement();
+                require(!entries.hasMoreElements(), "Multiple JVM native component contracts: " + name);
+                Properties contract = new UniqueProperties();
+                try (InputStream input = resource.openStream()) {
+                    contract.load(input);
+                }
+                require("2".equals(contract.getProperty("format.version")), "Unsupported JVM native component format.version");
+                require(contract.getProperty("revision", "").matches("[a-f0-9]{40}"), "Invalid JVM native component revision: " + component);
+                require(contract.getProperty("entry", "").matches("[A-Za-z0-9_-]+"), "Invalid JVM native component entry: " + component);
+                expected.put(component, contract);
             }
             return expected;
+        }
+
+    }
+
+    private static void validateBindings(Map<String, String> revisions, Set<String> entries,
+            String platform, Map<String, Properties> expected) throws IOException {
+        for (Map.Entry<String, Properties> binding : expected.entrySet()) {
+            String component = binding.getKey();
+            require(revisions.containsKey(component), "Native bundle is missing component " + component);
+            String revision = binding.getValue().getProperty("revision");
+            require(revision.equals(revisions.get(component)),
+                    "Native bundle " + component + ".revision does not match JVM bindings: expected "
+                            + revision + ", found " + revisions.get(component));
+            require(entries.contains(libraryName(platform, binding.getValue().getProperty("entry"))),
+                    "Native bundle must declare JVM load entry for " + component);
         }
     }
 
@@ -212,24 +291,34 @@ public final class NativeLibraries {
         return "libz.so.1";
     }
 
-    private static Bundle extract(URL resource, String platform, Path temporaryRoot, Properties expected)
+    private static Bundle extract(URL resource, String platform, Path temporaryRoot, Map<String, Properties> expected)
             throws IOException {
         validateResource(resource);
         Properties manifest = new UniqueProperties();
         try (InputStream input = resource.openStream()) {
             manifest.load(input);
         }
-        require("1".equals(manifest.getProperty("format.version")), "Unsupported native bundle format.version");
+        require("2".equals(manifest.getProperty("format.version")), "Unsupported native bundle format.version");
         require(platform.equals(manifest.getProperty("platform")), "Native bundle platform does not match " + platform);
-        require(required(manifest, "storage.revision").matches("[a-f0-9]{40}"), "Invalid storage.revision");
-        require(required(manifest, "knowhere.revision").matches("[a-f0-9]{40}"), "Invalid knowhere.revision");
-        for (String key : new String[] {"format.version", "storage.revision", "knowhere.revision"}) {
-            require(expected.getProperty(key).equals(manifest.getProperty(key)),
-                    "Native bundle " + key + " does not match JVM bindings: expected "
-                            + expected.getProperty(key) + ", found " + manifest.getProperty(key));
+        Set<String> components = names(required(manifest, "components"));
+        for (String component : components) {
+            require(component.matches("[a-z][a-z0-9-]*"), "Invalid native component: " + component);
+            require(required(manifest, component + ".revision").matches("[a-f0-9]{40}"), "Invalid component revision: " + component);
         }
-        String cardinal = required(manifest, "with_cardinal");
-        require(cardinal.equals("true") || cardinal.equals("false"), "Invalid with_cardinal");
+        for (Map.Entry<String, Properties> binding : expected.entrySet()) {
+            String component = binding.getKey();
+            require(components.contains(component), "Native bundle is missing component " + component);
+            String revision = binding.getValue().getProperty("revision");
+            require(revision.equals(manifest.getProperty(component + ".revision")),
+                    "Native bundle " + component + ".revision does not match JVM bindings: expected "
+                            + revision + ", found " + manifest.getProperty(component + ".revision"));
+        }
+        for (String key : manifest.stringPropertyNames()) {
+            if (key.startsWith("feature.")) {
+                String value = manifest.getProperty(key);
+                require(value.equals("true") || value.equals("false"), "Invalid native feature: " + key);
+            }
+        }
         Set<String> libraries = names(required(manifest, "libraries"));
         Set<String> loadEntries = names(required(manifest, "load.entries"));
         Map<String, String> checksums = new LinkedHashMap<>();
@@ -251,13 +340,11 @@ public final class NativeLibraries {
         Set<String> allNames = new LinkedHashSet<>(libraries);
         allNames.addAll(aliases.keySet());
         require(!allNames.contains(systemZlib(platform)), "System zlib must not be included in the native bundle");
-        String storageEntry = libraryName(platform, "milvus-storage-jni");
-        String knowhereEntry = libraryName(platform, "knowhere_jni");
-        require(allNames.contains(storageEntry) && allNames.contains(knowhereEntry),
-                "Native bundle must declare both JNI entry libraries");
-        require(loadEntries.size() == 2 && loadEntries.contains(storageEntry)
-                        && loadEntries.contains(knowhereEntry),
-                "Native bundle must declare the two JVM load entries");
+        require(allNames.containsAll(loadEntries), "Native bundle load entries must name declared libraries");
+        for (Map.Entry<String, Properties> binding : expected.entrySet()) {
+            String entry = libraryName(platform, binding.getValue().getProperty("entry"));
+            require(loadEntries.contains(entry), "Native bundle must declare JVM load entry for " + binding.getKey());
+        }
         for (String name : allNames) {
             int slash = name.indexOf('/');
             while (slash >= 0) {

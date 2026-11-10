@@ -76,13 +76,13 @@ help:
 	@echo "$(YELLOW)Available targets:$(NC)"
 	@echo "  $(GREEN)all$(NC)                    - Complete build process"
 	@echo "  $(GREEN)clean$(NC)                  - Clean all build artifacts"
-	@echo "  $(GREEN)native-build$(NC)           - Build unified native dependencies (storage and Knowhere)"
+	@echo "  $(GREEN)native-build$(NC)           - Build unified native dependencies (storage)"
 	@echo "  $(GREEN)native-bundle$(NC)          - Build and package, or select NATIVE_BUNDLE"
 	@echo "  $(GREEN)native-resources$(NC)       - Same as native-bundle; the target Docker calls"
 	@echo "  $(GREEN)package$(NC)                - Package JAR with the selected platform resources"
 	@echo "  $(GREEN)test$(NC)                   - Type-check tests (incl. integration) and run unit tests"
 	@echo "  $(GREEN)compile-it$(NC)             - Type-check integration tests (no external services)"
-	@echo "  $(GREEN)run-demo$(NC)               - Run examples with DEMO_ARGS='python 04_exact_search.py' or 'java ExactSearch'"
+	@echo "  $(GREEN)run-demo$(NC)               - Run examples with DEMO_ARGS='python 01_read_snapshot.py' or 'java ReadSnapshot'"
 	@echo "  $(GREEN)init-submodules$(NC)        - Initialize Git submodules"
 	@echo "  $(GREEN)status$(NC)                 - Show build status"
 	@echo ""
@@ -101,12 +101,12 @@ help:
 # Initialize Git submodules
 init-submodules:
 	@echo "$(BLUE)Initializing Git submodules...$(NC)"
-	@git submodule update --init --recursive milvus-proto milvus-storage knowhere
+	@git submodule update --init --recursive milvus-proto milvus-storage
 	@echo "$(GREEN)Submodules initialized$(NC)"
 
 # Preserve initialized worktrees so the builder records their actual revisions and changes.
 init-missing-submodules:
-	@set -e; for submodule in milvus-storage milvus-proto knowhere; do \
+	@set -e; for submodule in milvus-storage milvus-proto; do \
 		if [ ! -e "$$submodule/.git" ]; then git submodule update --init --recursive -- "$$submodule"; fi; \
 	done
 
@@ -164,8 +164,8 @@ compile-it: package
 	@echo "$(GREEN)Integration tests compile complete$(NC)"
 
 # Run one example with an explicit local assembly or verified candidate.
-# Example: CONNECTOR_JAR=/connector.jar make run-demo DEMO_ARGS='python 04_exact_search.py'
-# Java: CONNECTOR_JAR=/connector.jar make run-demo DEMO_ARGS='java ExactSearch'
+# Example: CONNECTOR_JAR=/connector.jar make run-demo DEMO_ARGS='python 01_read_snapshot.py'
+# Java: CONNECTOR_JAR=/connector.jar make run-demo DEMO_ARGS='java ReadSnapshot'
 run-demo:
 	@echo "$(BLUE)Running demo...$(NC)"
 	@bash demo/run.sh $(DEMO_ARGS)

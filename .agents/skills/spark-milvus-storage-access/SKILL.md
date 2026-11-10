@@ -33,9 +33,9 @@ that in Scala is the stovepipe AGENTS.md forbids.
   `HadoopStorageKeys` itself, pinned by its tests.
 - `core.io` owns the upstream `MilvusStorageFileSystem` and exposes `readAll`,
   `readAt`, `size`, `list` and `exists` through the read-only `ObjectStore`.
-  Writing is outside this repository; an external adapter borrows the same
+  The shared V3 writer borrows the same
   session through `NativeObjectStore.withFileSystem`, which supplies a
-  normalized key and a borrowed filesystem. Such an adapter must not open a
+  normalized key and a borrowed filesystem. The writer must not open a
   second backend or resolve credentials itself.
 
 A format package asks for bytes at a path and gets bytes. If the words

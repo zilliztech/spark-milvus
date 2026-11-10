@@ -5,7 +5,7 @@ from common import bounded_rows, demo_session
 
 
 def main():
-    with demo_session(__doc__) as (spark, args, options, _):
+    with demo_session(__doc__) as (spark, args, options):
         documents = spark.read.format("milvus").options(**options).load()
         # This registers a session-local view over the fixed input.
         documents.createOrReplaceTempView("documents")

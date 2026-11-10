@@ -73,7 +73,7 @@ class HadoopStorageKeysTest extends AnyFunSuite with Matchers {
     out should not contain key(StorageProperties.CloudProvider)
   }
 
-  // Backfill writes its real configuration under fs.s3a.bucket.<name>.*, so a
+  // A job's real configuration often sits under fs.s3a.bucket.<name>.*, so a
   // translator that reads only the global prefix drops the endpoint and the
   // credentials that actually apply.
   test("a per-bucket key beats the global one") {

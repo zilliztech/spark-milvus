@@ -11,7 +11,8 @@ package com.zilliz.spark.connector
   * describe empty snapshots only.
   *
   * Field identity, types, nullability and vector dimensions come from the
-  * snapshot schema. `_segment_id` and `_row_offset` are synthesized metadata;
-  * `_timestamp` is stored field 1. No online service or catalog is consulted.
+  * snapshot schema. `_segment_id`, `_row_offset` and the `_milvus_row_id` of a
+  * physical read are synthesized metadata; `_timestamp` is stored field 1. No
+  * online service or catalog is consulted.
   */
 package object table

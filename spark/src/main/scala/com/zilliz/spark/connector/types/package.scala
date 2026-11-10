@@ -11,7 +11,9 @@ package com.zilliz.spark.connector
   * process root alive and creates a bounded child for each read task; the final
   * partition reader owns that child. `ConstantColumn` supplies one value for
   * every row, `RowOffsetColumn` supplies consecutive row positions, and
-  * `SelectedRowsColumn` presents selected rows of another column without
-  * copying its buffers.
+  * `SelectedRowsColumn` presents selected rows of another column, children
+  * included, without copying its buffers. `RowIdentity` defines the
+  * `_milvus_row_id` struct that binds a row to its snapshot and stored
+  * position; `RowIdColumn` produces it for a batch.
   */
 package object types

@@ -35,18 +35,13 @@ class AssemblyImageTest(unittest.TestCase):
         self.output = self.root / "staged"
 
     def write_assembly(self, path, platform, alias=True, plugin=True):
-        prefix = f"native/milvus/1/{platform}/"
+        prefix = f"native/milvus/2/{platform}/"
         with ZipFile(path, "w") as archive:
             if plugin:
-                archive.writestr(image.PLUGIN, b"class")
-            manifest = f"format.version=1\nplatform={platform}\n"
-            if alias:
-                manifest += "alias.libknowhere_jni.so=libknowhere_jni-avx2.so\n"
-                archive.writestr(prefix + "libknowhere_jni-avx2.so", b"knowhere")
-            else:
-                archive.writestr(prefix + "libknowhere_jni.so", b"knowhere")
+                archive.writestr(image.PROVIDER, b"class")
+            manifest = f"format.version=2\ncomponents=storage\nplatform={platform}\n"
             archive.writestr(prefix + "manifest.properties", manifest)
-            archive.writestr(prefix + "libmilvus-storage-jni.so", b"storage")
+            archive.writestr(prefix + "libmilvus-storage-jni.so", b"storage" if alias else b"changed storage")
 
     def run_main(self, *argv):
         stderr = io.StringIO()
@@ -87,16 +82,15 @@ class AssemblyImageTest(unittest.TestCase):
         self.assertIn("Image platform must be one of", errors)
         self.assertFalse(self.output.exists())
 
-    def test_stage_requires_plugin_and_both_native_libraries(self):
+    def test_stage_requires_provider_and_storage_library(self):
         self.write_assembly(self.assembly, self.platform, plugin=False)
         code, errors = self.run_main(*self.stage_arguments())
         self.assertEqual(code, 1)
-        self.assertIn("MilvusSparkPlugin", errors)
+        self.assertIn("MilvusDataSource", errors)
         with ZipFile(self.assembly, "w") as archive:
-            archive.writestr(image.PLUGIN, b"class")
-            archive.writestr(f"native/milvus/1/{self.platform}/manifest.properties",
-                             f"format.version=1\nplatform={self.platform}\n")
-            archive.writestr(f"native/milvus/1/{self.platform}/libknowhere_jni.so", b"knowhere")
+            archive.writestr(image.PROVIDER, b"class")
+            archive.writestr(f"native/milvus/2/{self.platform}/manifest.properties",
+                             f"format.version=2\ncomponents=storage\nplatform={self.platform}\n")
         code, errors = self.run_main(*self.stage_arguments())
         self.assertEqual(code, 1)
         self.assertIn("lacks native library libmilvus-storage-jni.so", errors)

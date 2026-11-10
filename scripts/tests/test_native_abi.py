@@ -109,7 +109,7 @@ Load command 2
 Load command 3
           cmd LC_LOAD_DYLIB
       cmdsize 56
-         name @rpath/libknowhere.dylib (offset 24)
+         name @rpath/libengine.dylib (offset 24)
    time stamp 2 Thu Jan  1 00:00:02 1970
       current version 0.0.0
 compatibility version 0.0.0
@@ -138,7 +138,7 @@ Load command 6
         self.assertEqual("@rpath/libfixture.dylib", record["installName"])
         self.assertEqual("14.0", record["minos"])
         self.assertEqual("15.5", record["sdk"])
-        self.assertEqual(["@rpath/libknowhere.dylib", "/usr/lib/libc++.1.dylib", "/usr/lib/libSystem.B.dylib"],
+        self.assertEqual(["@rpath/libengine.dylib", "/usr/lib/libc++.1.dylib", "/usr/lib/libSystem.B.dylib"],
                          record["needPaths"])
         self.assertEqual(["@loader_path"], record["rpaths"])
         maximum, violations = ABI.macos_requirements(record)
@@ -169,7 +169,7 @@ Load command 6
         self.assertIn("exceeds macOS 14.0", violations[0])
 
     def test_dependency_outside_system_and_bundle_is_a_violation(self):
-        record = ABI.parse_otool(self.OUTPUT.replace("@rpath/libknowhere.dylib", "/opt/homebrew/lib/libomp.dylib"))
+        record = ABI.parse_otool(self.OUTPUT.replace("@rpath/libengine.dylib", "/opt/homebrew/lib/libomp.dylib"))
         _, violations = ABI.macos_requirements(record)
         self.assertEqual(1, len(violations))
         self.assertIn("/opt/homebrew/lib/libomp.dylib", violations[0])
@@ -180,7 +180,7 @@ Load command 6
                 self.OUTPUT.replace("    minos 14.0\n", ""),
                 self.OUTPUT + self.OUTPUT[self.OUTPUT.index("Load command 2"):self.OUTPUT.index("Load command 3")],
                 self.OUTPUT.replace("Load command 4", "Load command 7").replace(
-                    "/usr/lib/libc++.1.dylib", "@rpath/libknowhere.dylib"),
+                    "/usr/lib/libc++.1.dylib", "@rpath/libengine.dylib"),
                 self.OUTPUT[:self.OUTPUT.index("Load command 2")]):
             with self.subTest(text=text[-120:]), self.assertRaises(ValueError):
                 ABI.parse_otool(text)
@@ -205,7 +205,7 @@ Load command 6
                 record = ABI.inspect_macho(path, "darwin-aarch64", module=True)
             self.assertIsNone(record["installName"])
             self.assertIsNone(record["soname"])
-            self.assertEqual(["libknowhere.dylib"], record["needed"])
+            self.assertEqual(["libengine.dylib"], record["needed"])
             self.assertEqual([], record["violations"])
             path.write_bytes(self.macho_header(2))
             with self.assertRaises(ValueError), mock.patch.object(ABI.subprocess, "run") as run:
@@ -233,7 +233,7 @@ class NativeAbiTest(unittest.TestCase):
         cls.addClassCleanup(cls.temporary.cleanup)
         cls.root = Path(cls.temporary.name)
         cls.platform = "linux-x86_64" if os.uname().machine == "x86_64" else "linux-aarch64"
-        cls.prefix = f"native/milvus/1/{cls.platform}/"
+        cls.prefix = f"native/milvus/2/{cls.platform}/"
         cls.library = cls.compile("libfixture.so", """
 #include <stdio.h>
 #include <stdlib.h>
@@ -267,7 +267,7 @@ int fixture(const char *message) { return puts(message); }
 
     def bundle(self, libraries=None, extras=(), manifest_edit=None):
         libraries = libraries or {"libfixture.so": self.library}
-        manifest = f"format.version=1\nplatform={self.platform}\nlibraries={','.join(libraries)}\n"
+        manifest = f"format.version=2\nplatform={self.platform}\nlibraries={','.join(libraries)}\n"
         for name, contents in libraries.items():
             manifest += f"sha256.{name}={hashlib.sha256(contents).hexdigest()}\n"
         if manifest_edit:

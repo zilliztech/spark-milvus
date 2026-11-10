@@ -11,7 +11,7 @@ import org.apache.spark.sql.Row;
 /** Select snapshot partitions, segments and fields, and inspect physical row metadata. */
 public final class PartitionSelection {
     public static void main(String[] args) throws Exception {
-        try (DemoSupport demo = DemoSupport.open(args, "PartitionSelection", true, false, false)) {
+        try (DemoSupport demo = DemoSupport.open(args, "PartitionSelection", true, false)) {
             // These IDs are recorded in the snapshot. The fixture contains partition
             // 20, segments 30/31 and fields 100/101/102; custom options can replace them.
             Dataset<Row> selected = demo.spark.read().format("milvus")

@@ -30,9 +30,9 @@ object OptionParsing {
       key: String
   ): Option[String] = Option(options.get(key))
 
-  /** `name=value` pairs separated by commas, as `M=16,efConstruction=200`: an
-    * index's build or search tuning. Blank text is no pairs; a pair without a
-    * name or a value, or with a second `=`, is refused with `what` named.
+  /** `name=value` pairs separated by commas for structured option values. Blank
+    * text is no pairs; a pair without a name or a value, or with a second `=`,
+    * is refused with `what` named.
     */
   def namedValues(text: String, what: String): Map[String, String] =
     Option(text)

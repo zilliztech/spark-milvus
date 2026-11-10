@@ -126,10 +126,10 @@ class NativeCacheKeyTest(unittest.TestCase):
     def test_build_sources_configuration_and_acceptance_tests_remain_cache_inputs(self):
         before = self.fingerprint()
         for name in ("native/build/stage.py", "native/build/conanfile.py",
-                     "native/build/cmake/Storage.cmake", "native/build/cmake/knowhere/Sources.cmake",
+                     "native/build/cmake/Storage.cmake", "native/build/dependency_versions.py",
                      "native/build/profiles/darwin-aarch64", "native/build/cmake/storage-private-symbols.map",
                      "native/build/cmake/storage-private-symbols.txt", "native/build/NativeLoadCheck.java",
-                     "native/build/jvm_load.py", "native/build/tests/knowhere/diskann_c_api_acceptance.c",
+                     "native/build/jvm_load.py", "native/build/NativeLoadCheck.java",
                      "native/build/cmake/fix.patch", "native/build/new-input.unknown",
                      "native/build/cmake/test_helper.py"):
             with self.subTest(input=name):
@@ -167,24 +167,24 @@ class NativeCacheKeyTest(unittest.TestCase):
 
     def test_engine_pin_changes_invalidate_key(self):
         before = self.fingerprint()
-        engine = self.root / "knowhere"
+        engine = self.root / "milvus-storage"
         (engine / "engine.cc").write_text("int upgraded_engine;\n")
         self.commit(engine)
         self.commit(self.root)
-        self.plan["pins"]["knowhere"] = self.git(engine, "rev-parse", "HEAD")
+        self.plan["pins"]["milvus-storage"] = self.git(engine, "rev-parse", "HEAD")
         self.assertNotEqual(before["key"], self.fingerprint()["key"])
 
     def test_plan_index_and_worktree_pins_must_agree(self):
-        self.plan["pins"]["knowhere"] = "f" * 40
+        self.plan["pins"]["milvus-storage"] = "f" * 40
         with self.assertRaisesRegex(ValueError, "recorded gitlink"):
             self.fingerprint()
-        self.plan["pins"]["knowhere"] = self.git(self.root / "knowhere", "rev-parse", "HEAD")
-        self.git(self.root, "update-index", "--cacheinfo", "160000," + "f" * 40 + ",knowhere")
+        self.plan["pins"]["milvus-storage"] = self.git(self.root / "milvus-storage", "rev-parse", "HEAD")
+        self.git(self.root, "update-index", "--cacheinfo", "160000," + "f" * 40 + ",milvus-storage")
         with self.assertRaisesRegex(ValueError, "recorded gitlink"):
             self.fingerprint()
-        self.git(self.root, "reset", "-q", "HEAD", "--", "knowhere")
-        (self.root / "knowhere/engine.cc").write_text("int other_revision;")
-        self.commit(self.root / "knowhere")
+        self.git(self.root, "reset", "-q", "HEAD", "--", "milvus-storage")
+        (self.root / "milvus-storage/engine.cc").write_text("int other_revision;")
+        self.commit(self.root / "milvus-storage")
         with self.assertRaisesRegex(ValueError, "checkout differs"):
             self.fingerprint()
 
@@ -301,7 +301,7 @@ class NativeCacheKeyTest(unittest.TestCase):
                               "sdk": "15.5", "cmake": "cmake version 3.31.10", "conan": "Conan version 2.25.1",
                               "deploymentTarget": "14.0"}}
         result = cache.fingerprint(self.root, self.plan, "darwin-aarch64", identity)
-        self.assertTrue(result["key"].startswith("native-bundle-v2-darwin-aarch64-"))
+        self.assertTrue(result["key"].startswith("native-bundle-v3-darwin-aarch64-"))
         self.assertEqual(result["inputs"]["baseline"], {"libc": "libc++", "macos": "14.0"})
         self.assertNotEqual(result["key"], self.fingerprint()["key"])
         # Another Xcode or deployment target is another bundle.
@@ -341,9 +341,9 @@ class NativeCacheKeyTest(unittest.TestCase):
                 mock.patch.object(cache.sys, "argv", arguments), mock.patch("builtins.print"):
             cache.main()
         report = json.loads(output.read_text())
-        self.assertEqual(report["inputs"]["cacheFormat"], 2)
-        self.assertTrue(report["key"].startswith("native-bundle-v2-"))
-        self.assertTrue(report["dependencyKeyPrefix"].startswith("native-deps-v2-"))
+        self.assertEqual(report["inputs"]["cacheFormat"], 3)
+        self.assertTrue(report["key"].startswith("native-bundle-v3-"))
+        self.assertTrue(report["dependencyKeyPrefix"].startswith("native-deps-v3-"))
         outputs = dict(line.split("=", 1) for line in github.read_text().splitlines())
         self.assertEqual(outputs["key"], report["key"])
         self.assertEqual(outputs["key_digest"], report["keyDigest"])

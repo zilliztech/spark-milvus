@@ -12,7 +12,6 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.storage.credential.StorageProperties
-import com.zilliz.spark.connector.extensions.MilvusReadSparkSessionExtensions
 import com.zilliz.spark.connector.options.MilvusOption
 
 /** Reads the committed collections/nearest V3 fixture from object storage. The
@@ -72,10 +71,6 @@ class MilvusDataSourceTest extends AnyFunSuite with BeforeAndAfterAll {
       .builder()
       .appName("MilvusDataSourceTest")
       .master("local[2,2]")
-      .config(
-        "spark.sql.extensions",
-        classOf[MilvusReadSparkSessionExtensions].getName
-      )
       .getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
   }

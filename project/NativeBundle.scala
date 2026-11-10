@@ -14,19 +14,11 @@ import sbt.Keys._
 import sbtassembly.{CustomMergeStrategy, MergeStrategy}
 import sbtassembly.Assembly.JarEntry
 
-/** A platform JAR containing one dependency graph for both upstream JNI APIs.
+/** A platform JAR containing one dependency graph for the Storage JNI API.
   */
 object NativeBundle {
-  // The DiskANN acceptance fixture exists where DiskANN does, which the bundle
-  // declares in `with_diskann` rather than the platform name implying it.
-  private def knowhereCApiTests(withDiskann: Boolean) = Vector(
-    "knowhere_c_api",
-    "knowhere_c_api_concurrency"
-  ) ++ (if (withDiskann) Vector("knowhere_c_api_diskann_acceptance")
-        else Vector.empty)
   private def jvmLoadEntries = NativePlatform.jvmLoadEntries(platform)
   private def auditDlopenEntries = NativePlatform.auditDlopenEntries(platform)
-  private def cardinalPlugins = NativePlatform.cardinalPlugins(platform)
 
   val nativeBundleJar = settingKey[Option[File]](
     "Unified native platform JAR selected by -Dmilvus.native.bundle"
@@ -66,17 +58,6 @@ object NativeBundle {
 
   val settings: Seq[Setting[_]] = Seq(
     nativeBundleJar := selected,
-    Compile / resourceGenerators += Def.task {
-      val root = (ThisBuild / baseDirectory).value
-      val content =
-        s"format.version=1\nstorage.revision=${storageRevision(root)}\nknowhere.revision=${KnowhereBuild
-            .knowhereRevision(root)}\n"
-      val output =
-        (Compile / resourceManaged).value / "META-INF" / "milvus-native" / "compatibility.properties"
-      if (!output.isFile || IO.read(output) != content)
-        IO.write(output, content)
-      Seq(output)
-    }.taskValue,
     validatedNativeBundle := {
       val root = (ThisBuild / baseDirectory).value
       val output = target.value
@@ -98,6 +79,22 @@ object NativeBundle {
     )
   )
 
+  val storageBindingSettings: Seq[Setting[_]] = Seq(
+    Compile / resourceGenerators += Def.task {
+      val root =
+        (Compile / resourceManaged).value / "META-INF" / "milvus-native"
+      val revision = storageRevision((ThisBuild / baseDirectory).value)
+      val contract = root / "requirements" / "storage.properties"
+      val index = root / "requirements.list"
+      IO.write(
+        contract,
+        s"format.version=2\nrevision=$revision\nentry=milvus-storage-jni\n"
+      )
+      IO.write(index, "storage\n")
+      Seq(contract, index)
+    }.taskValue
+  )
+
   def platform: String = NativePlatform.current
 
   private def properties(input: InputStream): Properties = {
@@ -115,7 +112,7 @@ object NativeBundle {
   def metadata(jar: File): Properties = {
     val archive = new JarFile(jar)
     try {
-      val name = s"native/milvus/1/$platform/manifest.properties"
+      val name = s"native/milvus/2/$platform/manifest.properties"
       val entry = Option(archive.getJarEntry(name))
         .getOrElse(sys.error(s"Missing $name in $jar"))
       properties(archive.getInputStream(entry))
@@ -167,11 +164,10 @@ object NativeBundle {
       sidecar.getProperty("jar.sha256") == jarHash,
       s"Native bundle checksum mismatch: $jar"
     )
-    val knowhereRevision = KnowhereBuild.knowhereRevision(root)
     val storageRevision = NativeBundle.storageRevision(root)
     val archive = new JarFile(jar)
     try {
-      val prefix = s"native/milvus/1/$platform/"
+      val prefix = s"native/milvus/2/$platform/"
       val entries = archive.entries().asScala.filterNot(_.isDirectory).toVector
       require(
         entries.map(_.getName).distinct.size == entries.size,
@@ -189,7 +185,7 @@ object NativeBundle {
       )
       val manifest = metadata(jar)
       require(
-        manifest.getProperty("format.version") == "1",
+        manifest.getProperty("format.version") == "2",
         "Unsupported native bundle manifest version"
       )
       require(
@@ -197,20 +193,12 @@ object NativeBundle {
         s"Native bundle platform must be $platform"
       )
       require(
-        manifest.getProperty("knowhere.revision") == knowhereRevision,
-        s"Native bundle must be rebuilt for Knowhere $knowhereRevision"
+        manifest.getProperty("components") == "storage",
+        "Public native bundle must contain only the storage component"
       )
       require(
         manifest.getProperty("storage.revision") == storageRevision,
         s"Native bundle must be rebuilt for storage $storageRevision"
-      )
-      require(
-        Set("true", "false")(manifest.getProperty("with_cardinal", "")),
-        "Invalid Cardinal build feature"
-      )
-      require(
-        Set("true", "false")(manifest.getProperty("with_diskann", "")),
-        "Invalid DiskANN build feature"
       )
       def names(key: String): Vector[String] = {
         val value = manifest.getProperty(key, "")
@@ -248,7 +236,6 @@ object NativeBundle {
         archive,
         manifest,
         storageRevision,
-        knowhereRevision,
         platform,
         libraries,
         aliases
@@ -321,7 +308,6 @@ object NativeBundle {
       archive: JarFile,
       manifest: Properties,
       storageRevision: String,
-      knowhereRevision: String,
       expectedPlatform: String,
       libraries: Vector[String],
       aliases: Vector[String]
@@ -387,31 +373,20 @@ object NativeBundle {
       "Native provenance must record JVM load validation"
     )
     val jvmLoadTests = value("jvmLoadTests") match {
-      case records: List[_] if records.size == 2 =>
+      case records: List[_] if records.size == 1 =>
         records.map {
           case record: Map[_, _] => stringKeys(record, "jvmLoadTests")
           case _                 => sys.error("Invalid JVM load test record")
         }
-      case _ => sys.error("Native provenance must record both JVM load orders")
+      case _ => sys.error("Native provenance must record the JVM load entry")
     }
-    jvmLoadTests.zip(List(jvmLoadEntries, jvmLoadEntries.reverse)).foreach {
-      case (record, order) =>
-        require(
-          record.get("entries").contains(order.toList) &&
-            record.get("exit").contains(0.0),
-          "Native provenance JVM load order did not pass"
-        )
+    jvmLoadTests.zip(List(jvmLoadEntries)).foreach { case (record, order) =>
+      require(
+        record.get("entries").contains(order.toList) &&
+          record.get("exit").contains(0.0),
+        "Native provenance JVM load order did not pass"
+      )
     }
-    require(
-      value("knowhereCApiTestsExit") == 0.0,
-      "Native provenance Knowhere C API tests did not pass"
-    )
-    require(
-      strings("knowhereCApiTests") == knowhereCApiTests(
-        boolean("with_diskann")
-      ),
-      "Native provenance has an incomplete Knowhere C API test set"
-    )
     require(
       string("dependency.mode") == "shared",
       "Native provenance must record shared dependencies"
@@ -437,27 +412,10 @@ object NativeBundle {
       "Native provenance storage revision differs from the manifest or gitlink"
     )
     require(
-      string("knowhere.revision") == knowhereRevision &&
-        string("knowhere.revision") == manifest.getProperty(
-          "knowhere.revision"
-        ),
-      "Native provenance Knowhere revision differs from the manifest or gitlink"
-    )
-    require(
       string("platform") == expectedPlatform &&
         string("platform") == manifest.getProperty("platform"),
       "Native provenance platform differs from the manifest"
     )
-    val withCardinal = boolean("with_cardinal")
-    require(
-      withCardinal.toString == manifest.getProperty("with_cardinal"),
-      "Native provenance Cardinal flag differs from the manifest"
-    )
-    require(
-      boolean("with_diskann").toString == manifest.getProperty("with_diskann"),
-      "Native provenance DiskANN flag differs from the manifest"
-    )
-
     val provenanceLibraries = objectValue("libraries")
     require(
       provenanceLibraries.keySet == libraries.toSet,
@@ -488,12 +446,7 @@ object NativeBundle {
       ),
       "Native provenance aliases differ from the manifest"
     )
-    val actualCardinal = provenanceLibraries.keySet.intersect(cardinalPlugins)
-    val expectedCardinal = if (withCardinal) cardinalPlugins else Set.empty
-    require(
-      actualCardinal == expectedCardinal,
-      "Native provenance Cardinal libraries differ from with_cardinal"
-    )
+
   }
 
   private def withValidationLock(directory: File)(body: => Unit): Unit =

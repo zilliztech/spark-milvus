@@ -12,7 +12,8 @@ import io.milvus.storage.{MilvusStorageFileSystem, MilvusStorageProperties}
 final class NativeObjectStore private (
     filesystem: MilvusStorageFileSystem,
     properties: MilvusStorageProperties,
-    rootPath: String
+    rootPath: String,
+    private[io] val local: Boolean
 ) extends ObjectStore {
 
   private var closed = false
@@ -95,13 +96,14 @@ object NativeObjectStore {
       * `fs.root_path` therefore repeats; empty for every backend the C layer
       * roots at the bucket.
       */
+    private def isLocal: Boolean =
+      properties
+        .get(StorageProperties.StorageType)
+        .map(_.trim)
+        .contains(StorageProperties.StorageTypeLocal)
+
     private def localRootPath: String =
-      if (
-        properties
-          .get(StorageProperties.StorageType)
-          .map(_.trim)
-          .contains(StorageProperties.StorageTypeLocal)
-      )
+      if (isLocal)
         properties
           .get(StorageProperties.RootPath)
           .map(_.trim.stripSuffix("/"))
@@ -116,7 +118,12 @@ object NativeObjectStore {
       try {
         nativeProperties.create(properties)
         filesystem = new MilvusStorageFileSystem(nativeProperties, path)
-        new NativeObjectStore(filesystem, nativeProperties, localRootPath)
+        new NativeObjectStore(
+          filesystem,
+          nativeProperties,
+          localRootPath,
+          isLocal
+        )
       } catch {
         case failure: Throwable =>
           try if (filesystem != null) filesystem.close()

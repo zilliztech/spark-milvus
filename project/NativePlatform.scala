@@ -54,24 +54,14 @@ object NativePlatform {
     else if (isDarwin(platform)) "libz.1.dylib"
     else "libz.so.1"
 
-  /** The two JNI libraries a JVM loads directly. */
+  /** The Storage JNI entry loaded directly by a JVM. */
   def jvmLoadEntries(platform: String): Vector[String] = Vector(
-    libraryName(platform, "milvus-storage-jni"),
-    libraryName(platform, "knowhere_jni")
+    libraryName(platform, "milvus-storage-jni")
   )
 
-  /** Every library the audit opens directly, JNI entries first. */
+  /** Every library the storage audit opens directly, JNI first. */
   def auditDlopenEntries(platform: String): Vector[String] = Vector(
     libraryName(platform, "milvus-storage-jni"),
-    libraryName(platform, "milvus-storage"),
-    libraryName(platform, "knowhere_jni"),
-    libraryName(platform, "knowhere_c", Some("1")),
-    libraryName(platform, "knowhere")
-  )
-
-  /** The Cardinal plugins, present only in a Cardinal-enabled build. */
-  def cardinalPlugins(platform: String): Set[String] = Set(
-    libraryName(platform, "cardinalv1"),
-    libraryName(platform, "cardinalv2")
+    libraryName(platform, "milvus-storage")
   )
 }

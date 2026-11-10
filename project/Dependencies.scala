@@ -99,7 +99,9 @@ object Dependencies {
         "hadoop-client-runtime"
       ).map(m => "org.apache.hadoop" % m % l.hadoop)
 
-  /** Dependencies needed by snapshot reads, search and storage credentials. */
+  /** Dependencies needed by snapshot reads, vector-valued columns and storage
+    * credentials.
+    */
   def readerDeps(l: Versions.SparkLine): Seq[ModuleID] = Seq(
     ("org.apache.spark" %% "spark-mllib" % l.spark % "provided,test")
       .excludeAll(ExclusionRule(organization = "org.apache.arrow")),

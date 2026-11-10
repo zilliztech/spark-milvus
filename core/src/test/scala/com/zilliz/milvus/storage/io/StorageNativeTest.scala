@@ -84,6 +84,66 @@ class StorageNativeTest
     }
   }
 
+  test(
+    "business writes create missing local parents through the same native session"
+  ) {
+    assume(available, "libmilvus-storage-jni is not on this machine")
+    val store = new NativeWritableObjectStore(
+      NativeObjectStore
+        .Factory(
+          Map(
+            "fs.storage_type" -> "local",
+            "fs.root_path" -> root.toString
+          )
+        )
+        .open()
+    )
+    try {
+      val payload = "result".getBytes(StandardCharsets.UTF_8)
+      store.write("new/nested/result.json", payload)
+      store.readAll("new/nested/result.json") shouldBe payload
+      Files.readAllBytes(
+        root.resolve("new/nested/result.json")
+      ) shouldBe payload
+    } finally store.close()
+  }
+
+  test("an object-storage store creates no directories") {
+    assume(available, "libmilvus-storage-jni is not on this machine")
+    // A prefix-scoped S3 identity cannot run the bucket check that a native
+    // recursive create starts with, and object storage needs no directory.
+    val rootPath = root.resolve("object").toAbsolutePath.toString
+    Files.createDirectories(root.resolve("object"))
+    val store = new NativeWritableObjectStore(
+      NativeObjectStore
+        .Factory(Map("fs.storage_type" -> "local", "fs.root_path" -> rootPath))
+        .open(),
+      objectStorage = true
+    )
+    try {
+      store.createDir(s"$rootPath/staging/job-2", recursive = true)
+      Files.exists(root.resolve("object/staging")) shouldBe false
+    } finally store.close()
+    intercept[IllegalStateException](store.createDir("closed"))
+  }
+
+  test("an opened local store still creates the parents it writes into") {
+    assume(available, "libmilvus-storage-jni is not on this machine")
+    val rootPath = root.resolve("opened").toAbsolutePath.toString
+    val store = NativeWritableObjectStore.open(
+      Map("fs.storage_type" -> "local", "fs.root_path" -> rootPath)
+    )
+    try {
+      store.write(
+        s"$rootPath/staging/job-3/marker",
+        "job-3".getBytes(StandardCharsets.UTF_8)
+      )
+      Files.exists(
+        root.resolve("opened/staging/job-3/marker")
+      ) shouldBe true
+    } finally store.close()
+  }
+
   test("a ranged read does not fetch the whole file") {
     withFs { fs =>
       val key = "ranged.bin"

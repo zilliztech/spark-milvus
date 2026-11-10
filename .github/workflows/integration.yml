@@ -82,6 +82,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: consumer-${{ matrix.platform }}-${{ matrix.os_version }}-${{ matrix.line }}
-          path: consumer-results/
+          path: |
+            consumer-results/
           if-no-files-found: warn
           retention-days: 14

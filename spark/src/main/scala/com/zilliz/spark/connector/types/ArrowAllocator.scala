@@ -39,30 +39,11 @@ object ArrowAllocator {
 
   def get: RootAllocator = root
 
-  /** A vector search task's scope: it holds the query group, what it keeps of
-    * its segment set, and the buffers Knowhere writes into.
-    */
-  private[connector] def forSearchTask(
-      partition: Int,
-      maxBytes: Long
-  ): TaskArrowAllocator = {
+  /** A named task scope over the shared process root. The caller owns it. */
+  def forTask(name: String, maxBytes: Long): TaskArrowAllocator = {
+    require(name != null && name.nonEmpty, "An allocator scope needs a name")
     require(maxBytes > 0L, s"maxBytes must be positive, got $maxBytes")
-    new TaskArrowAllocator(
-      root.newChildAllocator(s"milvus-search-task-$partition", 0L, maxBytes)
-    )
-  }
-
-  /** One index build's scope: the segment's vectors gathered into one buffer
-    * and what Knowhere serializes from them.
-    */
-  private[connector] def forIndexBuild(
-      segmentId: Long,
-      maxBytes: Long
-  ): TaskArrowAllocator = {
-    require(maxBytes > 0L, s"maxBytes must be positive, got $maxBytes")
-    new TaskArrowAllocator(
-      root.newChildAllocator(s"milvus-index-build-$segmentId", 0L, maxBytes)
-    )
+    new TaskArrowAllocator(root.newChildAllocator(name, 0L, maxBytes))
   }
 
   def forReadTask(

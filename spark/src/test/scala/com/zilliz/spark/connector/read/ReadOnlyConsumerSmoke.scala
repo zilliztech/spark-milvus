@@ -5,24 +5,16 @@ import java.util.Comparator
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.apache.spark.sql.{DataFrame, SparkSession}
-import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanHelper
-import org.apache.spark.sql.functions.{call_function, col}
+import org.apache.spark.sql.functions.col
 
 import com.zilliz.milvus.storage.io.ReadFixtures
-import com.zilliz.spark.connector.extensions.{
-  MilvusNearestByJoinExec,
-  MilvusReadSparkSessionExtensions,
-  MilvusSparkPlugin
-}
-import com.zilliz.spark.connector.implicits._
-import com.zilliz.spark.connector.metrics.{NearestByMetrics, SearchMetrics}
 import com.zilliz.spark.connector.options.MilvusOption
 
 /** Consumes frozen public files through a published connector and real native
   * libraries. Preparation only verifies and copies resources: no collection,
   * index or snapshot is produced by the connector under test.
   */
-object ReadOnlyConsumerSmoke extends AdaptiveSparkPlanHelper {
+object ReadOnlyConsumerSmoke {
   private final case class Entity(
       id: Long,
       vector: Seq[Float],
@@ -39,12 +31,6 @@ object ReadOnlyConsumerSmoke extends AdaptiveSparkPlanHelper {
     Entity(3100L + row, Seq(row + 0.25f, 1f), Some((row % 2).toLong))
   }
   private val live = entities.filterNot(row => Set(3002L, 3105L)(row.id))
-  private val queries = Seq(
-    "q1" -> Seq(0.1f, 0f),
-    "q2" -> Seq(4.1f, 0.6f),
-    "q3" -> Seq(7.5f, 0.9f)
-  )
-  private val K = 3
   private val mapper = new ObjectMapper()
 
   private def passed(name: String): Unit =
@@ -58,17 +44,6 @@ object ReadOnlyConsumerSmoke extends AdaptiveSparkPlanHelper {
       options: Map[String, String]
   ): DataFrame =
     spark.read.format("milvus").options(options).load()
-
-  private def l2(left: Seq[Float], right: Seq[Float]): Double =
-    math.sqrt(
-      left
-        .zip(right)
-        .map { case (a, b) =>
-          val distance = a.toDouble - b.toDouble
-          distance * distance
-        }
-        .sum
-    )
 
   private def pathEntries(spark: SparkSession, directory: Path): Unit = {
     val json =
@@ -109,11 +84,10 @@ object ReadOnlyConsumerSmoke extends AdaptiveSparkPlanHelper {
     passed("v3-empty")
   }
 
-  private def indexedReads(spark: SparkSession, directory: Path): Unit = {
+  private def snapshotReads(spark: SparkSession, directory: Path): Unit = {
     ReadFixtures.copyTo("collections/nearest", directory)
     val options = storage(directory) ++ Map(
-      MilvusOption.SnapshotPath -> "snapshot.json",
-      MilvusOption.SearchParams -> "ef=32"
+      MilvusOption.SnapshotPath -> "snapshot.json"
     )
     val rows = read(spark, options).select("id", "vector", "category").collect()
     assert(rows.length == 14, s"V3 snapshot returned ${rows.length} rows")
@@ -142,103 +116,6 @@ object ReadOnlyConsumerSmoke extends AdaptiveSparkPlanHelper {
     assert(nulls == Seq(3001L), s"nullable filter: $nulls")
     passed("v3-snapshot")
 
-    import spark.implicits._
-    val query = queries.toDF("qid", "query_vector")
-    for (mode <- Seq("exact", "approx"); filtered <- Seq(false, true)) {
-      val input = read(spark, options)
-      val base = if (filtered) input.filter(col("category") === 1L) else input
-      val distance = call_function(
-        "vector_l2_distance",
-        query("query_vector"),
-        base("vector")
-      )
-      val joined = query.nearestByJoin(base, distance, K, mode, "distance")
-      // The join returns both inputs' columns, without an internal score. The
-      // oracle checks returned IDs; this projection checks their output vectors.
-      val result = joined.select(
-        col("qid"),
-        col("id"),
-        distance.cast("double").as("distance")
-      )
-      val hits = result.collect().toSeq.groupBy(_.getString(0))
-      assert(
-        hits.keySet == queries.map(_._1).toSet,
-        s"$mode missing query results"
-      )
-      queries.foreach { case (qid, vector) =>
-        val eligible =
-          live.filter(row => !filtered || row.category.contains(1L))
-        val expected = eligible
-          .map(row => row.id -> l2(vector, row.vector))
-          .sortBy { case (id, score) => (score, id) }
-          .take(K)
-        val got = hits(qid)
-          .map(row => row.getLong(1) -> row.getDouble(2))
-          .sortBy { case (id, score) => (score, id) }
-        assert(
-          got.map(_._1) == expected.map(_._1),
-          s"$mode filtered=$filtered $qid: got $got, expected $expected"
-        )
-        got.zip(expected).foreach { case ((_, score), (_, wanted)) =>
-          assert(
-            math.abs(score - wanted) <= 1e-5 * math.max(1d, wanted),
-            s"$mode $qid distance $score != $wanted"
-          )
-        }
-      }
-      val execution = collectFirst(result.queryExecution.executedPlan) {
-        case node: MilvusNearestByJoinExec => node
-      }.getOrElse(throw new AssertionError("Milvus search was not taken over"))
-      val metrics = execution.metrics
-      if (mode == "approx") {
-        assert(metrics(NearestByMetrics.IndexSegments).value == 2L)
-        assert(metrics(NearestByMetrics.ExactSegments).value == 0L)
-        assert(
-          metrics(SearchMetrics.IndexBytes).value > 0L,
-          "HNSW files were not loaded"
-        )
-      } else {
-        assert(metrics(NearestByMetrics.ExactSegments).value == 2L)
-      }
-      assert(metrics(SearchMetrics.KnowhereCalls).value > 0L)
-      println(
-        s"PASS $mode NEAREST BY filtered=$filtered: fixed HNSW input and independent L2 oracle"
-      )
-      passed(s"$mode-${if (filtered) "filtered" else "unfiltered"}")
-    }
-    query.createOrReplaceTempView("consumer_queries")
-    read(spark, options).createOrReplaceTempView("consumer_docs")
-    val sql =
-      if (org.apache.spark.SPARK_VERSION.startsWith("4.2."))
-        "SELECT q.qid, d.id FROM consumer_queries q JOIN consumer_docs d " +
-          "APPROX NEAREST 3 BY DISTANCE vector_l2_distance(q.query_vector, d.vector)"
-      else
-        "SELECT query.qid, base.id FROM nearest_by_join(TABLE(consumer_queries), " +
-          "TABLE(consumer_docs), 'vector_l2_distance(query.query_vector, base.vector)', 3, 'approx', 'distance')"
-    val result = spark.sql(sql)
-    val actual = result
-      .collect()
-      .map(row => row.getString(0) -> row.getLong(1))
-      .toSeq
-      .sorted
-    val expected = queries.flatMap { case (qid, vector) =>
-      live
-        .sortBy(row => (l2(vector, row.vector), row.id))
-        .take(K)
-        .map(row => qid -> row.id)
-    }.sorted
-    assert(
-      actual == expected,
-      s"SQL search returned $actual instead of $expected"
-    )
-    val execution = collectFirst(result.queryExecution.executedPlan) {
-      case node: MilvusNearestByJoinExec => node
-    }.getOrElse(throw new AssertionError("SQL search was not taken over"))
-    assert(execution.metrics(NearestByMetrics.IndexSegments).value == 2L)
-    assert(execution.metrics(NearestByMetrics.ExactSegments).value == 0L)
-    assert(execution.metrics(SearchMetrics.IndexBytes).value > 0L)
-    assert(execution.metrics(SearchMetrics.KnowhereCalls).value > 0L)
-    passed("sql-search")
   }
 
   def main(args: Array[String]): Unit = {
@@ -249,11 +126,6 @@ object ReadOnlyConsumerSmoke extends AdaptiveSparkPlanHelper {
         .builder()
         .master(sys.props.getOrElse("milvus.smoke.master", "local[2]"))
         .appName("read-only-consumer-smoke")
-        .config(
-          "spark.sql.extensions",
-          classOf[MilvusReadSparkSessionExtensions].getName
-        )
-        .config("spark.plugins", classOf[MilvusSparkPlugin].getName)
         .config("spark.ui.enabled", "false")
         .config("spark.sql.shuffle.partitions", "2")
         .config("spark.driver.host", "127.0.0.1")
@@ -270,7 +142,7 @@ object ReadOnlyConsumerSmoke extends AdaptiveSparkPlanHelper {
         assert(workers.nonEmpty && workers.forall(_ != driver))
         passed("independent-executor")
       }
-      indexedReads(spark, root.resolve("nearest"))
+      snapshotReads(spark, root.resolve("nearest"))
       pathEntries(spark, root.resolve("nearest"))
       println("ALL PASS")
     } finally {

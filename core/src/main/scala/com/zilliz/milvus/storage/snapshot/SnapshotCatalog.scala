@@ -231,7 +231,11 @@ object SnapshotCatalog extends Logging {
       endpoint = endpoint
     )
     snapshot.flatMap { value =>
-      try Right(attachSegmentMetadata(value, metadata, entries, endpoint))
+      try
+        Right(
+          attachSegmentMetadata(value, metadata, entries, endpoint)
+            .copy(id = Option(info.id).filter(_ > 0L))
+        )
       catch { case NonFatal(error) => Left(error) }
     }
   }

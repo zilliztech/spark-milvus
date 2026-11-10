@@ -1,14 +1,11 @@
 package com.zilliz.spark.connector.demo;
 
-import scala.Tuple2;
-import scala.collection.Iterator;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
@@ -23,19 +20,13 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
-import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
-import org.apache.spark.sql.execution.SparkPlan;
-import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec;
-import org.apache.spark.sql.execution.metric.SQLMetric;
-import org.apache.spark.sql.types.DataTypes;
-import org.apache.spark.sql.types.StructType;
 
 /** Shared input, Spark lifecycle and bounded checks; examples own their queries. */
 public final class DemoSupport implements AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Set<String> READ_OPTIONS = Set.of(
-        "milvus.snapshot.path", "milvus.filter", "milvus.search.params", "milvus.partitions",
+        "milvus.snapshot.path", "milvus.filter", "milvus.partitions",
         "milvus.segments", "fieldIDs", "milvus.extra.columns", "milvus.read.apply.deletes",
         "milvus.read.vector.raw", "milvus.read.columnar", "milvus.read.batch.max.rows",
         "milvus.read.batch.max.bytes", "milvus.read.arrow.max.bytes");
@@ -45,28 +36,22 @@ public final class DemoSupport implements AutoCloseable {
     public boolean fixture;
     public boolean explain;
     public String where;
-    public String idColumn = "id";
-    public String vectorColumn = "vector";
-    public int k = 3;
     public int maxRows = 10000;
-    private final Map<Long, List<Float>> queryVectors = new LinkedHashMap<>();
     private final Map<Long, JsonNode> expectedRows = new HashMap<>();
 
     private DemoSupport() {}
 
     public static DemoSupport open(String[] argv, String name, boolean snapshot,
-                                   boolean search, boolean filtering) throws Exception {
+                                   boolean filtering) throws Exception {
         DemoSupport demo = new DemoSupport();
         Set<String> allowed = new HashSet<>(Set.of("--explain"));
         if (snapshot) {
             allowed.addAll(Set.of("--options", "--max-rows"));
         }
-        if (search || filtering) {
+        if (filtering) {
             allowed.add("--where");
         }
-        if (search) {
-            allowed.addAll(Set.of("--queries", "--id-column", "--vector-column", "--k"));
-        }
+
         Map<String, String> args = new HashMap<>();
         for (int i = 0; i < argv.length; i++) {
             String[] parts = argv[i].split("=", 2);
@@ -98,24 +83,7 @@ public final class DemoSupport implements AutoCloseable {
                 demo.options = readOptions(Path.of(args.get("--options")));
             }
         }
-        if (search) {
-            demo.k = Integer.parseInt(args.getOrDefault("--k", "3"));
-            demo.idColumn = args.getOrDefault("--id-column", "id");
-            demo.vectorColumn = args.getOrDefault("--vector-column", "vector");
-            valid(demo.k > 0 && demo.k <= demo.maxRows, "Require 0 < k <= max-rows");
-            valid(demo.idColumn.matches("[A-Za-z_][A-Za-z_0-9]*")
-                && demo.vectorColumn.matches("[A-Za-z_][A-Za-z_0-9]*"), "Use simple column names");
-            valid(!demo.fixture || (demo.idColumn.equals("id") && demo.vectorColumn.equals("vector")),
-                "The fixture uses id and vector columns");
-            valid(!args.containsKey("--options") || args.containsKey("--queries"),
-                "--queries is required with --options");
-            if (args.containsKey("--queries")) {
-                demo.loadQueries(Path.of(args.get("--queries")));
-            } else {
-                demo.queryVectors.put(1L, List.of(0.0f, 0.0f));
-                demo.queryVectors.put(2L, List.of(7.0f, 1.0f));
-            }
-        }
+
         demo.spark = SparkSession.builder().appName(name).getOrCreate();
         demo.spark.sparkContext().setLogLevel("WARN");
         try {
@@ -181,46 +149,16 @@ public final class DemoSupport implements AutoCloseable {
             JsonNode value = entry.getValue();
             valid(value.isTextual() && !value.textValue().isEmpty()
                 && (READ_OPTIONS.contains(key) || key.startsWith("fs.") || key.startsWith("extfs.")),
-                "Use documented snapshot/read/search and fs.*/extfs.* string options");
+                "Use documented snapshot/read and fs.*/extfs.* string options");
             result.put(key, value.textValue());
         });
         valid(result.containsKey("milvus.snapshot.path"), "Options must contain a fixed milvus.snapshot.path");
         return result;
     }
 
-    private void loadQueries(Path path) throws IOException {
-        JsonNode input = JSON.readTree(path.toFile());
-        valid(input != null && input.isArray() && !input.isEmpty() && input.size() <= 100,
-            "Supply 1 to 100 query vectors");
-        int dimension = -1;
-        for (JsonNode query : input) {
-            valid(query.isObject() && query.size() == 2 && query.has("qid") && query.has("vector"),
-                "Each query needs qid and vector");
-            JsonNode id = query.get("qid");
-            valid(id.isIntegralNumber() && id.canConvertToLong() && !queryVectors.containsKey(id.longValue()),
-                "Query ids must be unique signed 64-bit integers");
-            JsonNode vector = query.get("vector");
-            valid(vector.isArray() && !vector.isEmpty(), "Queries need finite float32 vectors");
-            List<Float> values = new ArrayList<>();
-            for (JsonNode value : vector) {
-                valid(value.isNumber() && Double.isFinite(value.doubleValue())
-                    && Math.abs(value.doubleValue()) <= Float.MAX_VALUE, "Queries need finite float32 vectors");
-                // Verify the same float32 values that Spark receives, including JSON rounding.
-                values.add(value.floatValue());
-            }
-            valid(dimension == -1 || dimension == values.size(), "Query dimensions differ");
-            dimension = values.size();
-            queryVectors.put(id.longValue(), values);
-        }
-    }
 
-    public Dataset<Row> queries() {
-        List<Row> rows = new ArrayList<>();
-        queryVectors.forEach((id, vector) -> rows.add(RowFactory.create(id, vector)));
-        StructType schema = new StructType().add("qid", DataTypes.LongType, false)
-            .add("qvec", DataTypes.createArrayType(DataTypes.FloatType, false), false);
-        return spark.createDataFrame(rows, schema);
-    }
+
+
 
     public List<Row> boundedRows(Dataset<Row> frame) {
         List<Row> rows = frame.limit(maxRows + 1).collectAsList();
@@ -244,91 +182,11 @@ public final class DemoSupport implements AutoCloseable {
         require(ids.equals(expectedRows.keySet()), "Snapshot rows or deletes differ from fixture expectations");
     }
 
-    public void checkSearch(Dataset<Row> frame, Dataset<Row> base, boolean exact,
-                            boolean requireIndex) throws IOException {
-        Map<Object, List<Number>> vectors = new HashMap<>();
-        for (Row row : boundedRows(base.select(idColumn, vectorColumn))) {
-            valid(!vectors.containsKey(row.get(0)), "The example needs unique primary keys");
-            vectors.put(row.get(0), row.getList(1));
-        }
-        valid(!vectors.isEmpty(), "No rows to search; choose a nonempty snapshot or a less restrictive --where");
-        if (explain) {
-            frame.explain();
-        }
-        List<Row> rows = new ArrayList<>(frame.collectAsList());
-        rows.sort(Comparator.comparingLong((Row row) -> row.getLong(0))
-            .thenComparingDouble(row -> ((Number) row.get(2)).doubleValue())
-            .thenComparing(row -> row.get(1).toString()));
-        Map<Long, List<Object>> hits = new LinkedHashMap<>();
-        System.out.printf("%6s  %12s  %12s%n", "qid", "id", "distance");
-        for (Row row : rows) {
-            hits.computeIfAbsent(row.getLong(0), key -> new ArrayList<>()).add(row.get(1));
-            System.out.printf("%6d  %12s  %12.6f%n", row.getLong(0), row.get(1), row.get(2));
-        }
-        Map<String, Long> metrics = searchMetrics(frame.queryExecution().executedPlan());
-        require(metrics.getOrDefault("milvus.search.knowhere.calls", 0L) > 0, "No native search execution");
-        if (requireIndex) {
-            require(metrics.getOrDefault("indexSegments", 0L) > 0
-                && metrics.getOrDefault("milvus.search.index.bytes", 0L) > 0,
-                "APPROX did not load and search a persisted index");
-        }
-        require(hits.keySet().equals(queryVectors.keySet()), "Search returned missing or unexpected query IDs");
-        Map<Long, Object> report = new LinkedHashMap<>();
-        for (Map.Entry<Long, List<Float>> query : queryVectors.entrySet()) {
-            List<Double> ranked = vectors.values().stream().map(vector -> l2(vector, query.getValue()))
-                .sorted().limit(k).toList();
-            List<Object> found = hits.get(query.getKey());
-            require(found.size() == ranked.size() && new HashSet<>(found).size() == found.size()
-                && vectors.keySet().containsAll(found), "Search returned missing, duplicate or unknown hits");
-            List<Double> distances = found.stream().map(id -> l2(vectors.get(id), query.getValue()))
-                .sorted().toList();
-            for (int i = 0; exact && i < ranked.size(); i++) {
-                double a = ranked.get(i), b = distances.get(i);
-                require(Math.abs(a - b) <= Math.max(1e-6, 1e-5 * Math.max(Math.abs(a), Math.abs(b))),
-                    "EXACT differs from the independent oracle for query " + query.getKey());
-            }
-            // Equal-distance ties at k are valid regardless of the primary-key order.
-            double threshold = ranked.get(ranked.size() - 1) + 1e-6;
-            double recall = distances.stream().filter(distance -> distance <= threshold).count()
-                / (double) ranked.size();
-            report.put(query.getKey(), Map.of("ids", found, "recallAtK", recall));
-        }
-        System.out.println(JSON.writerWithDefaultPrettyPrinter().writeValueAsString(
-            Map.of("mode", exact ? "exact" : "approx", "queries", report, "metrics", metrics)));
-    }
 
-    private static double l2(List<? extends Number> left, List<? extends Number> right) {
-        valid(left.size() == right.size(), "Snapshot and query dimensions differ");
-        double sum = 0;
-        for (int i = 0; i < left.size(); i++) {
-            double delta = left.get(i).doubleValue() - right.get(i).doubleValue();
-            sum += delta * delta;
-        }
-        return sum;
-    }
 
-    private static Map<String, Long> searchMetrics(SparkPlan plan) {
-        if (plan instanceof AdaptiveSparkPlanExec adaptive) {
-            return searchMetrics(adaptive.executedPlan());
-        }
-        if (plan.nodeName().contains("MilvusNearestByJoin")) {
-            Map<String, Long> result = new LinkedHashMap<>();
-            Iterator<Tuple2<String, SQLMetric>> entries = plan.metrics().iterator();
-            while (entries.hasNext()) {
-                Tuple2<String, SQLMetric> entry = entries.next();
-                result.put(entry._1(), entry._2().value());
-            }
-            return result;
-        }
-        Iterator<SparkPlan> children = plan.children().iterator();
-        while (children.hasNext()) {
-            Map<String, Long> result = searchMetrics(children.next());
-            if (!result.isEmpty()) {
-                return result;
-            }
-        }
-        return Map.of();
-    }
+
+
+
 
     private static void valid(boolean condition, String message) {
         if (!condition) {

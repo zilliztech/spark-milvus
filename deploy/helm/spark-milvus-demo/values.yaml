@@ -7,16 +7,13 @@ image:
   pullSecrets: []
 
 language: python
-# read, filter, sql, exact, filtered, index, vectors, partition
-# The default needs no snapshot or object-storage identity.
-example: vectors
+# read, filter, sql, partition
+example: read
 
 input:
   # Existing namespace-local Secret. Its contents are never Helm values.
   existingSecret: ""
   optionsKey: read-options.json
-  # Search examples require this key. Set empty to use the baked 2D queries.
-  queriesKey: queries.json
 
 serviceAccounts:
   submitter:

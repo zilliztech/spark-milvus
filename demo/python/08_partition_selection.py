@@ -5,7 +5,7 @@ from common import bounded_rows, demo_session
 
 
 def main():
-    with demo_session(__doc__) as (spark, args, options, _):
+    with demo_session(__doc__) as (spark, args, options):
         # These are IDs recorded in the snapshot, not names resolved by a service.
         # The sample contains partition 20, segments 30/31 and fields 100/101/102.
         # A custom options JSON can replace these selections for another snapshot.

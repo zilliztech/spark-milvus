@@ -13,19 +13,26 @@ import java.util.Optional;
 public final class NativeStorageLibrary {
     private static final String NATIVE_PATH = "milvus.storage.native.path";
     private static boolean loaded;
+    private static Bundle selectedBundle;
 
     private NativeStorageLibrary() {}
 
     /**
-     * Loads storage JNI once through its upstream loader.
+     * Loads storage JNI once through its upstream loader, revalidating binding
+     * contracts on every call without permitting a later bundle selection change.
      *
      * <p>When a unified bundle is present, this method temporarily hands its
      * verified storage JNI path to the upstream loader. A conflicting explicit
      * path, corrupt bundle, or native linking error remains visible to the caller.
      */
     public static synchronized void load() {
-        if (loaded) return;
-        Optional<Bundle> bundle = NativeLibraries.bundled();
+        Optional<Bundle> bundle = NativeLibraries.bundled(NativeStorageLibrary.class, "storage");
+        if (loaded) {
+            if (bundle.orElse(null) != selectedBundle) {
+                throw new UnsatisfiedLinkError("Native bundle selection changed after Storage initialization");
+            }
+            return;
+        }
         if (bundle.isPresent()) {
             if (NativeLibraryLoader.isLoaded()) {
                 throw new UnsatisfiedLinkError(
@@ -35,6 +42,7 @@ public final class NativeStorageLibrary {
         } else {
             NativeLibraryLoader.loadLibrary();
         }
+        selectedBundle = bundle.orElse(null);
         loaded = true;
     }
 

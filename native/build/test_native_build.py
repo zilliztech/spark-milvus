@@ -21,6 +21,8 @@ def module(name):
 build = module("build")
 platforms = module("platforms")
 stage = module("stage")
+TEST_LOAD = (*stage.JVM_LOAD_ENTRIES, "libcompute_jni.so")
+TEST_AUDIT = (*stage.AUDIT_DLOPEN_ENTRIES, "libcompute_jni.so", "libcompute_c.so.1", "libcompute.so")
 
 
 class SourceIdentityTest(unittest.TestCase):
@@ -42,10 +44,10 @@ class SourceIdentityTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             trace = root / "trace.jsonl"
-            trace.write_text(json.dumps({"file": str(root / "knowhere/thirdparty/faiss/CMakeLists.txt"),
+            trace.write_text(json.dumps({"file": str(root / "compute/thirdparty/faiss/CMakeLists.txt"),
                                          "cmd": "add_library"}) + "\n")
             with self.assertRaisesRegex(RuntimeError, "executed upstream CMake"):
-                build.check_cmake_trace(trace, [root / "knowhere"])
+                build.check_cmake_trace(trace, [root / "compute"])
 
     def test_cmake_trace_allows_external_dependency_toolkit(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -54,7 +56,7 @@ class SourceIdentityTest(unittest.TestCase):
             trace.write_text(json.dumps({"version": {"major": 1, "minor": 2}}) + "\n" +
                              json.dumps({"file": str(root / "cmake/Corrosion.cmake"),
                                          "cmd": "add_custom_command"}) + "\n")
-            self.assertEqual(1, build.check_cmake_trace(trace, [root / "knowhere", root / "storage"]))
+            self.assertEqual(1, build.check_cmake_trace(trace, [root / "compute", root / "storage"]))
 
     def test_empty_cmake_trace_does_not_prove_independence(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -94,29 +96,29 @@ class LibraryGlobTest(unittest.TestCase):
     def test_elf_stem_matches_every_library_of_the_family(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            names = ["libknowhere.so", "libknowhere_c.so.1", "libknowhere_c.so.1.0.0",
-                     "libknowhere_jni.so", "libmilvus-storage.so", "libmilvus-storage-jni.so",
-                     "libcardinalv1.so", "libz.so.1", "notes.txt"]
+            names = ["libcompute.so", "libcompute_c.so.1", "libcompute_c.so.1.0.0",
+                     "libcompute_jni.so", "libmilvus-storage.so", "libmilvus-storage-jni.so",
+                     "libpluginv1.so", "libz.so.1", "notes.txt"]
             for name in names:
                 (root / name).write_bytes(b"")
             elf = platforms.Elf()
-            self.assertEqual(sorted(names[:4]), sorted(p.name for p in root.glob(elf.library_glob("libknowhere"))))
+            self.assertEqual(sorted(names[:4]), sorted(p.name for p in root.glob(elf.library_glob("libcompute"))))
             self.assertEqual(sorted(names[4:6]), sorted(p.name for p in root.glob(elf.library_glob("libmilvus-storage"))))
-            self.assertEqual(["libcardinalv1.so"], [p.name for p in root.glob(elf.library_glob("libcardinal"))])
+            self.assertEqual(["libpluginv1.so"], [p.name for p in root.glob(elf.library_glob("libplugin"))])
             self.assertEqual(sorted(names[:8]), sorted(p.name for p in root.glob(elf.library_glob())))
 
 
     def test_macho_stem_matches_every_library_of_the_family(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            names = ["libknowhere.dylib", "libknowhere_c.1.dylib", "libknowhere_jni.dylib",
+            names = ["libcompute.dylib", "libcompute_c.1.dylib", "libcompute_jni.dylib",
                      "libmilvus-storage.dylib", "libmilvus-storage-jni.dylib", "libomp.dylib", "notes.txt"]
             for name in names:
                 (root / name).write_bytes(b"")
             macho = platforms.MachO()
             # pathlib before 3.13 rejects "**.dylib"; the default stem must not produce it.
             self.assertEqual("*.dylib", macho.library_glob())
-            self.assertEqual(sorted(names[:3]), sorted(p.name for p in root.glob(macho.library_glob("libknowhere"))))
+            self.assertEqual(sorted(names[:3]), sorted(p.name for p in root.glob(macho.library_glob("libcompute"))))
             self.assertEqual(sorted(names[3:5]),
                              sorted(p.name for p in root.glob(macho.library_glob("libmilvus-storage"))))
             self.assertEqual(sorted(names[:6]), sorted(p.name for p in root.glob(macho.library_glob())))
@@ -257,14 +259,14 @@ class NativeAuditTest(unittest.TestCase):
             "extern int host_callback(void); int plugin(void) { return host_callback(); }",
             ("libhost.so",),
         )
-        self.library("libknowhere.so", "int knowhere_engine(void) { return 3; }")
+        self.library("libcompute.so", "int compute_engine(void) { return 3; }")
         self.library(
-            "libknowhere_c.so.1",
-            "extern int knowhere_engine(void); int knowhere_c(void) { return knowhere_engine(); }",
-            ("libknowhere.so",),
+            "libcompute_c.so.1",
+            "extern int compute_engine(void); int compute_c(void) { return compute_engine(); }",
+            ("libcompute.so",),
         )
         self.library(
-            "libknowhere_jni.so",
+            "libcompute_jni.so",
             "extern int plugin(void); extern int host_callback(void); "
             "int vector_entry(void) { return plugin() + host_callback(); }",
             ("libplugin.so", "libhost.so"),
@@ -287,12 +289,12 @@ class NativeAuditTest(unittest.TestCase):
         output = self.root / "audit"
 
         stage.audit(self.libraries, sorted(path.name for path in self.libraries.iterdir()),
-                    stage.JVM_LOAD_ENTRIES, stage.AUDIT_DLOPEN_ENTRIES, output)
+                    TEST_LOAD, TEST_AUDIT, output)
 
         results = json.loads((output / "results.json").read_text())
         self.assertEqual(set(path.name for path in self.libraries.iterdir()), set(results))
-        for name in stage.AUDIT_DLOPEN_ENTRIES:
-            expected_context = "jvm-load-entry" if name in stage.JVM_LOAD_ENTRIES else "native-load-entry"
+        for name in TEST_AUDIT:
+            expected_context = "jvm-load-entry" if name in TEST_LOAD else "native-load-entry"
             self.assertEqual(expected_context, results[name]["context"])
             self.assertTrue(results[name]["relocationsPassed"])
             self.assertEqual(0, results[name]["dlopenExit"])
@@ -302,23 +304,23 @@ class NativeAuditTest(unittest.TestCase):
         self.assertTrue(all(record["exit"] == 0 for record in orders))
         jvm_loads = json.loads((output / "jvm-load-tests.json").read_text())
         self.assertEqual([
-            {"entries": ["libmilvus-storage-jni.so", "libknowhere_jni.so"], "exit": 0},
-            {"entries": ["libknowhere_jni.so", "libmilvus-storage-jni.so"], "exit": 0},
+            {"entries": ["libmilvus-storage-jni.so", "libcompute_jni.so"], "exit": 0},
+            {"entries": ["libcompute_jni.so", "libmilvus-storage-jni.so"], "exit": 0},
         ], jvm_loads)
         self.assertEqual([], json.loads((output / "diagnostic-failures.json").read_text()))
         self.assertIn("LOADED libmilvus-storage-jni.so",
-                      (output / "jvm-load-milvus-storage-jni--then--knowhere_jni.log").read_text())
+                      (output / "jvm-load-milvus-storage-jni--then--compute_jni.log").read_text())
 
     def test_missing_load_entry_is_rejected(self):
         self.library("libmilvus-storage-jni.so", "int storage_entry(void) { return 7; }")
-        with self.assertRaisesRegex(ValueError, "missing load entries: libknowhere"):
+        with self.assertRaisesRegex(ValueError, "missing load entries: libcompute"):
             stage.audit(self.libraries, ["libmilvus-storage-jni.so"],
-                        stage.JVM_LOAD_ENTRIES, stage.AUDIT_DLOPEN_ENTRIES, self.root / "audit")
+                        TEST_LOAD, TEST_AUDIT, self.root / "audit")
 
     def test_jvm_load_failure_is_recorded_and_blocks_the_audit(self):
         self.complete_roots()
         self.library(
-            "libknowhere_jni.so",
+            "libcompute_jni.so",
             "int JNI_OnLoad(void *vm, void *reserved) { return 0; }\n"
             "int vector_entry(void) { return 1; }",
         )
@@ -326,9 +328,9 @@ class NativeAuditTest(unittest.TestCase):
 
         with self.assertRaisesRegex(stage.JvmLoadAuditError, "JVM native load audit failed"):
             stage.audit(self.libraries, sorted(path.name for path in self.libraries.iterdir()),
-                        stage.JVM_LOAD_ENTRIES, stage.AUDIT_DLOPEN_ENTRIES, output)
+                        TEST_LOAD, TEST_AUDIT, output)
 
-        result = json.loads((output / "results.json").read_text())["libknowhere_jni.so"]
+        result = json.loads((output / "results.json").read_text())["libcompute_jni.so"]
         self.assertTrue(result["relocationsPassed"])
         self.assertEqual(0, result["dlopenExit"])
         self.assertTrue(result["passed"])
@@ -338,7 +340,7 @@ class NativeAuditTest(unittest.TestCase):
     def test_jvm_exit_zero_without_completion_markers_is_rejected(self):
         self.complete_roots()
         self.library(
-            "libknowhere_jni.so",
+            "libcompute_jni.so",
             "#include <stdlib.h>\n"
             "__attribute__((constructor)) static void stop_load(void) { exit(0); }\n"
             "int vector_entry(void) { return 1; }",
@@ -347,43 +349,44 @@ class NativeAuditTest(unittest.TestCase):
 
         with self.assertRaises(stage.JvmLoadAuditError):
             stage.audit(self.libraries, sorted(path.name for path in self.libraries.iterdir()),
-                        stage.JVM_LOAD_ENTRIES, stage.AUDIT_DLOPEN_ENTRIES, output)
+                        TEST_LOAD, TEST_AUDIT, output)
 
         loads = json.loads((output / "jvm-load-tests.json").read_text())
         self.assertEqual([125, 125], [record["exit"] for record in loads])
         self.assertIn("without the required load markers", (
-            output / "jvm-load-knowhere_jni--then--milvus-storage-jni.log").read_text())
+            output / "jvm-load-compute_jni--then--milvus-storage-jni.log").read_text())
 
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
-            direct_loads = stage.check_jvm_loads(self.libraries)
+            direct_loads = stage.check_jvm_loads(self.libraries, load_entries=TEST_LOAD)
         self.assertEqual([125, 125], [record["exit"] for record in direct_loads])
         self.assertIn("without the required load markers", stderr.getvalue())
 
-    def test_diagnostic_tool_error_does_not_replace_jvm_acceptance(self):
+    def test_diagnostic_tool_error_blocks_acceptance_and_preserves_jvm_evidence(self):
         self.complete_roots()
         output = self.root / "audit"
 
         with mock.patch.object(stage, "command", side_effect=RuntimeError("diagnostic failed")):
-            loads = stage.audit(
-                self.libraries, sorted(path.name for path in self.libraries.iterdir()),
-                stage.JVM_LOAD_ENTRIES, stage.AUDIT_DLOPEN_ENTRIES, output,
-            )
+            with self.assertRaisesRegex(ValueError, "Native relocation audit failed"):
+                stage.audit(self.libraries, sorted(path.name for path in self.libraries.iterdir()),
+                            TEST_LOAD, TEST_AUDIT, output)
 
+        loads = json.loads((output / "jvm-load-tests.json").read_text())
         self.assertTrue(all(record["exit"] == 0 for record in loads))
         self.assertEqual("RuntimeError: diagnostic failed\n",
                          (output / "diagnostic-error.txt").read_text())
 
-    def test_unresolved_unloaded_dependency_is_diagnostic_when_both_jvm_orders_pass(self):
+    def test_unresolved_dependency_blocks_acceptance_when_both_jvm_orders_pass(self):
         self.complete_roots()
         self.library(
             "libbroken.so",
             "extern int missing(void); int broken(void) { return missing(); }",
         )
 
-        loads = stage.audit(self.libraries, sorted(path.name for path in self.libraries.iterdir()),
-                            stage.JVM_LOAD_ENTRIES, stage.AUDIT_DLOPEN_ENTRIES, self.root / "audit")
-
+        with self.assertRaisesRegex(ValueError, "Native relocation audit failed: libbroken.so"):
+            stage.audit(self.libraries, sorted(path.name for path in self.libraries.iterdir()),
+                        TEST_LOAD, TEST_AUDIT, self.root / "audit")
+        loads = json.loads((self.root / "audit/jvm-load-tests.json").read_text())
         result = json.loads((self.root / "audit/results.json").read_text())["libbroken.so"]
         self.assertFalse(result["relocationsPassed"])
         self.assertFalse(result["passed"])

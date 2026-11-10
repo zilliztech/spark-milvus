@@ -15,51 +15,57 @@ class SourceLicensesTest(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.sources = {name: self.root / name for name in ("storage", "knowhere")}
+        self.sources = {name: self.root / name for name in ("storage", "component")}
         self.documents = {
             "storage/LICENSE": b"storage license\n",
-            "knowhere/LICENSE": b"knowhere license\n",
-            "knowhere/thirdparty/faiss/LICENSE": b"faiss license\n",
-            "knowhere/thirdparty/faiss/THIRD_PARTY_NOTICES": b"faiss embedded notices\n",
-            "knowhere/thirdparty/hnswlib/LICENSE": b"hnsw license\n",
-            "knowhere/thirdparty/DiskANN/LICENSE": b"diskann license\n",
-            "knowhere/thirdparty/DiskANN/NOTICE.txt": b"diskann notice\n",
+            "component/LICENSE": b"component license\n",
+            "component/thirdparty/embedded/LICENSE": b"embedded license\n",
+            "component/thirdparty/embedded/THIRD_PARTY_NOTICES": b"embedded embedded notices\n",
+            "component/thirdparty/headerlib/LICENSE": b"hnsw license\n",
+            "component/thirdparty/extra/LICENSE": b"extra license\n",
+            "component/thirdparty/extra/NOTICE.txt": b"extra notice\n",
         }
         for name, content in self.documents.items():
             self.write(name, content)
+
+    def metadata(self):
+        return {"sourceDirectories": self.sources,
+                "sourceLicenseDocuments": {name: [path.split("/", 1)[1] for path in self.documents
+                                                  if path.startswith(name + "/")] for name in self.sources}}
 
     def write(self, name, content):
         path = self.root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
 
-    def test_oss_embedded_notices_are_preserved_without_cardinal(self):
+    def test_oss_embedded_notices_are_preserved_without_plugin(self):
         output = self.root / "licenses"
-        stage.copy_source_licenses({"sourceDirectories": self.sources, "with_cardinal": False}, output)
+        stage.copy_source_licenses(self.metadata(), output)
         copied = {str(path.relative_to(output)): path.read_bytes()
                   for path in output.rglob("*") if path.is_file()}
         self.assertEqual(self.documents, copied)
 
-    def test_cardinal_embedded_notices_are_preserved_for_both_generations(self):
+    def test_plugin_embedded_notices_are_preserved_for_both_generations(self):
         for generation in ("v1", "v2"):
-            path = "knowhere/thirdparty/cardinal" + generation + "/third_party/smalltopk/LICENSE"
+            path = "component/thirdparty/plugin" + generation + "/third_party/smalltopk/LICENSE"
             self.documents[path] = ("smalltopk " + generation + "\n").encode()
             self.write(path, self.documents[path])
         output = self.root / "licenses"
-        stage.copy_source_licenses({"sourceDirectories": self.sources, "with_cardinal": True}, output)
+        stage.copy_source_licenses(self.metadata(), output)
         copied = {str(path.relative_to(output)): path.read_bytes()
                   for path in output.rglob("*") if path.is_file()}
         self.assertEqual(self.documents, copied)
 
     def test_missing_notice_fails_delivery(self):
-        missing = self.sources["knowhere"] / "thirdparty/DiskANN/NOTICE.txt"
+        missing = self.sources["component"] / "thirdparty/extra/NOTICE.txt"
         missing.unlink()
         with self.assertRaisesRegex(ValueError, "Required source license document is missing"):
-            stage.copy_source_licenses({"sourceDirectories": self.sources}, self.root / "licenses")
+            stage.copy_source_licenses(self.metadata(), self.root / "licenses")
 
-    def test_cardinal_cannot_silently_omit_embedded_license(self):
-        with self.assertRaisesRegex(ValueError, "cardinalv1/third_party/smalltopk/LICENSE"):
-            stage.copy_source_licenses({"sourceDirectories": self.sources, "with_cardinal": True},
+    def test_plugin_cannot_silently_omit_embedded_license(self):
+        self.documents["component/thirdparty/pluginv1/third_party/smalltopk/LICENSE"] = b"missing"
+        with self.assertRaisesRegex(ValueError, "pluginv1/third_party/smalltopk/LICENSE"):
+            stage.copy_source_licenses(self.metadata(),
                                        self.root / "licenses")
 
 

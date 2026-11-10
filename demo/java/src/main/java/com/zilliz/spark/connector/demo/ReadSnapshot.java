@@ -8,7 +8,7 @@ import org.apache.spark.sql.Row;
 /** Read a fixed V3 snapshot and inspect its schema, vectors and live rows. */
 public final class ReadSnapshot {
     public static void main(String[] args) throws Exception {
-        try (DemoSupport demo = DemoSupport.open(args, "ReadSnapshot", true, false, false)) {
+        try (DemoSupport demo = DemoSupport.open(args, "ReadSnapshot", true, false)) {
             // The snapshot supplies the schema and segment locations. The connector
             // reads storage and applies deletes without contacting a Milvus service.
             Dataset<Row> documents = demo.spark.read().format("milvus").options(demo.options).load();

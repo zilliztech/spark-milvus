@@ -37,8 +37,6 @@ DELIVERY_EVIDENCE = (
     "direct-references.json",
     "host-profile",
     "java.txt",
-    "knowhere-source-files.json",
-    "knowhere-source-identity.json",
     "rustc.txt",
     "storage-source-files.json",
     "storage-source-identity.json",
@@ -69,16 +67,8 @@ def digest(path):
 
 
 FORMAT = platforms.host()
-# Cardinal registers with and calls its parent engine; it is not a standalone entry.
-PARENT_PROVIDERS = {FORMAT.library_name("cardinalv1"): FORMAT.library_name("knowhere"),
-                    FORMAT.library_name("cardinalv2"): FORMAT.library_name("knowhere")}
-AUDIT_DLOPEN_ENTRIES = (
-    FORMAT.library_name("milvus-storage-jni"),
-    FORMAT.library_name("milvus-storage"),
-    FORMAT.library_name("knowhere_jni"),
-    FORMAT.library_name("knowhere_c", "1"),
-    FORMAT.library_name("knowhere"),
-)
+PARENT_PROVIDERS = {}
+AUDIT_DLOPEN_ENTRIES = (FORMAT.library_name("milvus-storage-jni"), FORMAT.library_name("milvus-storage"))
 SYSTEM = FORMAT.system_libraries()
 COMPILER_RUNTIME = FORMAT.compiler_runtime()
 SYSTEM_PACKAGES = FORMAT.system_packages()
@@ -254,7 +244,9 @@ def system_zlib_requirements(directory, names):
 def copy_delivery_evidence(source, destination):
     """Copy only path-independent records needed to audit a delivered bundle."""
     destination.mkdir(parents=True)
-    for name in DELIVERY_EVIDENCE:
+    for name in (*DELIVERY_EVIDENCE, *(path.name for path in source.glob("*-source-files.json")),
+                 *(path.name for path in source.glob("*-source-identity.json")),
+                 *(path.name for path in source.glob("*-extension-files.json"))):
         path = source / name
         if not path.exists():
             continue
@@ -285,33 +277,22 @@ def public_metadata(metadata):
     result = dict(metadata)
     result.pop("sourceDirectories", None)
     result.pop("sourceObjectDirectories", None)
+    result.pop("sourceLicenseDocuments", None)
     return result
 
 
 def copy_source_licenses(metadata, destination):
     """Carry notices for embedded source dependencies absent from DT_NEEDED."""
-    documents = {
-        "storage": ["LICENSE"],
-        "knowhere": ["LICENSE", "thirdparty/faiss/LICENSE", "thirdparty/faiss/THIRD_PARTY_NOTICES",
-                     "thirdparty/hnswlib/LICENSE", "thirdparty/DiskANN/LICENSE",
-                     "thirdparty/DiskANN/NOTICE.txt"],
-    }
+    documents = metadata.get("sourceLicenseDocuments", {"storage": ["LICENSE"]})
     source_directories = metadata.get("sourceDirectories", {})
-    if metadata.get("with_cardinal"):
-        for generation in ("v1", "v2"):
-            cardinal = "thirdparty/cardinal" + generation
-            documents["knowhere"].append(cardinal + "/third_party/smalltopk/LICENSE")
-            knowhere = source_directories.get("knowhere")
-            if knowhere:
-                documents["knowhere"].extend(
-                    str(path.relative_to(Path(knowhere)))
-                    for path in (Path(knowhere) / cardinal).glob("LICENSE*") if path.is_file())
     for name, required in documents.items():
         source = source_directories.get(name)
         if source is None:
             raise ValueError("Source directory is missing for license collection: " + name)
         for relative in required:
             document = Path(source) / relative
+            if not document.resolve().is_relative_to(Path(source).resolve()):
+                raise ValueError("Source license escapes its component: " + str(document))
             if not document.is_file():
                 raise ValueError("Required source license document is missing: " + str(document))
             target = destination / name / relative
@@ -319,7 +300,8 @@ def copy_source_licenses(metadata, destination):
             shutil.copy2(document, target)
 
 
-def _run_native_diagnostics(directory, names, jvm_sequence, dlopen_sequence, output):
+def _run_native_diagnostics(directory, names, jvm_sequence, dlopen_sequence, output, parent_providers=None):
+    parent_providers = PARENT_PROVIDERS if parent_providers is None else parent_providers
     jvm_entries = set(jvm_sequence)
     results = {}
     failed = []
@@ -334,8 +316,8 @@ def _run_native_diagnostics(directory, names, jvm_sequence, dlopen_sequence, out
         stack = [line.strip() for line in command("readelf", "-lW", path).splitlines() if "GNU_STACK" in line]
         passed = len(stack) == 1 and "RWE" not in stack[0]
         results[name] = {"context": "dependency", "gnuStack": stack, "passed": passed}
-        if name in PARENT_PROVIDERS:
-            parent = PARENT_PROVIDERS[name]
+        if name in parent_providers:
+            parent = parent_providers[name]
             result = subprocess.run(["ldd", "-r", str(path)], env=clean_environment(), text=True,
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
             (output / (name + ".ldd-r.txt")).write_text(result.stdout)
@@ -343,7 +325,7 @@ def _run_native_diagnostics(directory, names, jvm_sequence, dlopen_sequence, out
                            command("nm", "-D", "--defined-only", "--format=posix", directory / parent).splitlines()}
             unresolved = re.findall(r"undefined symbol: (\S+)", result.stdout)
             environment = clean_environment()
-            # Cardinal registers with and calls its parent engine; it is not a standalone entry.
+            # An extension registers with and calls its parent engine; it is not a standalone entry.
             environment["LD_PRELOAD"] = str((directory / parent).resolve())
             context = subprocess.run(["ldd", "-r", str(path)], env=environment, text=True,
                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
@@ -415,6 +397,7 @@ def _run_native_diagnostics(directory, names, jvm_sequence, dlopen_sequence, out
     (output / "results.json").write_text(json.dumps(results, indent=2) + "\n")
     (output / "diagnostic-failures.json").write_text(
         json.dumps(sorted(set(failed)), indent=2) + "\n")
+    return sorted(set(failed))
 
 
 def audit(directory, names, jvm_entries, dlopen_entries, output):
@@ -429,36 +412,46 @@ def audit(directory, names, jvm_entries, dlopen_entries, output):
     missing_files = [name for name in names if not (directory / name).is_file()]
     if missing_files:
         raise ValueError("Native audit lists missing libraries: " + ", ".join(sorted(missing_files)))
+    diagnostic_error = None
+    failed = []
     try:
-        _run_native_diagnostics(directory, names, jvm_sequence, dlopen_sequence, output)
+        failed = _run_native_diagnostics(directory, names, jvm_sequence, dlopen_sequence, output)
     except Exception as error:
+        diagnostic_error = error
         (output / "diagnostic-error.txt").write_text(
             type(error).__name__ + ": " + str(error) + "\n")
-    jvm_load_tests = check_jvm_loads(directory, output)
+    jvm_load_tests = check_jvm_loads(directory, output, load_entries=jvm_sequence)
     (output / "jvm-load-tests.json").write_text(json.dumps(jvm_load_tests, indent=2) + "\n")
     if any(record["exit"] != 0 for record in jvm_load_tests):
         raise JvmLoadAuditError(jvm_load_tests)
+    if diagnostic_error is not None or failed:
+        error = ValueError("Native relocation audit failed: " +
+                           (str(diagnostic_error) if diagnostic_error else ", ".join(failed)))
+        error.records = jvm_load_tests
+        raise error from diagnostic_error
     return jvm_load_tests
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("graph", "storage-build", "knowhere-build", "output", "metadata"):
+    for name in ("graph", "storage-build", "output", "metadata"):
         parser.add_argument("--" + name, type=Path, required=True)
     args = parser.parse_args()
     if args.output.exists():
         raise ValueError("Output exists; preserve it and select a fresh staging directory")
     graph = json.loads(args.graph.read_text())
     metadata = json.loads(args.metadata.read_text())
-    roots = list(args.storage_build.glob(FORMAT.library_glob("libmilvus-storage")))
-    roots.extend(args.knowhere_build.rglob(FORMAT.library_glob("libknowhere")))
-    roots.extend(args.knowhere_build.rglob(FORMAT.library_glob("libcardinal")))
+    global PARENT_PROVIDERS
+    PARENT_PROVIDERS = metadata.get("parentProviders", {})
+    load_entries = metadata["loadEntries"]
+    dlopen_entries = metadata["dlopenEntries"]
+    roots = list(args.storage_build.rglob(FORMAT.library_glob()))
     providers, packages = inventory(graph, roots)
     available = {shared_library(path)["soname"] for path in roots if path.is_file()}
-    required = set(AUDIT_DLOPEN_ENTRIES)
+    required = set(dlopen_entries)
     if not required.issubset(available):
         raise ValueError("Native build did not produce all required JNI/engine libraries")
-    entries = set(AUDIT_DLOPEN_ENTRIES)
+    entries = set(dlopen_entries)
     selected, aliases = stage(providers, entries, args.output / "lib")
     # OpenSSL loads providers by module path, without a DT_NEEDED edge.
     for package in packages:
@@ -514,18 +507,18 @@ def main():
                     resolvedPackages=[public_package(package) for package in packages],
                     dependencyGraphSha256=digest(args.graph), auditPolicy="jvm-load", audit="pending",
                     jvmLoadTests=[],
-                    relocationRoots=sorted(selected), dlopenEntries=list(AUDIT_DLOPEN_ENTRIES),
+                    relocationRoots=sorted(selected), dlopenEntries=list(dlopen_entries),
                     systemDependencies=({FORMAT.system_zlib(): system_zlib_requirements(args.output / "lib", selected)}
                                         if isinstance(FORMAT, platforms.Elf) else {}))
     shutil.copy2(args.graph, args.output / "conan-graph.json")
     metadata_path = args.output / "provenance.json"
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
     try:
-        metadata["jvmLoadTests"] = audit(args.output / "lib", sorted(selected), JVM_LOAD_ENTRIES,
-                                         AUDIT_DLOPEN_ENTRIES, args.output / "audit")
-    except JvmLoadAuditError as error:
+        metadata["jvmLoadTests"] = audit(args.output / "lib", sorted(selected), load_entries,
+                                         dlopen_entries, args.output / "audit")
+    except ValueError as error:
         metadata["audit"] = "failed"
-        metadata["jvmLoadTests"] = error.records
+        metadata["jvmLoadTests"] = getattr(error, "records", [])
         metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
         raise
     metadata["audit"] = "passed"

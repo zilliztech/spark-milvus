@@ -8,51 +8,42 @@ to build, test and change the code.
 
 ## What this project is
 
-Spark reads and searches fixed Milvus Storage V3 snapshots directly from object
-storage. The caller provides an existing snapshot and storage configuration;
-the public connector does not call Milvus or prepare snapshots. Reads plan
-segment partitions and consume Arrow batches. NEAREST BY returns top-k matches
-using exact scans or compatible persisted indexes. Spark 4.2 supplies the join
-syntax; the connector supplies `nearestByJoin` and `nearest_by_join` on 3.5–4.1.
-Writing, backfill, index construction, snapshot output, service clients, backup
-and legacy storage compatibility are outside this repository's scope.
+Spark reads fixed Milvus Storage V3 snapshots directly from object storage
+and replaces stored columns of such a snapshot from a DataFrame: a physical
+read carries each row's identity, and the write commits new manifest revisions
+and a receipt without registering them anywhere. The caller computes the new
+values, and owns snapshot preparation, protection, service submission and
+online visibility. Public code has no Milvus service client, vector search
+engine, index construction API or join of caller input with a snapshot.
 
-The 1.x line stopped at tag `v1.6.0` and is no longer maintained: it takes no
-fixes. The 2.0 line is a rewrite developed on `main` and released from branch
-`2.0`, where the `v2.0.x` tags are cut; snapshots are versioned
-`2.0.0-{branch}-{arch}-SNAPSHOT`, and `2.0.0-{arch}-SNAPSHOT` on the release
-branch. Everything below describes 2.0.
+The 1.x line stopped at tag `v1.6.0` and is no longer maintained. Current work
+replaces the earlier read/search distribution. Development versions use the 2.1
+line; candidate selection is explicit and must never reuse published coordinates.
 
-## The three public layers
+## The public layers
 
-Five production modules, with dependencies only pointing downward.
+Four production modules, with dependencies only pointing downward.
 
 | Layer | Modules | What lives there |
 |---|---|---|
-| 1 | `native-runtime`, `native-storage`, `native-vector` | Unified platform loading and the upstream Storage/Knowhere APIs; nothing above this layer loads a `.so`. |
-| 2 | `core` | V3 snapshot formats, read/search computation and storage access; no Spark dependencies. |
-| 3 | `spark` | Read-only DataSource V2 and vector search, with shared sources and selected Spark shims. |
+| 1 | `native-runtime`, `native-storage` | Component-aware platform loading and upstream Storage APIs. |
+| 2 | `core` | V3 formats, read computation, storage access and shared V3 writing primitives; no Spark. |
+| 3 | `spark` | Read and column-replacement DataSource V2, neutral physical scan contracts and Spark/Arrow conversion. |
 
-The layer-1 modules live in `native/runtime`, `native/storage` and
-`native/vector`, and the unified native build that produces the platform bundle
-is `native/build/`; the project IDs keep their `native-` names. The three
-submodules stay at the repository root.
+Layer-1 modules live in `native/runtime` and `native/storage`; `native/build`
+produces the Storage-only platform bundle. The root aggregates production modules
+and publishes no artifact. `integration` is outside the aggregate. The column
+replacement reads no input itself: callers pass a DataFrame, and there is no
+command-line entry point. Sources support Spark 3.5 (Scala 2.12 or 2.13), 4.0,
+4.1 and 4.2. `-DsparkVersion` and
+`-DscalaVersion` select a profile at sbt startup. Restart sbt and clean module
+outputs when switching profiles. Formatting and package checks inspect every
+retained shim root.
 
-The root aggregates those modules and publishes no artifact. `integration`
-is outside the aggregate and tests fixed V3 inputs in a real object store;
-it needs no Milvus service. Use `spark/assembly` for the selected local bundle.
-
-`-DsparkVersion` selects 3.5, 4.0 (default), 4.1 or 4.2;
-`-DscalaVersion` selects a supported full Scala version (default 2.13.16).
-Only Spark 3.5 also supports 2.12.20. Restart sbt and clean module outputs when
-switching combinations. `spark/src/main/scala` is shared; explicit
-`scala-shims` roots contain the remaining Dataset and NEAREST BY differences.
-Formatting and source/package checks cover every root, while compilation and
-source JARs contain only the selected roots. See [README.md](README.md).
-
-Three git submodules: `milvus-proto`, `milvus-storage` and `knowhere` supply
-the protobuf definitions and the two native engines and must be initialized to
-build.
+Initialize the `milvus-proto` and `milvus-storage` submodules before building.
+Only common/schema protobufs are generated; no service protocol is generated.
+Use `spark/assembly` for a bundle. Keep Iceberg and input formats out of its
+closure.
 
 ## Rules any change has to satisfy
 

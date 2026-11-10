@@ -68,13 +68,13 @@ object Modules {
     )
   ) ++ noSparkImports
 
-  /** Knowhere's layer-1 module is plain Java, so its artifact carries no Scala
-    * suffix. Storage compiles upstream Scala sources for each shared Scala
-    * line.
+  /** The native runtime is plain Java, so its artifact carries no Scala suffix.
+    * Storage compiles upstream Scala sources for each shared Scala line.
     */
   val javaOnly: Seq[Setting[_]] = Seq(
     crossPaths := false,
     autoScalaLibrary := false,
+    Compile / doc / javacOptions += "-notimestamp",
     javacOptions ++= Seq("--release", Versions.sharedJavaRelease)
   )
 

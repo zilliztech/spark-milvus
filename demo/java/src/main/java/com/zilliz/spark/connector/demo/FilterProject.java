@@ -10,7 +10,7 @@ import org.apache.spark.sql.Row;
 /** Project selected fields and demonstrate Spark and Milvus scalar predicates. */
 public final class FilterProject {
     public static void main(String[] args) throws Exception {
-        try (DemoSupport demo = DemoSupport.open(args, "FilterProject", true, false, true)) {
+        try (DemoSupport demo = DemoSupport.open(args, "FilterProject", true, true)) {
             Dataset<Row> documents = demo.spark.read().format("milvus").options(demo.options).load();
 
             // where filters rows; select requests only these fields from the read.

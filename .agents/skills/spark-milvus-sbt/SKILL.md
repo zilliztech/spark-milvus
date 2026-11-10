@@ -41,7 +41,7 @@ their scope; names must account for their effects.
 
 Keep module IDs, directories, dependency scopes and exclusions, version values,
 task aggregation, resource paths and artifact coordinates stable during a
-structural cleanup unless changing them is part of the request. Keep the public five-module thin graph and the upstream JNI binding contract
+structural cleanup unless changing them is part of the request. Keep the four-module reader closure and upstream JNI binding contract
 consistent with the candidate verifier.
 Follow AGENTS.md's removal rule; a grep result alone does not authorize removing
 a user-facing contract.

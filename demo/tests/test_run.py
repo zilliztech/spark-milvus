@@ -13,12 +13,10 @@ from zipfile import ZipFile
 ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER = ROOT / "demo/run.sh"
 EXAMPLES = (
-    "01_read_snapshot.py", "02_filter_project.py", "03_sql_analytics.py", "04_exact_search.py",
-    "05_filtered_search.py", "06_index_search.py", "07_vector_functions.py", "08_partition_selection.py",
+    "01_read_snapshot.py", "02_filter_project.py", "03_sql_analytics.py", "08_partition_selection.py",
 )
 JAVA_EXAMPLES = (
-    "ReadSnapshot", "FilterProject", "SqlAnalytics", "ExactSearch",
-    "FilteredSearch", "IndexSearch", "VectorFunctions", "PartitionSelection",
+    "ReadSnapshot", "FilterProject", "SqlAnalytics", "PartitionSelection",
 )
 
 
@@ -100,10 +98,10 @@ class RunExamplesTest(unittest.TestCase):
     def jar(path, native=True):
         path.parent.mkdir(parents=True, exist_ok=True)
         with ZipFile(path, "w") as archive:
-            archive.writestr("com/zilliz/spark/connector/extensions/MilvusSparkPlugin.class", b"fixture")
+            archive.writestr("com/zilliz/spark/connector/sources/MilvusDataSource.class", b"fixture")
             if native:
                 for architecture in ("x86_64", "aarch64"):
-                    archive.writestr(f"native/milvus/1/linux-{architecture}/manifest.properties", "")
+                    archive.writestr(f"native/milvus/2/linux-{architecture}/manifest.properties", "")
 
     def run_demo(self, *arguments, **environment):
         env = dict(self.env)
@@ -143,7 +141,7 @@ class RunExamplesTest(unittest.TestCase):
                 self.assertFalse(self.capture.exists())
 
     def test_language_and_example_must_be_explicit(self):
-        for arguments in (["04_exact_search.py"], ["scala", "ExactSearch"], ["python"], ["java"]):
+        for arguments in (["01_read_snapshot.py"], ["scala", "ReadSnapshot"], ["python"], ["java"]):
             with self.subTest(arguments=arguments):
                 result = self.run_demo(*arguments)
                 self.assert_failed(result, "Choose")
@@ -154,8 +152,6 @@ class RunExamplesTest(unittest.TestCase):
                 result = self.run_python(example, "--help", SPARK_HOME=None, JAVA_HOME=None, CONNECTOR_JAR=None)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("usage:", result.stdout)
-                if example == "04_exact_search.py":
-                    self.assertIn("--queries", result.stdout)
                 self.assertFalse(self.capture.exists())
 
     def test_every_allowlisted_example_is_selected_explicitly(self):
@@ -167,21 +163,21 @@ class RunExamplesTest(unittest.TestCase):
                     self.assertEqual(self.arguments()[-1], str(ROOT / "demo/python" / example))
 
     def test_external_or_unknown_scripts_are_rejected(self):
-        for example in ("missing.py", "../outside.py", "./04_exact_search.py",
-                        str(ROOT / "demo/python/04_exact_search.py"), "04_exact_search.py;echo injected"):
+        for example in ("missing.py", "../outside.py", "./01_read_snapshot.py",
+                        str(ROOT / "demo/python/01_read_snapshot.py"), "01_read_snapshot.py;echo injected"):
             with self.subTest(example=example):
                 self.assert_failed(self.run_python(example), "Unknown Python example")
 
     def test_assembly_paths_and_application_arguments_preserve_spaces(self):
         forwarded = ["--where", "category = 1", "--explain"]
-        result = self.run_python("05_filtered_search.py", *forwarded)
+        result = self.run_python("02_filter_project.py", *forwarded)
         self.assertEqual(result.returncode, 0, result.stderr)
         args = self.arguments()
         self.assertEqual(args[:4], ["--master", "local[2]", "--jars", str(self.assembly)])
-        self.assertEqual(args[-len(forwarded) - 1:], [str(ROOT / "demo/python/05_filtered_search.py"), *forwarded])
+        self.assertEqual(args[-len(forwarded) - 1:], [str(ROOT / "demo/python/02_filter_project.py"), *forwarded])
         self.assertEqual(args[args.index("--py-files") + 1], str(ROOT / "demo/python/common.py"))
-        self.assertIn("spark.sql.extensions=com.zilliz.spark.connector.extensions.MilvusReadSparkSessionExtensions", args)
-        self.assertIn("spark.plugins=com.zilliz.spark.connector.extensions.MilvusSparkPlugin", args)
+        self.assertFalse(any(arg.startswith("spark.sql.extensions=") for arg in args))
+        self.assertFalse(any(arg.startswith("spark.plugins=") for arg in args))
         signal = str(self.java / "lib/libjsig.so")
         self.assertIn("spark.executorEnv.LD_PRELOAD=" + signal, args)
         self.assertIn("spark.executorEnv.LD_BIND_NOW=1", args)
@@ -190,7 +186,7 @@ class RunExamplesTest(unittest.TestCase):
     def test_custom_snapshot_can_use_a_cluster_master(self):
         for options in (["--options", "/private/read options.json"], ["--options=/private/read options.json"]):
             with self.subTest(options=options):
-                result = self.run_python("04_exact_search.py", *options, "--queries", "/data/query.json",
+                result = self.run_python("01_read_snapshot.py", *options,
                                        MASTER="spark://example.invalid:7077")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(self.arguments()[:2], ["--master", "spark://example.invalid:7077"])
@@ -204,12 +200,6 @@ class RunExamplesTest(unittest.TestCase):
             with self.subTest(master=master):
                 result = self.run_python("01_read_snapshot.py", MASTER=master)
                 self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_vector_functions_can_use_a_cluster_without_snapshot_options(self):
-        result = self.run_python("07_vector_functions.py", MASTER="spark://example.invalid:7077")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.arguments()[:2], ["--master", "spark://example.invalid:7077"])
-        self.assertEqual(self.arguments()[-1], str(ROOT / "demo/python/07_vector_functions.py"))
 
     def test_exactly_one_connector_source_is_required(self):
         self.assert_failed(self.run_python("01_read_snapshot.py", CONNECTOR_JAR=None), "exactly one")
@@ -255,10 +245,7 @@ class RunExamplesTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("Usage: ./demo/run.sh java " + example, result.stdout)
                 self.assertIn("--explain", result.stdout)
-                if example == "VectorFunctions":
-                    self.assertNotIn("--options", result.stdout)
-                if example == "ExactSearch":
-                    self.assertIn("--queries", result.stdout)
+                self.assertIn("--options", result.stdout)
                 self.assertFalse(self.capture.exists())
 
     def test_snapshot_helper_help_needs_no_java_or_spark(self):
@@ -324,8 +311,8 @@ class RunExamplesTest(unittest.TestCase):
         self.assertFalse(self.javac_capture.exists())
 
     def test_unknown_or_qualified_java_classes_are_rejected(self):
-        for example in ("Missing", "ExactSearch.java", "../ExactSearch", "com.zilliz.spark.connector.demo.ExactSearch",
-                        "ExactSearch;echo injected"):
+        for example in ("Missing", "ReadSnapshot.java", "../ReadSnapshot", "com.zilliz.spark.connector.demo.ReadSnapshot",
+                        "ReadSnapshot;echo injected"):
             with self.subTest(example=example):
                 self.assert_failed(self.run_demo("java", example), "Unknown Java example")
 
@@ -362,22 +349,22 @@ class RunExamplesTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="keep-test-", dir=ROOT / "demo/target") as unrelated:
             marker = Path(unrelated) / "keep.txt"
             marker.write_text("another build")
-            result = self.run_demo("java", "ExactSearch", DEMO_TEST_SUBMIT_EXIT="42")
+            result = self.run_demo("java", "ReadSnapshot", DEMO_TEST_SUBMIT_EXIT="42")
             self.assertEqual(result.returncode, 42, result.stderr)
             app = Path(self.arguments()[self.arguments().index("--class") + 2])
             self.assertFalse(app.parent.exists())
             self.assertEqual(marker.read_text(), "another build")
-            result = self.run_demo("java", "ExactSearch", DEMO_TEST_JAVAC_EXIT="23")
+            result = self.run_demo("java", "ReadSnapshot", DEMO_TEST_JAVAC_EXIT="23")
             self.assertEqual(result.returncode, 23, result.stderr)
             self.assertFalse(self.capture.exists())
             compiler = self.javac_capture.read_bytes().decode().split("\0")[:-1]
             self.assertFalse(Path(compiler[compiler.index("-d") + 1]).parent.exists())
             self.assertEqual(marker.read_text(), "another build")
 
-    def test_java_custom_inputs_and_vector_functions_can_run_on_a_cluster(self):
+    def test_java_custom_inputs_can_run_on_a_cluster(self):
         self.assert_failed(self.run_demo("java", "ReadSnapshot", MASTER="yarn"),
                            "default snapshot requires MASTER=local")
-        for arguments in (["ReadSnapshot", "--options", "/private/read options.json"], ["VectorFunctions"]):
+        for arguments in (["ReadSnapshot", "--options", "/private/read options.json"],):
             with self.subTest(arguments=arguments):
                 result = self.run_demo("java", *arguments, MASTER="yarn")
                 self.assertEqual(result.returncode, 0, result.stderr)
