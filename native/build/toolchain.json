@@ -1,0 +1,6 @@
+{
+  "format": 1,
+  "_comment": "Toolchain versions the native build pins instead of taking from the GitHub runner image. prepare_native.sh installs this Rust toolchain through rustup and checks JAVA_HOME against this Java version; build-artifacts.yml selects the same Java; the Dockerfile defaults RUST_TOOLCHAIN to the same Rust. Changing a value changes the native cache fingerprint on purpose.",
+  "rust": "1.99.1",
+  "java": "21.0.13"
+}

@@ -1,0 +1,8 @@
+# Replace with the immutable integration runner image containing the suite.
+image:
+  repository: example.invalid/spark-milvus-read-tests
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+runner:
+  command: ["/opt/spark-milvus/bin/run-read-tests"]
+readOptions:
+  existingSecret: v3-read-options

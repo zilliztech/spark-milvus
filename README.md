@@ -1,172 +1,112 @@
 # Milvus Spark Connector
 
-## Version Compatibility
+Read fixed Milvus Storage V3 snapshots directly from object storage with Apache
+Spark, and replace stored columns of such a snapshot from a DataFrame: the
+connector writes new column files, commits new manifest revisions and publishes
+a receipt.
 
-**This connector requires Milvus 2.6 or later** (Storage V2).
+Callers supply and protect the snapshot and compute the new values. The
+connector does not create snapshots, call Milvus, register new revisions, or
+confirm online visibility. Index construction, append, backup and legacy
+storage compatibility are outside this repository. Vector fields are supported as
+ordinary data columns.
 
-For Milvus 2.5 and earlier versions, please use the `legacy` branch which is no longer actively maintained.
+Snapshot metadata must declare `format_version` 4 or 6. Missing and unsupported
+versions fail, including for empty snapshots. The 1.x line ended at `v1.6.0`.
+Connector versions follow Milvus releases; the 3.0 line targets Milvus 3.0.
+Test with a candidate produced from this source.
 
-## Environment Preparation
+## Project structure
 
-**Machine Requirements:** Minimum 2 CPU cores and 8GB RAM.
+| Layer | Module | Responsibility |
+|---|---|---|
+| 1 | `native-runtime` | Validate component requirements and extract one platform bundle |
+| 1 | `native-storage` | Pinned milvus-storage JNI and upstream JVM APIs |
+| 2 | `core` | V3 snapshots, schema, filters, reads and shared V3 file-writing primitives |
+| 3 | `spark` | Read and column-replacement DataSource V2, neutral segment scan contract and Arrow conversion |
+| — | `integration` | Explicit object-storage integration tests, outside the root aggregate |
 
-To ensure smooth operation, it is critical to use consistent versions of the required tools. Mismatched versions may lead to compatibility issues.
+Dependencies point downwards. The public native bundle contains Storage.
+An embedding application can provide one complete native bundle satisfying the
+bindings' component requirements; it must not overlay bundles for one platform.
 
-1. [**SDKMAN**](https://sdkman.io/) is recommended for managing Scala and Spark environments.
-2. **Java Version:** 21
-3. **Scala Version:** 2.13.16
-4. **Spark Version:** 4.0.1 (built with Scala 2.13)
-5. **SBT Version:** 1.11.1
+| Spark selector | Compile version | Scala | Java bytecode |
+|---|---|---|---|
+| `3.5` | 3.5.5 | 2.12.20, 2.13.16 | 11 |
+| `4.0` (default) | 4.0.0 | 2.13.16 | 17 |
+| `4.1` | 4.1.1 | 2.13.16 | 17 |
+| `4.2` | 4.2.0 | 2.13.16 | 17 |
 
-If you are using SDKMAN, you can quickly install Java, Scala, and SBT as follows:
+Build with Java 21. Spark 3.5 Arrow tests use Java 17 through
+`SPARK35_TEST_JAVA_HOME`. Reader thin
+candidates cover the source matrix; fat distribution consumers cover 4.0/4.2.
 
-```bash
-sdk install java 21.0.5-zulu
-sdk install scala 2.13.16
-sdk install sbt 1.11.1
-```
-
-The Spark version provided by SDKMAN only supports Scala 2.12. Therefore, you need to manually install the Spark version compatible with Scala 2.13. You can download it from the following link: [Spark Download](https://www.apache.org/dyn/closer.lua/spark/spark-4.0.1/spark-4.0.1-bin-hadoop3-scala2.13.tgz).
-
-### Spark Submit Configuration
-
-To simplify the `spark-submit` process, create a wrapper script named `spark-submit-wrapper.sh`. Replace the `SPARK_HOME` path with the actual installation directory on your machine.
-
-```bash
-#!/bin/bash
-
-export SPARK_HOME=/xxx/spark-4.0.1-bin-hadoop3-scala2.13
-
-if [ ! -d "$SPARK_HOME" ]; then
-  echo "Error: SPARK_HOME directory does not exist: $SPARK_HOME"
-  exit 1
-fi
-
-SPARK_SUBMIT="$SPARK_HOME/bin/spark-submit"
-if [ ! -f "$SPARK_SUBMIT" ]; then
-  echo "Error: spark-submit not found at: $SPARK_SUBMIT"
-  exit 1
-fi
-
-exec "$SPARK_SUBMIT" "$@"
-```
-
-After saving the script, grant it execution permissions and set up an alias for convenience. Replace the script path with the actual location on your machine.
+## Building
 
 ```bash
-chmod +x /xxx/spark-submit-wrapper.sh
-alias spark-submit-wrapper="/xxx/spark-submit-wrapper.sh"
+git submodule update --init --recursive milvus-proto milvus-storage
+sbt compile test
+make native-bundle
+sbt -Dmilvus.native.bundle=/absolute/path/to/milvus-native-linux-x86_64.jar spark/assembly
 ```
 
-## Running the Connector
+The two submodules provide storage common/schema protobufs and the native engine.
+The root only aggregates modules. Native compilation is explicit; ordinary sbt
+compilation does not run Conan. See [contributing](docs/contributing.md) for the
+native toolchain, signal chaining, formatting and required checks.
 
-### Add Milvus Spark Connector Dependency
+## Using the connector
 
-You can use the pre-built Milvus Spark Connector package directly, or compile it yourself by following the instructions in the next section.
+Supply the assembly with `spark-submit --jars` and configure the running JRE's
+`libjsig` for the driver and executors. No connector session extension or plugin
+is required for reads.
 
-**Note:** The official release package is currently used primarily for testing the release process. Active development and updates are concentrated in the SNAPSHOT versions.
-
-- **Official Release:** Available at [Maven Repository](https://mvnrepository.com/artifact/com.zilliz/spark-connector_2.13)
-- **Latest SNAPSHOT:** Version 0.1.7-SNAPSHOT
-
-#### Using SNAPSHOT Dependencies
-
-To use the SNAPSHOT version, you need to add the snapshot repository to your build configuration:
-
-**For SBT (build.sbt):**
-
-```
-ThisBuild / resolvers += "Sonatype Snapshots" at "https://central.sonatype.com/repository/maven-snapshots/"
-```
-
-### Build and Package Milvus Spark Connector
-
-Use the following SBT commands to compile, package, and publish the connector locally:
-
-```bash
-sbt clean compile package publishLocal
+```scala
+val snapshotOptions = Map(
+  "milvus.snapshot.path" -> "snapshots/fixed.json",
+  "fs.storage_type" -> "remote",
+  "fs.cloud_provider" -> "aws",
+  "fs.bucket_name" -> "example-bucket",
+  "fs.address" -> "s3.us-west-2.amazonaws.com",
+  "fs.region" -> "us-west-2",
+  "fs.use_iam" -> "true"
+)
+val rows = spark.read.format("milvus").options(snapshotOptions).load()
+rows.where("category = 1").select("id", "vector").show()
 ```
 
-- **clean:** Clears previous build artifacts.
-- **compile:** Compiles the source code.
-- **package:** Packages the compiled code into a JAR file.
-- **publishLocal:** Publishes the package to the local repository (primarily for use in connector examples).
+Storage credentials are supplied through these options, independently of any
+other source the application reads. Keep snapshot metadata, manifests, data and
+deletes available for every action. See the [reference](docs/reference.md) for
+canonical options.
 
-To create a fat JAR containing all dependencies, run:
+## Replacing columns
 
-```bash
-sbt assembly
-```
+A physical read returns every stored row of a snapshot with its row identity.
+The caller computes final values with ordinary Spark code and writes them back
+with `milvus.write.operation=replace_columns` and `mode("append")`; the
+connector restores stored order, writes new column files and commits a new
+manifest revision per segment, then publishes a receipt at the `.save()` path.
+Registering the new revisions with Milvus stays with the caller. Read
+[the column replacement guide](docs/column-replacement.md).
 
-### Docker Build
+## Documents
 
-You can also build the connector using Docker, which handles all dependencies automatically including the native milvus-storage library.
-
-**Build the Docker image:**
-
-```bash
-# Build for current architecture (x86 or ARM64)
-docker build -t spark-milvus .
-
-# Build without publishing to Maven Central
-docker build --build-arg PUBLISH_TO_CENTRAL=false -t spark-milvus .
-```
-
-**Build arguments:**
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `GIT_BRANCH` | `unknown` | Branch name for version string |
-| `PUBLISH_TO_CENTRAL` | `true` | Whether to publish to Maven Central Snapshots |
-
-**Version naming:**
-
-The Docker build uses dynamic versioning: `{branch}-{arch}-SNAPSHOT`
-
-For example:
-- `main-amd64-SNAPSHOT` (x86 build from main branch)
-- `feature-arm64-SNAPSHOT` (ARM64 build from feature branch)
-
-**Extract built JAR from container:**
-
-```bash
-docker create --name temp spark-milvus
-docker cp temp:/workspace/target/scala-2.13/spark-connector_2.13-*.jar ./
-docker rm temp
-```
-
-### Build and Package Milvus Spark Connector Example
-
-Example Project Repository: [Milvus Spark Connector Example](https://github.com/SimFG/milvus-spark-connector-example)
-
-To compile and package the example project, use the following SBT command:
-
-```bash
-sbt clean compile package
-```
-
-### Run the Test Demo
-
-To execute the test demo, specify the paths to the JAR files generated in the previous steps. Replace `/xxx/` with the actual paths on your machine.
-
-**Note:** If you prefer to use online dependencies instead of building locally, you can download the pre-built assembly JAR from the [GitHub Releases page](https://github.com/SimFG/milvus-spark-connector/releases).
-
-```bash
-spark-submit-wrapper --jars /xxx/spark-connector-assembly-x.x.x-SNAPSHOT.jar --class "example.HelloDemo" /xxx/milvus-spark-connector-example_2.13-0.1.0-SNAPSHOT.jar
-```
-
-This command executes the **HelloDemo** class, showcasing how to read collection data from Milvus using the Spark connector.
-
-**Before running this command, please ensure the following:**
-
-* A collection named **hello_spark_milvus** already exists in your local Milvus instance.
-* Your local Milvus service is running and accessible.
-
-For more detailed information about how to use the connector, see the [ **API Reference**](docs/reference-en.md).
+| Document | Contents |
+|---|---|
+| [Reference](docs/reference.md) | Read options and supported data types |
+| [Column replacement](docs/column-replacement.md) | Physical reads, row identities, the column write and its receipt |
+| [Examples](demo/README.md) | Python/Java snapshot reads and SQL |
+| [Container](docker/README.md) | Build and run the reader image |
+| [Cluster setup](docs/cluster-setup.md) | Runtime, identities and networking |
+| [Contributing](docs/contributing.md) | Build, formatting and test requirements |
+| [Releasing](docs/releasing.md) | Candidate closure, CI gates and release procedure |
+| [Native build](native/build/README.md) | Native platform build and manifest |
 
 ## License
 
-This project is licensed under the Server Side Public License v1 (SSPLv1) and the GNU Affero General Public License v3 (AGPLv3).
+See [LICENSE](LICENSE).
+
 ## Automated PR review
 
 AI review covers all changed files, including documentation, using fixed Git
