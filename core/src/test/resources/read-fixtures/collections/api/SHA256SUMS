@@ -1,0 +1,11 @@
+3880d8838bf1f751e5556e358c6e8eb64a56f870d13a984f8aa73cbb747b7c69  README.md
+d0cc4458a44ce272caab44feb2f9ecc180a50cca5ed14a393154fbab7d24fd80  expected.json
+b9114bda0bceff02c1c0c66247f394f020b9c8951335532351339454aa5b5a19  files/insert_log/10/20/30/_data/0_bdd3d25b-9346-4903-9a1b-91ed49eaf7ee.parquet
+22966699b3163bec6710e098cc4683811cfc5b5c0f8db32d1cd6c1bebcc075d3  files/insert_log/10/20/30/_data/1_be485863-9146-4706-a83a-dd9120cb137a.parquet
+615a1e54559b8d189e73e3fa5fff2c8f8776510d6e2dc3b178c90e2411754027  files/insert_log/10/20/30/_metadata/manifest-1.avro
+5b62ca7a121561e672244a919cf66aed9aeaba75eeaacedefb1abeb0742cf130  files/insert_log/10/20/31/_data/0_55acb9c7-03ce-434f-b872-e6cc3351a392.parquet
+bce0f0a668c0f5ae986e8bb6c8650d594455e74d66170a3664aab1fe591adec0  files/insert_log/10/20/31/_data/1_3cecc8c2-f3ce-41ee-8937-2e0dade3af9f.parquet
+effe9165fab59fe11dcfa3ec8eb83eb80e46914d188cff1306970ce3c9a643f8  files/insert_log/10/20/31/_metadata/manifest-1.avro
+4514085d448e1b2048cb0cdd5243bdc7ec87e0fb45c991fab53fbe6d9ab56ecc  files/snapshots/10/manifests/1/30.avro
+2a1f61a71d23275d881f839bc4c78b8f3c51c58de5e08905b27ef3f38bb8d300  files/snapshots/10/manifests/1/31.avro
+e8b881111421152176276c5d1a73cb0104f64161e9a818089e9a909bf30d51a4  snapshot.json

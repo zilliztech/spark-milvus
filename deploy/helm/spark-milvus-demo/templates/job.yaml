@@ -1,0 +1,50 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "spark-milvus-demo.fullname" . }}-submit
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "spark-milvus-demo.labels" . | nindent 4 }}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ .Values.job.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "spark-milvus-demo.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      enableServiceLinks: false
+      automountServiceAccountToken: true
+      serviceAccountName: {{ include "spark-milvus-demo.account" (dict "root" . "role" "submitter") }}
+      securityContext:
+        {{- include "spark-milvus-demo.podSecurity" . | nindent 8 }}
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- range . }}
+        - name: {{ . | quote }}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: submit
+          image: {{ include "spark-milvus-demo.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          workingDir: /opt/spark/work-dir
+          args:
+            {{- include "spark-milvus-demo.arguments" . | nindent 12 }}
+          securityContext:
+            {{- include "spark-milvus-demo.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.job.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "spark-milvus-demo.writableMounts" . | nindent 12 }}
+            - name: pod-templates
+              mountPath: /etc/spark-milvus/templates
+              readOnly: true
+      volumes:
+        {{- include "spark-milvus-demo.writableVolumes" . | nindent 8 }}
+        - name: pod-templates
+          configMap:
+            name: {{ include "spark-milvus-demo.fullname" . }}-templates
