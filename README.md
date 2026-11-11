@@ -88,11 +88,11 @@ Use the running JRE's signal library on each driver and executor. The command
 above targets a Linux client-mode driver; see [cluster setup](docs/cluster-setup.md)
 for remote drivers and storage access.
 
-For direct `--jars` use, download a matching assembly and its checksums from the
-[release assets](https://github.com/zilliztech/spark-milvus/releases), or build
-one below. The small Maven entry JAR is not an assembly: downloading it alone
-does not bring its dependencies. The [JAR download guide](docs/releasing.md#jar-downloads)
-explains the available files. For containers, use the
+For direct `--jars` use, supply the bundled JVM artifact and one matching native
+platform JAR from Maven Central, or [build an assembly](#building). The small
+Maven entry JAR does not include its dependencies. See the
+[artifact selection guide](docs/releasing.md#using-release-artifacts) for the
+matching artifacts. For containers, use the
 [Docker image guide](docker/README.md#run-a-release-image).
 
 ## Building

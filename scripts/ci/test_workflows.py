@@ -178,21 +178,6 @@ class WorkflowGateTest(unittest.TestCase):
         self.assertNotIn("CENTRAL_USERNAME", signing["env"])
         self.assertNotIn("GPG_PRIVATE_KEY", publication["env"])
 
-    def test_github_downloads_follow_central_consumption_and_all_image_publication(self):
-        jobs = workflow("release.yml")["jobs"]
-        job = jobs["github-release"]
-        self.assertEqual(set(job["needs"]), {"identity", "validate", "public-consumer", "image-manifest"})
-        self.assertEqual(job["if"], "needs.identity.outputs.mode == 'publish'")
-        self.assertEqual(job["permissions"], {"actions": "read", "contents": "write"})
-        self.assertFalse(any(other.get("permissions", {}).get("contents") == "write"
-                             for name, other in jobs.items() if name != "github-release"))
-        steps = job["steps"]
-        preparation = next(step for step in steps if "github_release.py prepare" in step.get("run", ""))
-        publication = next(step for step in steps if "github_release.py publish" in step.get("run", ""))
-        self.assertLess(steps.index(preparation), steps.index(publication))
-        self.assertNotIn("GH_TOKEN", preparation["env"])
-        self.assertIn("--notes docs/release-notes/3.0.md", publication["run"])
-
     def test_release_native_source_is_exact_trusted_successful_push(self):
         release = workflow("release.yml")
         identity = release["jobs"]["identity"]

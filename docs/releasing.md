@@ -28,8 +28,8 @@ Storage component.
 ## Using release artifacts
 
 The coordinates and URLs below describe the 3.0 delivery contract. Installation
-commands require a version published to the corresponding Maven, GitHub or
-Docker repository. Choose a published version from
+commands require a version published to Maven Central or Docker Hub. Choose a
+published version from
 [GitHub Releases](https://github.com/zilliztech/spark-milvus/releases), then use
 that same version for every connector artifact. CI candidates are separate from
 public releases.
@@ -55,9 +55,10 @@ Sources and Javadoc accompany the Maven artifacts.
 Resolve an entry with Maven, sbt or `spark-submit --packages`, as shown in
 [the installation examples](../README.md#installing). Entry JARs contain only
 delivery documentation: `--jars` does not resolve their POM dependencies.
-For `--jars`, use a complete assembly, or explicitly supply the JVM artifact
-and exactly one matching native platform JAR. Spark 3.5/4.1 thin deployments
-also need their declared JVM dependencies.
+For `--jars`, [build an assembly](../README.md#building), or explicitly supply
+the bundled JVM artifact and exactly one matching native platform JAR from
+[Maven Central](https://repo.maven.apache.org/maven2/com/zilliz/).
+Spark 3.5/4.1 thin deployments also need their declared JVM dependencies.
 
 Released native platforms target glibc Linux (Ubuntu 22.04 and 24.04 in the
 tested matrix, with a glibc 2.35 baseline) and Apple silicon on macOS 14 or later.
@@ -68,37 +69,7 @@ library. Linux uses `LD_PRELOAD` with `lib/libjsig.so`; macOS uses
 system shell utilities. See [cluster setup](cluster-setup.md) for Linux
 deployment requirements.
 
-### JAR downloads
-
-Each GitHub Release attaches the tested Spark 4.0 / Scala 2.13 assemblies for
-Linux x86_64 and aarch64. These contain the JVM implementation and the native
-bundle for one architecture. Select the same architecture on the driver and
-executors. For example, after publication:
-
-```bash
-export RELEASE_VERSION='<published-3.0-version>'
-platform=linux-x86_64  # use linux-aarch64 for ARM64
-jar="spark-milvus-4.0-bundle-$RELEASE_VERSION-$platform.jar"
-base="https://github.com/zilliztech/spark-milvus/releases/download/v$RELEASE_VERSION"
-curl --fail --location --output "$jar" "$base/$jar"
-curl --fail --location --output SHA256SUMS "$base/SHA256SUMS"
-sha256sum --check --ignore-missing SHA256SUMS
-export LD_PRELOAD="$JAVA_HOME/lib/libjsig.so"
-"$SPARK_HOME/bin/spark-submit" \
-  --jars "$jar" \
-  --conf "spark.executorEnv.LD_PRELOAD=/path/on/workers/to/jdk/lib/libjsig.so" \
-  your_application.py
-```
-
-The release also includes `release-manifest.json` and each assembly's manifest
-with source identity and checksums. A checksum check validates the downloaded
-bytes; use the release's source tag and CI results to inspect their provenance.
-Spark 4.2 and macOS consumers use the Maven artifacts; these GitHub assets do
-not include fat assemblies for those combinations. Individual JVM and native
-JARs can also be downloaded from the
-[Maven Central repository](https://repo.maven.apache.org/maven2/com/zilliz/).
-
-The same tested Linux assemblies are packaged in the multi-architecture image
+Tested Linux assemblies are packaged in the multi-architecture image
 `milvusdb/spark-milvus:<version>-spark4.0`. See
 [the container guide](../docker/README.md#run-a-release-image).
 
@@ -279,9 +250,10 @@ python3 scripts/ci/consumer_smoke.py --candidate target/public-candidate \
 ```
 
 The release workflow also pushes both Linux image architectures, then creates
-`<version>-spark4.0`; only final versions update `latest`. The GitHub Release
-becomes visible after the public Central consumer and image publication succeed.
-It uses [the 3.0 release notes](release-notes/3.0.md), substituting the actual
-version for `{{VERSION}}`, and attaches the tested assemblies, manifests and
-`SHA256SUMS`. This GitHub publication step does not rebuild JARs. A Central test
-tag does not publish images or create a public GitHub Release.
+`<version>-spark4.0`; only final versions update `latest`. A Central test tag
+does not publish images.
+
+After the public Central consumer and image publication succeed, prepare the
+GitHub release announcement from [the 3.0 release notes](release-notes/3.0.md).
+Replace `{{VERSION}}` with the published version and link the release to its
+source tag. This announcement is a maintainer step outside the release workflow.
