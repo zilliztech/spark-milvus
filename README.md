@@ -1,19 +1,24 @@
 # Spark-Milvus
 
-Use Milvus data in your Apache Spark applications. Spark-Milvus reads an
-existing Milvus **Snapshot** directly from object storage into a DataFrame, so
-you can join it with other datasets, analyze scalar and vector fields, and run
-batch transformations with Spark SQL, Scala or PySpark.
+**Read and write Milvus data files in Apache Spark.** Spark-Milvus brings data
+from a Milvus **Snapshot** into Spark, so you can read, transform and update it
+with DataFrames.
 
-A Snapshot describes the collection's data at a fixed point in time. You provide
-its JSON file path and storage credentials; the connector discovers the schema
-and reads the referenced files without querying a running Milvus service.
+- **Read Snapshot data**: Read Milvus data files directly from object storage
+  into a DataFrame, then filter, join, analyze and process them with Spark SQL,
+  Scala or PySpark.
+- **Update Snapshot data**: Write Spark results to Milvus data files to replace
+  existing field values, for data cleaning and batch updates.
 
-To get started, [add the dependency](#installing),
-[read your Snapshot](#using-the-connector) and
-[submit the application](#running-your-application). For more control, see
-[supported options](#supported-options). You can also
-[replace existing columns](#replacing-columns) with values computed in Spark.
+A **Snapshot** describes the collection's data at a fixed point in time. Provide
+its JSON file path and storage access settings; the connector discovers the
+schema and accesses the data files directly in object storage.
+
+To get started, [add the dependency](#installing), follow the
+[read](#reading-snapshot-data) and [update](#updating-snapshot-data) examples,
+then [run your application](#running-your-application). For all supported
+options, defaults and limits, see the
+[Reference](docs/reference.md#2-milvus-format-parameters).
 
 This guide covers the 3.0 connector line for Milvus 3.0. Earlier releases do not
 provide this API. Installation examples use `<published-3.0-version>`: replace
@@ -95,7 +100,7 @@ PySpark applications use these JVM artifacts too. Add them with `--packages`
 when submitting the Python script; there is no separate connector Python
 package to install.
 
-## Using the connector
+## Reading Snapshot data
 
 The connector is a Spark DataSource named `milvus`. It discovers the schema
 from the Snapshot and requires no session extension or plugin.
@@ -108,7 +113,7 @@ These examples use `fs.use_iam=true`: the native storage library obtains AWS
 credentials from its credential chain, such as process environment credentials
 or a workload IAM role. Make that identity available to both the driver and
 executors. For access-key authentication and other providers, see
-[storage options](#snapshot-and-storage).
+[storage authentication](docs/reference.md#22-storage-location-and-credentials).
 
 ### Scala
 
@@ -180,6 +185,67 @@ Vector fields are available as column values; the default read converts most
 vector types into Spark arrays or maps. See
 [supported types](docs/reference.md#supported-data-types).
 
+## Updating Snapshot data
+
+Use a DataFrame to update existing fields in the data represented by a Snapshot.
+The connector takes the final column values, writes new Milvus column files,
+commits manifest revisions and publishes a write receipt. The `replace_columns`
+operation replaces field values while preserving row count and row identities.
+
+Read in physical mode when computing values to write back. This includes every
+stored row, even rows marked deleted. Set `milvus.read.include_row_id=true` to
+add `_milvus_row_id` and preserve each row's identity. The write must receive
+every stored row exactly once.
+
+For example, trim an existing, unindexed string field named `description`.
+Place this inside the Scala example's `try` block, using its `spark` and
+`snapshotOptions`:
+
+```scala
+import org.apache.spark.sql.functions.{col, trim}
+
+val source = spark.read
+  .format("milvus")
+  .options(snapshotOptions)
+  .option("milvus.read.mode", "physical")
+  .option("milvus.read.include_row_id", "true")
+  .load()
+
+val prepared = source.select(
+  col("_milvus_row_id"),
+  trim(col("description")).as("description")
+)
+
+val resultPath = "s3://example-bucket/column-writes/normalize-description-001"
+prepared.write
+  .format("milvus")
+  .options(snapshotOptions)
+  .option("milvus.write.operation", "replace_columns")
+  .mode("append")
+  .save(resultPath)
+
+val receipt = spark.read
+  .format("milvus")
+  .options(snapshotOptions)
+  .option("milvus.read.mode", "write_result")
+  .load(resultPath)
+receipt.show(false)
+```
+
+The required `.mode("append")` writes new result files and revisions; it does
+not append rows to the collection.
+
+Use a new result path for each write and grant the required storage write
+permissions. Preserve `_milvus_row_id` unchanged and keep every row, including
+rows whose values stay unchanged. Key fields, indexed fields and some
+Milvus-managed fields cannot be replaced; see the
+[column replacement guide](docs/column-replacement.md) for eligible fields,
+joining external updates, permissions and failure recovery.
+
+The receipt identifies the committed revisions. The original Snapshot keeps
+reading its original values; your application owns submission to Milvus and
+online visibility of the replacements.
+
 ## Running your application
 
 ### Resolve dependencies with `--packages`
@@ -231,118 +297,6 @@ platform-specific entry JARs rely on their Maven dependencies; passing only an
 entry JAR to `--jars` does not install the connector. Thin deployments also need
 their declared JVM dependencies; see
 [artifact selection](docs/releasing.md#using-release-artifacts).
-
-## Supported options
-
-Pass connector settings with `.option("key", "value")` or `.options(...)` on
-the reader or writer, before `.load()` or `.save()`. Use the lowercase storage
-keys shown below. These are DataSource options, not Spark session settings.
-
-Start with the Snapshot and storage settings from the example. The other read
-options are optional; their defaults suit an ordinary read. The
-[Reference](docs/reference.md#2-milvus-format-parameters) lists every connector
-option, including empty Snapshot inputs and advanced storage configuration.
-
-### Snapshot and storage
-
-| Option | What to set |
-|---|---|
-| `milvus.snapshot.path` | Path to the existing Snapshot JSON, for example `s3://example-bucket/snapshots/fixed.json`. Required for a nonempty Snapshot. |
-| `fs.bucket_name` | Bucket name if the path is a bucket-relative key. Omit it when the Snapshot URI already supplies the bucket. |
-| `fs.address` | Object-storage endpoint, for example `s3.us-west-2.amazonaws.com`. Required for remote storage after configuration is resolved. |
-| `fs.cloud_provider` | Storage backend; use `aws` for S3. Other providers are listed in the Reference. |
-| `fs.region` | Your bucket's region, for example `us-west-2`. |
-| `fs.use_ssl` | `true` for HTTPS; `false` for an HTTP endpoint. Set it explicitly to match your endpoint. |
-| `fs.use_iam` | `true` to obtain credentials through the native storage credential chain. Make credentials available to driver and executors. |
-| `fs.access_key_id`, `fs.access_key_value` | For static-key authentication, supply both and set `fs.use_iam=false`. Load secrets from your runtime rather than hardcoding them. |
-
-For local files, AssumeRole, path-style endpoints, Hadoop credential translation
-and the remaining `fs.*` settings, see the
-[storage reference](docs/reference.md#22-storage-location-and-credentials).
-When using static keys, also apply its Spark log-redaction setting.
-
-### Reading data
-
-| Option | Default | When to change it |
-|---|---|---|
-| `milvus.partitions`, `milvus.segments` | All | Select comma-separated numeric partition or segment IDs from the Snapshot. |
-| `fieldIDs` | All collection fields | Select numeric Milvus field IDs. For application code, Spark `.select(...)` is usually simpler. |
-| `milvus.filter` | Unset | Apply a supported Milvus scalar expression, such as `category == 1`. You can also use Spark `.where(...)`. |
-| `milvus.extra.columns` | None | Add any of `_segment_id`, `_row_offset`, `_timestamp`, separated by commas. |
-| `milvus.read.mode` | Unset | Leave unset to read rows visible in the Snapshot. Use `physical` for column replacement, or `write_result` to read a write receipt. |
-| `milvus.read.include_row_id` | `false` | Set `true` with `physical` to add `_milvus_row_id`, which identifies each stored row for writing back. |
-| `milvus.read.apply.deletes` | `true`; `false` in physical mode | Set `false` to include rows marked deleted. Physical mode cannot use `true`. |
-| `milvus.read.vector.raw` | `false` | Set `true` to return stored vector bytes as binary columns instead of decoding them into Spark values. |
-| `milvus.read.columnar` | `true` | Set `false` to deliver rows individually instead of Arrow batches. |
-| `milvus.read.batch.max.rows` | `8192` | Limit the rows requested per native batch. |
-| `milvus.read.batch.max.bytes` | `33554432` (32 MiB) | Set the target byte limit per native batch. |
-| `milvus.read.arrow.max.bytes` | `Long.MaxValue` | Cap the Arrow allocator for each read task; this does not cap all native memory. |
-
-See [read option details](docs/reference.md#23-data-operation-parameters) for
-accepted values, limits and filter syntax. For an ordinary Snapshot read, use
-`.option("milvus.snapshot.path", ...).load()`; `.load(path)` is reserved for
-reading a write receipt.
-
-### Writing columns
-
-Set `milvus.write.operation=replace_columns`, provide the original
-`milvus.snapshot.path` and storage options, then use
-`.mode("append").save(resultPath)`. The DataFrame columns identify what to
-replace. The example below shows the full flow; the
-[write options guide](docs/column-replacement.md#write-options) explains the
-accepted settings and restrictions.
-
-## Replacing columns
-
-Read in physical mode when computing values to write back. This includes every
-stored row, even rows marked deleted, and adds `_milvus_row_id` to preserve each
-row's identity. The write must receive every stored row exactly once.
-
-For example, inside a Spark application with `spark` and `snapshotOptions` from
-the Scala example, normalize an existing, unindexed string field named
-`description`:
-
-```scala
-import org.apache.spark.sql.functions.{col, trim}
-
-val source = spark.read
-  .format("milvus")
-  .options(snapshotOptions)
-  .option("milvus.read.mode", "physical")
-  .option("milvus.read.include_row_id", "true")
-  .load()
-
-val prepared = source.select(
-  col("_milvus_row_id"),
-  trim(col("description")).as("description")
-)
-
-val resultPath = "s3://example-bucket/column-writes/normalize-description-001"
-prepared.write
-  .format("milvus")
-  .options(snapshotOptions)
-  .option("milvus.write.operation", "replace_columns")
-  .mode("append")
-  .save(resultPath)
-
-val receipt = spark.read
-  .format("milvus")
-  .options(snapshotOptions)
-  .option("milvus.read.mode", "write_result")
-  .load(resultPath)
-receipt.show(false)
-```
-
-Use a new result path for each write and grant the required storage write
-permissions. Preserve `_milvus_row_id` unchanged and keep every row, including
-rows whose values stay unchanged. Key fields, indexed fields and some
-Milvus-managed fields cannot be replaced; see the
-[column replacement guide](docs/column-replacement.md) for eligible fields,
-joining external updates, permissions and failure recovery.
-
-The receipt identifies the committed revisions. The original Snapshot keeps
-reading its original values; your application owns submission to Milvus and
-online visibility of the replacements.
 
 ## Documents
 
