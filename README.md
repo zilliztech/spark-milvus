@@ -5,9 +5,15 @@ existing Milvus **Snapshot** directly from object storage into a DataFrame, so
 you can join it with other datasets, analyze scalar and vector fields, and run
 batch transformations with Spark SQL, Scala or PySpark.
 
-You can also write computed values back to existing, eligible columns. The
-connector writes new manifest revisions and publishes a receipt; your application
-handles registration with Milvus and making those revisions visible online.
+A Snapshot describes the collection's data at a fixed point in time. You provide
+its JSON file path and storage credentials; the connector discovers the schema
+and reads the referenced files without querying a running Milvus service.
+
+To get started, [add the dependency](#installing),
+[read your Snapshot](#using-the-connector) and
+[submit the application](#running-your-application). For more control, see
+[supported options](#supported-options). You can also
+[replace existing columns](#replacing-columns) with values computed in Spark.
 
 This guide covers the 3.0 connector line for Milvus 3.0. Earlier releases do not
 provide this API. Installation examples use `<published-3.0-version>`: replace
@@ -94,13 +100,15 @@ package to install.
 The connector is a Spark DataSource named `milvus`. It discovers the schema
 from the Snapshot and requires no session extension or plugin.
 
-The following examples read an existing Snapshot from S3. Replace the path,
-bucket, region and field names with your own. With `fs.use_iam=true`, configure
-the native storage credential chain in both driver and executor processes.
-These options are independent of Hadoop credentials used by your application's
-other data sources. See the
-[storage options](docs/reference.md#22-storage-location-and-credentials) for
-other authentication methods and providers.
+Choose either the Scala or PySpark example below. Both print the schema and
+five rows from your Snapshot. Replace the S3 path, endpoint and region with
+your own values; the bucket is part of the `s3://` path.
+
+These examples use `fs.use_iam=true`: the native storage library obtains AWS
+credentials from its credential chain, such as process environment credentials
+or a workload IAM role. Make that identity available to both the driver and
+executors. For access-key authentication and other providers, see
+[storage options](#snapshot-and-storage).
 
 ### Scala
 
@@ -109,17 +117,14 @@ Maven or sbt project:
 
 ```scala
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.functions.col
 
 object ReadMilvus {
   def main(args: Array[String]): Unit = {
     val spark = SparkSession.builder().appName("Read Milvus Snapshot").getOrCreate()
     try {
       val snapshotOptions = Map(
-        "milvus.snapshot.path" -> "snapshots/fixed.json",
-        "fs.storage_type" -> "remote",
+        "milvus.snapshot.path" -> "s3://example-bucket/snapshots/fixed.json",
         "fs.cloud_provider" -> "aws",
-        "fs.bucket_name" -> "example-bucket",
         "fs.address" -> "s3.us-west-2.amazonaws.com",
         "fs.region" -> "us-west-2",
         "fs.use_ssl" -> "true",
@@ -127,7 +132,8 @@ object ReadMilvus {
       )
 
       val rows = spark.read.format("milvus").options(snapshotOptions).load()
-      rows.where(col("category") === 1).select("id", "embedding").show(false)
+      rows.printSchema()
+      rows.show(5)
     } finally {
       spark.stop()
     }
@@ -141,15 +147,12 @@ Save this as `read_milvus.py`:
 
 ```python
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col
 
 spark = SparkSession.builder.appName("Read Milvus Snapshot").getOrCreate()
 try:
     snapshot_options = {
-        "milvus.snapshot.path": "snapshots/fixed.json",
-        "fs.storage_type": "remote",
+        "milvus.snapshot.path": "s3://example-bucket/snapshots/fixed.json",
         "fs.cloud_provider": "aws",
-        "fs.bucket_name": "example-bucket",
         "fs.address": "s3.us-west-2.amazonaws.com",
         "fs.region": "us-west-2",
         "fs.use_ssl": "true",
@@ -157,38 +160,52 @@ try:
     }
 
     rows = spark.read.format("milvus").options(**snapshot_options).load()
-    rows.where(col("category") == 1).select("id", "embedding").show(truncate=False)
+    rows.printSchema()
+    rows.show(5)
 finally:
     spark.stop()
 ```
 
-Use the returned DataFrame with ordinary Spark operations: select fields,
-filter rows, join another DataFrame, create a SQL temporary view or write to a
-format supported by your Spark application. Vector fields are available as
-column values. See [supported types and read options](docs/reference.md).
+Once the read works, use the returned DataFrame with ordinary Spark operations:
+select fields, filter rows, join another DataFrame or write to another format.
+For example, if your collection has `id`, `category` and `embedding` fields,
+add this after `rows.show(5)` inside the `try` block (the syntax works in both):
+
+```python
+rows.createOrReplaceTempView("milvus_snapshot")
+spark.sql("SELECT id, embedding FROM milvus_snapshot WHERE category = 1").show()
+```
+
+Vector fields are available as column values; the default read converts most
+vector types into Spark arrays or maps. See
+[supported types](docs/reference.md#supported-data-types).
 
 ## Running your application
 
 ### Resolve dependencies with `--packages`
 
-For a Linux x86_64 driver and workers, submit the PySpark example with:
+For a first run on a Linux x86_64 machine with Spark 4.0 installed, run the
+PySpark example locally:
 
 ```bash
 export RELEASE_VERSION='<published-3.0-version>'
 export LD_PRELOAD="$JAVA_HOME/lib/libjsig.so"
 
 "$SPARK_HOME/bin/spark-submit" \
+  --master 'local[2]' \
   --packages "com.zilliz:spark-milvus-4.0-linux-x86_64_2.13:$RELEASE_VERSION" \
-  --conf "spark.executorEnv.LD_PRELOAD=/path/on/workers/to/jdk/lib/libjsig.so" \
   read_milvus.py
 ```
 
 For the Scala example, use the same dependency and runtime settings, replacing
 `read_milvus.py` with `--class ReadMilvus /path/to/your-application.jar`.
 
+For a cluster run, replace `local[2]` with your cluster's master and set
+`--conf spark.executorEnv.LD_PRELOAD=/path/on/workers/to/jdk/lib/libjsig.so`.
 Each JVM must preload its own JRE's signal library before startup. The export
 above configures a Linux client-mode driver; a remote driver needs the setting
-in its own environment too. On macOS, use that JRE's `lib/libjsig.dylib` through
+in its own environment too. On macOS, use the `darwin-aarch64` artifact and
+that JRE's `lib/libjsig.dylib` through
 `DYLD_INSERT_LIBRARIES` on the JVM. The native loader also needs a writable
 extraction directory that permits shared-library loading. See
 [cluster setup](docs/cluster-setup.md#prepare-every-driver-and-executor) for
@@ -215,6 +232,66 @@ entry JAR to `--jars` does not install the connector. Thin deployments also need
 their declared JVM dependencies; see
 [artifact selection](docs/releasing.md#using-release-artifacts).
 
+## Supported options
+
+Pass connector settings with `.option("key", "value")` or `.options(...)` on
+the reader or writer, before `.load()` or `.save()`. Use the lowercase storage
+keys shown below. These are DataSource options, not Spark session settings.
+
+Start with the Snapshot and storage settings from the example. The other read
+options are optional; their defaults suit an ordinary read. The
+[Reference](docs/reference.md#2-milvus-format-parameters) lists every connector
+option, including empty Snapshot inputs and advanced storage configuration.
+
+### Snapshot and storage
+
+| Option | What to set |
+|---|---|
+| `milvus.snapshot.path` | Path to the existing Snapshot JSON, for example `s3://example-bucket/snapshots/fixed.json`. Required for a nonempty Snapshot. |
+| `fs.bucket_name` | Bucket name if the path is a bucket-relative key. Omit it when the Snapshot URI already supplies the bucket. |
+| `fs.address` | Object-storage endpoint, for example `s3.us-west-2.amazonaws.com`. Required for remote storage after configuration is resolved. |
+| `fs.cloud_provider` | Storage backend; use `aws` for S3. Other providers are listed in the Reference. |
+| `fs.region` | Your bucket's region, for example `us-west-2`. |
+| `fs.use_ssl` | `true` for HTTPS; `false` for an HTTP endpoint. Set it explicitly to match your endpoint. |
+| `fs.use_iam` | `true` to obtain credentials through the native storage credential chain. Make credentials available to driver and executors. |
+| `fs.access_key_id`, `fs.access_key_value` | For static-key authentication, supply both and set `fs.use_iam=false`. Load secrets from your runtime rather than hardcoding them. |
+
+For local files, AssumeRole, path-style endpoints, Hadoop credential translation
+and the remaining `fs.*` settings, see the
+[storage reference](docs/reference.md#22-storage-location-and-credentials).
+When using static keys, also apply its Spark log-redaction setting.
+
+### Reading data
+
+| Option | Default | When to change it |
+|---|---|---|
+| `milvus.partitions`, `milvus.segments` | All | Select comma-separated numeric partition or segment IDs from the Snapshot. |
+| `fieldIDs` | All collection fields | Select numeric Milvus field IDs. For application code, Spark `.select(...)` is usually simpler. |
+| `milvus.filter` | Unset | Apply a supported Milvus scalar expression, such as `category == 1`. You can also use Spark `.where(...)`. |
+| `milvus.extra.columns` | None | Add any of `_segment_id`, `_row_offset`, `_timestamp`, separated by commas. |
+| `milvus.read.mode` | Unset | Leave unset to read rows visible in the Snapshot. Use `physical` for column replacement, or `write_result` to read a write receipt. |
+| `milvus.read.include_row_id` | `false` | Set `true` with `physical` to add `_milvus_row_id`, which identifies each stored row for writing back. |
+| `milvus.read.apply.deletes` | `true`; `false` in physical mode | Set `false` to include rows marked deleted. Physical mode cannot use `true`. |
+| `milvus.read.vector.raw` | `false` | Set `true` to return stored vector bytes as binary columns instead of decoding them into Spark values. |
+| `milvus.read.columnar` | `true` | Set `false` to deliver rows individually instead of Arrow batches. |
+| `milvus.read.batch.max.rows` | `8192` | Limit the rows requested per native batch. |
+| `milvus.read.batch.max.bytes` | `33554432` (32 MiB) | Set the target byte limit per native batch. |
+| `milvus.read.arrow.max.bytes` | `Long.MaxValue` | Cap the Arrow allocator for each read task; this does not cap all native memory. |
+
+See [read option details](docs/reference.md#23-data-operation-parameters) for
+accepted values, limits and filter syntax. For an ordinary Snapshot read, use
+`.option("milvus.snapshot.path", ...).load()`; `.load(path)` is reserved for
+reading a write receipt.
+
+### Writing columns
+
+Set `milvus.write.operation=replace_columns`, provide the original
+`milvus.snapshot.path` and storage options, then use
+`.mode("append").save(resultPath)`. The DataFrame columns identify what to
+replace. The example below shows the full flow; the
+[write options guide](docs/column-replacement.md#write-options) explains the
+accepted settings and restrictions.
+
 ## Replacing columns
 
 Read in physical mode when computing values to write back. This includes every
@@ -240,7 +317,7 @@ val prepared = source.select(
   trim(col("description")).as("description")
 )
 
-val resultPath = "column-writes/normalize-description-001"
+val resultPath = "s3://example-bucket/column-writes/normalize-description-001"
 prepared.write
   .format("milvus")
   .options(snapshotOptions)
@@ -271,7 +348,7 @@ online visibility of the replacements.
 
 | Document | Contents |
 |---|---|
-| [Reference](docs/reference.md) | Snapshot input, storage credentials, read options and supported types |
+| [Reference](docs/reference.md) | Supported options, defaults, storage credentials and data types |
 | [Column replacement](docs/column-replacement.md) | Physical reads, external updates, write results and recovery |
 | [Examples](demo/README.md) | More Python and Java snapshot reads and SQL |
 | [Cluster setup](docs/cluster-setup.md) | Driver and executor permissions, networking and native runtime |
