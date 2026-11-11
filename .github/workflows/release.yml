@@ -439,3 +439,43 @@ jobs:
           path: public-consumer-results/
           if-no-files-found: warn
           retention-days: 30
+
+  github-release:
+    name: Publish verified GitHub release downloads
+    needs: [identity, validate, public-consumer, image-manifest]
+    if: needs.identity.outputs.mode == 'publish'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.validate.outputs.candidate_artifact }}
+          path: candidate
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: assembly-linux-*
+          path: assemblies
+      - name: Prepare downloads from the tested files
+        env:
+          RELEASE_VERSION: ${{ needs.identity.outputs.version }}
+        run: |
+          python3 scripts/ci/github_release.py prepare --candidate candidate \
+            --assemblies assemblies --assets release-downloads \
+            --version "$RELEASE_VERSION" --source-sha "$(git rev-parse HEAD)"
+      - name: Complete the release without replacing existing assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.identity.outputs.version }}
+        run: |
+          python3 scripts/ci/github_release.py publish --assets release-downloads \
+            --version "$RELEASE_VERSION" --source-sha "$(git rev-parse HEAD)" \
+            --notes docs/release-notes/3.0.md

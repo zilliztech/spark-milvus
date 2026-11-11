@@ -14,7 +14,8 @@ ordinary data columns.
 Snapshot metadata must declare `format_version` 4 or 6. Missing and unsupported
 versions fail, including for empty snapshots. The 1.x line ended at `v1.6.0`.
 Connector versions follow Milvus releases; the 3.0 line targets Milvus 3.0.
-Test with a candidate produced from this source.
+Use a published 3.0 version, or a verified candidate produced from this source.
+Earlier release lines do not provide this API.
 
 ## Project structure
 
@@ -41,6 +42,59 @@ Build with Java 21. Spark 3.5 Arrow tests use Java 17 through
 `SPARK35_TEST_JAVA_HOME`. Reader thin
 candidates cover the source matrix; fat distribution consumers cover 4.0/4.2.
 
+## Installing
+
+The examples below describe the 3.0 release artifacts. Replace
+`<published-3.0-version>` with a version listed in
+[GitHub Releases](https://github.com/zilliztech/spark-milvus/releases) after
+publication. A candidate built by CI is not automatically available on Maven
+Central or Docker Hub.
+
+For a Spark 4.0 / Scala 2.13 application, add the Maven dependency:
+
+```xml
+<dependency>
+  <groupId>com.zilliz</groupId>
+  <artifactId>spark-milvus-4.0_2.13</artifactId>
+  <version>&lt;published-3.0-version&gt;</version>
+</dependency>
+```
+
+Or use sbt:
+
+```scala
+libraryDependencies += "com.zilliz" % "spark-milvus-4.0_2.13" % "<published-3.0-version>"
+```
+
+This universal entry resolves the connector JVM implementation and all released
+native platforms. For a Linux x86_64 deployment, use
+`spark-milvus-4.0-linux-x86_64_2.13` to resolve only that platform. Spark itself
+is supplied by the application or cluster. See the
+[artifact selection guide](docs/releasing.md#using-release-artifacts) for Spark
+4.2, thin modules and platform requirements.
+
+An existing Spark application can resolve the same dependency with `--packages`:
+
+```bash
+export RELEASE_VERSION='<published-3.0-version>'
+export LD_PRELOAD="$JAVA_HOME/lib/libjsig.so"
+"$SPARK_HOME/bin/spark-submit" \
+  --packages "com.zilliz:spark-milvus-4.0-linux-x86_64_2.13:$RELEASE_VERSION" \
+  --conf "spark.executorEnv.LD_PRELOAD=/path/on/workers/to/jdk/lib/libjsig.so" \
+  your_application.py
+```
+
+Use the running JRE's signal library on each driver and executor. The command
+above targets a Linux client-mode driver; see [cluster setup](docs/cluster-setup.md)
+for remote drivers and storage access.
+
+For direct `--jars` use, download a matching assembly and its checksums from the
+[release assets](https://github.com/zilliztech/spark-milvus/releases), or build
+one below. The small Maven entry JAR is not an assembly: downloading it alone
+does not bring its dependencies. The [JAR download guide](docs/releasing.md#jar-downloads)
+explains the available files. For containers, use the
+[Docker image guide](docker/README.md#run-a-release-image).
+
 ## Building
 
 ```bash
@@ -57,9 +111,8 @@ native toolchain, signal chaining, formatting and required checks.
 
 ## Using the connector
 
-Supply the assembly with `spark-submit --jars` and configure the running JRE's
-`libjsig` for the driver and executors. No connector session extension or plugin
-is required for reads.
+Install the connector as above, or supply an assembly with `spark-submit --jars`.
+No connector session extension or plugin is required for reads.
 
 ```scala
 val snapshotOptions = Map(
@@ -101,6 +154,7 @@ Registering the new revisions with Milvus stays with the caller. Read
 | [Cluster setup](docs/cluster-setup.md) | Runtime, identities and networking |
 | [Contributing](docs/contributing.md) | Build, formatting and test requirements |
 | [Releasing](docs/releasing.md) | Candidate closure, CI gates and release procedure |
+| [3.0 release notes](docs/release-notes/3.0.md) | Capabilities and migration from earlier versions |
 | [Native build](native/build/README.md) | Native platform build and manifest |
 
 ## License

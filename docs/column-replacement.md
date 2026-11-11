@@ -51,12 +51,15 @@ prepared.write
 // One row per committed segment: the revision each segment moved to.
 val result = spark.read
   .format("milvus")
+  .options(snapshot)
   .option("milvus.read.mode", "write_result")
   .load("s3a://example-bucket/column-writes/run-42")
 ```
 
 The source snapshot is not changed and keeps reading the old values. A snapshot
 taken after the new revisions are registered reads the new ones.
+The receipt reader needs the storage options too: each read resolves its own
+storage identity, and the driver must have read access to the result address.
 
 ## What the DataFrame must contain
 

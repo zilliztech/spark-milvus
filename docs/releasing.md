@@ -25,6 +25,83 @@ checksum before loading. Supply exactly one complete platform bundle; do not
 combine overlapping platform JARs. Public native artifacts contain only the
 Storage component.
 
+## Using release artifacts
+
+The coordinates and URLs below describe the 3.0 delivery contract. Installation
+commands require a version published to the corresponding Maven, GitHub or
+Docker repository. Choose a published version from
+[GitHub Releases](https://github.com/zilliztech/spark-milvus/releases), then use
+that same version for every connector artifact. CI candidates are separate from
+public releases.
+
+All Maven artifacts use group `com.zilliz`. For the bundled distribution,
+`<line>` is `4.0` or `4.2`, and `<platform>` is `linux-x86_64`,
+`linux-aarch64` or `darwin-aarch64`.
+
+| Artifact ID | Use |
+|---|---|
+| `spark-milvus-<line>_2.13` | Universal dependency entry: resolves the JVM artifact and all released native platforms; the loader selects the current platform. |
+| `spark-milvus-<line>-<platform>_2.13` | Platform dependency entry: resolves the JVM artifact and one native platform. |
+| `spark-milvus-<line>-jvm_2.13` | Bundled JVM implementation, without the Milvus platform libraries; Spark dependencies are provided by the application or cluster. |
+| `spark-milvus-native-<platform>` | Storage native libraries, dependencies, provenance and licenses for one platform. |
+| `spark-milvus-<line>-thin_<scala-binary>` | Unbundled connector classes with dependencies on `core`, `native-storage` and `native-runtime`; add a matching native platform separately. |
+
+Thin coordinates cover Spark `3.5` with Scala `2.12` or `2.13`, and Spark
+`4.0`, `4.1` and `4.2` with Scala `2.13`. They are useful for downstream
+libraries that manage their own dependencies. Do not combine thin modules with
+the bundled JVM or assembly JARs, which contain the same connector classes.
+Sources and Javadoc accompany the Maven artifacts.
+
+Resolve an entry with Maven, sbt or `spark-submit --packages`, as shown in
+[the installation examples](../README.md#installing). Entry JARs contain only
+delivery documentation: `--jars` does not resolve their POM dependencies.
+For `--jars`, use a complete assembly, or explicitly supply the JVM artifact
+and exactly one matching native platform JAR. Spark 3.5/4.1 thin deployments
+also need their declared JVM dependencies.
+
+Released native platforms target glibc Linux (Ubuntu 22.04 and 24.04 in the
+tested matrix, with a glibc 2.35 baseline) and Apple silicon on macOS 14 or later.
+They do not cover musl/Alpine or Windows. All driver and executor processes need
+a matching platform, a writable native extraction directory, and their own JRE's signal
+library. Linux uses `LD_PRELOAD` with `lib/libjsig.so`; macOS uses
+`DYLD_INSERT_LIBRARIES` with `lib/libjsig.dylib`, passed to the JVM rather than
+system shell utilities. See [cluster setup](cluster-setup.md) for Linux
+deployment requirements.
+
+### JAR downloads
+
+Each GitHub Release attaches the tested Spark 4.0 / Scala 2.13 assemblies for
+Linux x86_64 and aarch64. These contain the JVM implementation and the native
+bundle for one architecture. Select the same architecture on the driver and
+executors. For example, after publication:
+
+```bash
+export RELEASE_VERSION='<published-3.0-version>'
+platform=linux-x86_64  # use linux-aarch64 for ARM64
+jar="spark-milvus-4.0-bundle-$RELEASE_VERSION-$platform.jar"
+base="https://github.com/zilliztech/spark-milvus/releases/download/v$RELEASE_VERSION"
+curl --fail --location --output "$jar" "$base/$jar"
+curl --fail --location --output SHA256SUMS "$base/SHA256SUMS"
+sha256sum --check --ignore-missing SHA256SUMS
+export LD_PRELOAD="$JAVA_HOME/lib/libjsig.so"
+"$SPARK_HOME/bin/spark-submit" \
+  --jars "$jar" \
+  --conf "spark.executorEnv.LD_PRELOAD=/path/on/workers/to/jdk/lib/libjsig.so" \
+  your_application.py
+```
+
+The release also includes `release-manifest.json` and each assembly's manifest
+with source identity and checksums. A checksum check validates the downloaded
+bytes; use the release's source tag and CI results to inspect their provenance.
+Spark 4.2 and macOS consumers use the Maven artifacts; these GitHub assets do
+not include fat assemblies for those combinations. Individual JVM and native
+JARs can also be downloaded from the
+[Maven Central repository](https://repo.maven.apache.org/maven2/com/zilliz/).
+
+The same tested Linux assemblies are packaged in the multi-architecture image
+`milvusdb/spark-milvus:<version>-spark4.0`. See
+[the container guide](../docker/README.md#run-a-release-image).
+
 ## Build a candidate
 
 CI assigns `3.0.0-rc.<run-id>.<producing-attempt>` and rejects coordinates
@@ -37,7 +114,7 @@ Rerun all jobs or dispatch a new run when producing a replacement candidate;
 consumers bind the exact artifact ID and digest they accepted. Development
 snapshots remain isolated by branch and architecture.
 
-`project/public-packages.txt` declares package ownership for the five modules.
+`project/public-packages.txt` declares package ownership for the four modules.
 Thin artifacts may contain only their owner's classes and sources; reader JVM
 bundles may contain the reader modules and their declared dependencies. Update
 a package's responsibility statement before changing this positive contract.
@@ -87,9 +164,13 @@ under a prefix-scoped identity. The write must commit revisions that read back;
 a mocked manifest is not runtime evidence.
 
 Candidate consumers resolve the selected artifacts in isolated projects and
-run with independent executors. Reader consumers assert fixed V3 rows,
-projection, deletes, empty results and repeated actions. Linux
-image jobs run the exact reader assembly.
+run with independent executors. All nine acceptance checks must pass: executor
+isolation, fixed V3 rows, projection and deletes, empty results, repeated actions,
+physical row identities, a column-replacement receipt, readback of the committed
+revisions, and an unchanged source snapshot. Readback compares fixed expected
+values, including NULLs, unchanged vectors and deleted rows. The consumer pins
+the returned revisions in a separate snapshot for this check; it does not
+register them with Milvus. Linux image jobs run the exact reader assembly.
 
 Required GitHub check names must match the workflow after the migration. A
 workflow file cannot update repository rules, environment secrets or approval
@@ -122,11 +203,19 @@ Preserve every character that belongs to the credential itself, and do not log
 or commit the value while checking it.
 
 A maintainer must configure the `maven-central` GitHub environment with required
-reviewers, a deployment policy limited to `v3.*` tags and the four secrets
-above; committing the workflow does not configure GitHub environments. Protect
+reviewers, a deployment policy allowing `v3.*` tags and the four secrets
+above. Retain any policies still needed for older release lines; committing the
+workflow does not configure GitHub environments. Protect
 creation, replacement and deletion of `v3.*` tags and ensure releases point to
 reviewed commits. Restrict tag bypass and environment administration
 appropriately.
+
+Configure the `docker-hub` environment with `DOCKERHUB_USER` and
+`DOCKERHUB_TOKEN`, a deployment policy allowing `v3.*` tags alongside any
+retained older-release tag policies, and the intended reviewers. The account
+must be able to push to `milvusdb/spark-milvus`.
+Repository existence, public pull access and credential validity must be checked
+before publication; the workflow configuration alone does not prove them.
 
 Release accepts `v3.x.y` tags and prereleases such as `v3.0.0-rc.1`. It verifies
 that the candidate source commit is the tagged commit, then enters the
@@ -148,7 +237,7 @@ promotion endpoint, so it does not create a public Maven version. The test
 report records the deployment ID for manual cleanup if the runner stops before
 deletion.
 
-The equivalent final commands, with the signing key already imported and
+The equivalent Central commands, with the signing key already imported and
 credentials provided by a trusted environment, are:
 
 ```bash
@@ -178,7 +267,7 @@ Omit `--report` if that file is unavailable.
 
 After publication, the workflow downloads every manifest-listed file from
 Central and checks its digest, then consumes both entries again with fresh
-caches on Ubuntu 22.04 x86_64 / Spark 4.0. The full eight-job matrix runs before
+caches on Ubuntu 22.04 x86_64 / Spark 4.0. The full consumer matrix runs before
 publication; this final public check verifies the published delivery path.
 Locally, the corresponding commands are:
 
@@ -188,3 +277,11 @@ python3 scripts/release.py download-public --candidate target/release-candidate 
 python3 scripts/ci/consumer_smoke.py --candidate target/public-candidate \
   --line 4.0 --platform linux-x86_64 --central --output target/public-consumer
 ```
+
+The release workflow also pushes both Linux image architectures, then creates
+`<version>-spark4.0`; only final versions update `latest`. The GitHub Release
+becomes visible after the public Central consumer and image publication succeed.
+It uses [the 3.0 release notes](release-notes/3.0.md), substituting the actual
+version for `{{VERSION}}`, and attaches the tested assemblies, manifests and
+`SHA256SUMS`. This GitHub publication step does not rebuild JARs. A Central test
+tag does not publish images or create a public GitHub Release.

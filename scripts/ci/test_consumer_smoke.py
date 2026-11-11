@@ -336,6 +336,19 @@ class ConsumerDiagnosticsTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "did not finish"):
             consumer.completed_checks("\n".join(lines))
 
+    def test_read_only_success_cannot_satisfy_column_replacement_acceptance(self):
+        read_checks = ("independent-executor", "v3-snapshot", "v3-advanced",
+                       "v3-empty", "repeated-actions")
+        read_only = "\n".join(f"MILVUS_CHECK\t{name}\tpassed" for name in read_checks)
+        with self.assertRaisesRegex(RuntimeError, "omitted"):
+            consumer.completed_checks(read_only + "\nALL PASS\n")
+        for missing in ("physical-read", "column-replacement-receipt",
+                        "column-replacement-readback", "source-snapshot-unchanged"):
+            incomplete = "\n".join(f"MILVUS_CHECK\t{name}\tpassed"
+                                   for name in consumer.REQUIRED_CHECKS if name != missing)
+            with self.subTest(missing=missing), self.assertRaisesRegex(RuntimeError, "omitted"):
+                consumer.completed_checks(incomplete + "\nALL PASS\n")
+
 
 class ReadFixtureTest(unittest.TestCase):
     def setUp(self):
@@ -407,10 +420,10 @@ class ReadFixtureTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "fixtures differ"):
             consumer.verify_fixture_jar(self.jar(substituted=True), self.resources())
 
-    def test_public_consumer_only_compiles_the_read_entry_and_integrity_helper(self):
+    def test_public_consumer_only_compiles_the_artifact_entry_and_integrity_helper(self):
         self.assertEqual([Path(path).stem for path in consumer.FIXTURES],
-                         ["ReadOnlyConsumerSmoke", "ReadFixtures"])
-        self.assertTrue(consumer.MAIN.endswith(".ReadOnlyConsumerSmoke"))
+                         ["ArtifactConsumerSmoke", "ReadFixtures"])
+        self.assertTrue(consumer.MAIN.endswith(".ArtifactConsumerSmoke"))
 
 
 if __name__ == "__main__":
