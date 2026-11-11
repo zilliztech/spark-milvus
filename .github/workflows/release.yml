@@ -12,10 +12,6 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  # Docker Hub repository that receives the Spark 4.0 image of each release.
-  IMAGE_REPOSITORY: milvusdb/spark-milvus
-
 jobs:
   identity:
     if: github.repository == 'zilliztech/spark-milvus'
@@ -194,94 +190,6 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
-
-  image:
-    name: Publish the Spark 4.0 image (${{ matrix.platform }})
-    needs: [identity, validate, publish]
-    if: needs.identity.outputs.mode == 'publish'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux-x86_64
-            runner: ubuntu-22.04
-          - platform: linux-aarch64
-            runner: ubuntu-22.04-arm
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    environment: docker-hub
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Require the fully validated candidate
-        env:
-          CANDIDATE_ARTIFACT: ${{ needs.validate.outputs.candidate_artifact }}
-        run: test -n "$CANDIDATE_ARTIFACT"
-      - uses: actions/download-artifact@v4
-        with:
-          name: assembly-${{ matrix.platform }}
-          path: assembly-input
-      - name: Verify the tested assembly before accessing credentials
-        id: assembly
-        env:
-          RELEASE_VERSION: ${{ needs.identity.outputs.version }}
-          NATIVE_PLATFORM: ${{ matrix.platform }}
-        run: |
-          python3 scripts/ci/assembly_image.py verify --input assembly-input \
-            --platform "$NATIVE_PLATFORM" --version "$RELEASE_VERSION" \
-            --source-sha "$(git rev-parse HEAD)" --github-output "$GITHUB_OUTPUT"
-      - name: Log in to Docker Hub
-        env:
-          DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USER }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USER" --password-stdin
-      - name: Build and push the platform image
-        env:
-          ASSEMBLY: ${{ steps.assembly.outputs.assembly }}
-          DOCKER_PLATFORM: ${{ steps.assembly.outputs.docker_platform }}
-          IMAGE: ${{ env.IMAGE_REPOSITORY }}:${{ steps.assembly.outputs.image_tag }}
-        run: |
-          ./docker/build.sh --assembly "$ASSEMBLY" --image "$IMAGE" \
-            --platform "$DOCKER_PLATFORM" --push
-      - name: Log out of Docker Hub
-        if: always()
-        run: docker logout
-
-  image-manifest:
-    name: Publish the multi-architecture image tag
-    needs: [identity, image]
-    if: needs.identity.outputs.mode == 'publish'
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    environment: docker-hub
-    steps:
-      - name: Log in to Docker Hub
-        env:
-          DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USER }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USER" --password-stdin
-      - name: Combine both platform images under the release tag
-        env:
-          RELEASE_VERSION: ${{ needs.identity.outputs.version }}
-        run: |
-          tag="$IMAGE_REPOSITORY:$RELEASE_VERSION-spark4.0"
-          docker buildx imagetools create --tag "$tag" "$tag-amd64" "$tag-arm64"
-          docker buildx imagetools inspect "$tag" > manifest.txt
-          cat manifest.txt
-          grep -q 'Platform: *linux/amd64' manifest.txt
-          grep -q 'Platform: *linux/arm64' manifest.txt
-          # Only a final version moves latest; a prerelease never replaces it.
-          if [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            docker buildx imagetools create --tag "$IMAGE_REPOSITORY:latest" "$tag"
-            docker buildx imagetools inspect "$IMAGE_REPOSITORY:latest" | grep -q 'Platform: *linux/arm64'
-          fi
-      - name: Log out of Docker Hub
-        if: always()
-        run: docker logout
 
   central-test:
     needs: [identity, validate]

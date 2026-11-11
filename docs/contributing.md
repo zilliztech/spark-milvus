@@ -211,8 +211,8 @@ cross-version checks, integration tests, native
 builds and publication follow the task's scope and authorization.
 
 CI runs `python3 -m unittest discover -s native/build -p 'test_*.py'` plus the
-same discovery over `scripts/tests`; run them when touching `native/build/`
-or `docker/`, whose image build test lives there.
+same discovery over `scripts/tests`; run them when touching native build or
+release scripts.
 Python examples live in `demo/python`, Java examples in
 `demo/java/src/main/java/com/zilliz/spark/connector/demo`, and helper/launcher
 tests in `demo/tests`. After changing a demo, run

@@ -28,7 +28,7 @@ Storage component.
 ## Using release artifacts
 
 The coordinates and URLs below describe the 3.0 delivery contract. Installation
-commands require a version published to Maven Central or Docker Hub. Choose a
+commands require a version published to Maven Central. Choose a
 published version from
 [GitHub Releases](https://github.com/zilliztech/spark-milvus/releases), then use
 that same version for every connector artifact. CI candidates are separate from
@@ -62,16 +62,14 @@ Spark 3.5/4.1 thin deployments also need their declared JVM dependencies.
 
 Released native platforms target glibc Linux (Ubuntu 22.04 and 24.04 in the
 tested matrix, with a glibc 2.35 baseline) and Apple silicon on macOS 14 or later.
+Linux also needs a system `libstdc++` providing `GLIBCXX_3.4.30` and
+`CXXABI_1.3.13` (GCC 12's runtime or newer); it is not bundled in the native JAR.
 They do not cover musl/Alpine or Windows. All driver and executor processes need
 a matching platform, a writable native extraction directory, and their own JRE's signal
 library. Linux uses `LD_PRELOAD` with `lib/libjsig.so`; macOS uses
 `DYLD_INSERT_LIBRARIES` with `lib/libjsig.dylib`, passed to the JVM rather than
 system shell utilities. See [cluster setup](cluster-setup.md) for Linux
 deployment requirements.
-
-Tested Linux assemblies are packaged in the multi-architecture image
-`milvusdb/spark-milvus:<version>-spark4.0`. See
-[the container guide](../docker/README.md#run-a-release-image).
 
 ## Build a candidate
 
@@ -141,7 +139,9 @@ physical row identities, a column-replacement receipt, readback of the committed
 revisions, and an unchanged source snapshot. Readback compares fixed expected
 values, including NULLs, unchanged vectors and deleted rows. The consumer pins
 the returned revisions in a separate snapshot for this check; it does not
-register them with Milvus. Linux image jobs run the exact reader assembly.
+register them with Milvus. Linux assembly jobs build and verify a standalone
+JAR from the audited native bundle, then run Python and Java reads with that
+JAR on the host Spark runtime.
 
 Required GitHub check names must match the workflow after the migration. A
 workflow file cannot update repository rules, environment secrets or approval
@@ -180,13 +180,6 @@ workflow does not configure GitHub environments. Protect
 creation, replacement and deletion of `v3.*` tags and ensure releases point to
 reviewed commits. Restrict tag bypass and environment administration
 appropriately.
-
-Configure the `docker-hub` environment with `DOCKERHUB_USER` and
-`DOCKERHUB_TOKEN`, a deployment policy allowing `v3.*` tags alongside any
-retained older-release tag policies, and the intended reviewers. The account
-must be able to push to `milvusdb/spark-milvus`.
-Repository existence, public pull access and credential validity must be checked
-before publication; the workflow configuration alone does not prove them.
 
 Release accepts `v3.x.y` tags and prereleases such as `v3.0.0-rc.1`. It verifies
 that the candidate source commit is the tagged commit, then enters the
@@ -249,11 +242,7 @@ python3 scripts/ci/consumer_smoke.py --candidate target/public-candidate \
   --line 4.0 --platform linux-x86_64 --central --output target/public-consumer
 ```
 
-The release workflow also pushes both Linux image architectures, then creates
-`<version>-spark4.0`; only final versions update `latest`. A Central test tag
-does not publish images.
-
-After the public Central consumer and image publication succeed, prepare the
+After the public Central consumer succeeds, prepare the
 GitHub release announcement from [the 3.0 release notes](release-notes/3.0.md).
 Replace `{{VERSION}}` with the published version and link the release to its
 source tag. This announcement is a maintainer step outside the release workflow.

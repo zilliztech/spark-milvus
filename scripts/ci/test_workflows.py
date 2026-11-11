@@ -513,16 +513,16 @@ class WorkflowGateTest(unittest.TestCase):
         ])
 
 
-    def test_release_image_is_assembled_from_the_audited_bundle_and_smoke_tested(self):
+    def test_assembly_is_built_verified_and_consumed_from_the_audited_bundle(self):
         build = workflow("build-artifacts.yml")
-        self.assertEqual(set(build["jobs"]["plan"]["outputs"]), {"native", "jvm", "image", "thin"})
+        self.assertEqual(set(build["jobs"]["plan"]["outputs"]), {"native", "jvm", "assembly", "thin"})
         plan = next(step for step in build["jobs"]["plan"]["steps"] if step.get("id") == "plan")["run"]
-        self.assertIn("'linux-x86_64': 'linux/amd64', 'linux-aarch64': 'linux/arm64'", plan)
+        self.assertIn("{'linux-x86_64', 'linux-aarch64'}", plan)
         self.assertIn("must build every Linux native platform", plan)
         assembly = build["jobs"]["assembly"]
         self.assertEqual(assembly["if"], "inputs.build_native")
         self.assertEqual(set(assembly["needs"]), {"plan", "native"})
-        self.assertEqual(assembly["strategy"]["matrix"], "${{ fromJSON(needs.plan.outputs.image) }}")
+        self.assertEqual(assembly["strategy"]["matrix"], "${{ fromJSON(needs.plan.outputs.assembly) }}")
         self.assertEqual(assembly["runs-on"], "${{ matrix.runner }}")
         self.assertNotIn("environment", assembly)
         self.assertNotIn("secrets.", str(assembly))
@@ -531,12 +531,14 @@ class WorkflowGateTest(unittest.TestCase):
         self.assertEqual(downloads, ["release-plan", "native-${{ matrix.platform }}"])
         runs = [step.get("run", "") for step in assembly["steps"]]
         sbt = next(index for index, run in enumerate(runs) if "spark/assembly" in run)
-        stage = next(index for index, run in enumerate(runs) if "assembly_image.py stage" in run)
-        smoke = next(index for index, run in enumerate(runs) if "./docker/build.sh" in run)
+        stage = next(index for index, run in enumerate(runs) if "assembly.py stage" in run)
+        verify = next(index for index, run in enumerate(runs) if "assembly.py verify" in run)
+        smoke = next(index for index, run in enumerate(runs) if "./demo/run.sh python" in run)
         upload = next(index for index, step in enumerate(assembly["steps"])
                       if step.get("uses", "").startswith("actions/upload-artifact"))
         self.assertLess(sbt, stage)
-        self.assertLess(stage, smoke)
+        self.assertLess(stage, verify)
+        self.assertLess(verify, smoke)
         self.assertLess(smoke, upload)
         self.assertIn("-DsparkVersion=4.0 -DscalaVersion=2.13.16", runs[sbt])
         self.assertIn('"-Drelease.version=$RELEASE_VERSION"', runs[sbt])
@@ -544,80 +546,26 @@ class WorkflowGateTest(unittest.TestCase):
                       runs[sbt])
         self.assertIn("--plan release-inputs/plan.json", runs[stage])
         self.assertIn("--native-bundle", runs[stage])
-        self.assertNotIn("--push", runs[smoke])
-        self.assertIn("run.sh python 01_read_snapshot.py", runs[smoke])
-        self.assertIn("run.sh java FilterProject --explain", runs[smoke])
+        self.assertIn('--version "$RELEASE_VERSION"', runs[verify])
+        self.assertIn('--source-sha "$(git rev-parse HEAD)"', runs[verify])
+        self.assertIn("release-inputs/plan.json", runs[smoke])
+        self.assertIn('"pyspark==$spark_version"', runs[smoke])
+        self.assertIn('export CONNECTOR_JAR="$GITHUB_WORKSPACE/target/assembly-$NATIVE_PLATFORM/', runs[smoke])
+        self.assertIn("./demo/run.sh python 01_read_snapshot.py", runs[smoke])
+        self.assertIn("./demo/run.sh java FilterProject --explain", runs[smoke])
         self.assertEqual(assembly["steps"][upload]["with"]["name"], "assembly-${{ matrix.platform }}")
         self.assertEqual(assembly["steps"][upload]["with"]["if-no-files-found"], "error")
-        self.assertTrue((ROOT / "scripts/ci/assembly_image.py").is_file())
+        self.assertTrue((ROOT / "scripts/ci/assembly.py").is_file())
 
-    def test_release_publishes_the_image_only_after_central_with_isolated_credentials(self):
+    def test_release_credentials_are_scoped_to_maven_publication(self):
         release = workflow("release.yml")
-        self.assertEqual(release["env"], {"IMAGE_REPOSITORY": "milvusdb/spark-milvus"})
-        image = release["jobs"]["image"]
-        self.assertEqual(set(image["needs"]), {"identity", "validate", "publish"})
-        self.assertEqual(image["if"], "needs.identity.outputs.mode == 'publish'")
-        self.assertEqual(image["environment"], "docker-hub")
-        self.assertEqual(image["runs-on"], "${{ matrix.runner }}")
-        matrix = json.load(open(ROOT / "scripts/release-matrix.json", encoding="utf-8"))
-        linux = {row["platform"]: row["runner"] for row in matrix["native"]
-                 if row["platform"].startswith("linux-")}
-        self.assertEqual({row["platform"]: row["runner"] for row in image["strategy"]["matrix"]["include"]},
-                         linux)
-        steps = image["steps"]
-        names = [step.get("name", "") for step in steps]
-        guard = names.index("Require the fully validated candidate")
-        download = next(i for i, step in enumerate(steps)
-                        if step.get("uses", "").startswith("actions/download-artifact@"))
-        verify = names.index("Verify the tested assembly before accessing credentials")
-        login = names.index("Log in to Docker Hub")
-        push = names.index("Build and push the platform image")
-        logout = names.index("Log out of Docker Hub")
-        self.assertLess(guard, download)
-        self.assertLess(download, verify)
-        self.assertLess(verify, login)
-        self.assertLess(login, push)
-        self.assertLess(push, logout)
-        self.assertEqual(steps[guard]["run"], 'test -n "$CANDIDATE_ARTIFACT"')
-        self.assertEqual(steps[download]["with"]["name"], "assembly-${{ matrix.platform }}")
-        self.assertEqual(steps[verify]["id"], "assembly")
-        self.assertEqual(steps[verify]["env"]["RELEASE_VERSION"], "${{ needs.identity.outputs.version }}")
-        self.assertIn("assembly_image.py verify", steps[verify]["run"])
-        self.assertIn('--source-sha "$(git rev-parse HEAD)"', steps[verify]["run"])
-        self.assertEqual(steps[login]["env"], {
-            "DOCKERHUB_USER": "${{ secrets.DOCKERHUB_USER }}",
-            "DOCKERHUB_TOKEN": "${{ secrets.DOCKERHUB_TOKEN }}",
-        })
-        self.assertIn("--password-stdin", steps[login]["run"])
-        self.assertEqual(steps[push]["env"], {
-            "ASSEMBLY": "${{ steps.assembly.outputs.assembly }}",
-            "DOCKER_PLATFORM": "${{ steps.assembly.outputs.docker_platform }}",
-            "IMAGE": "${{ env.IMAGE_REPOSITORY }}:${{ steps.assembly.outputs.image_tag }}",
-        })
-        self.assertIn("./docker/build.sh", steps[push]["run"])
-        self.assertIn("--push", steps[push]["run"])
-        self.assertEqual(steps[logout]["if"], "always()")
-        for step in steps:
-            if step.get("name") != "Log in to Docker Hub":
-                self.assertNotIn("secrets.", str(step))
-        manifest = release["jobs"]["image-manifest"]
-        self.assertEqual(set(manifest["needs"]), {"identity", "image"})
-        self.assertEqual(manifest["if"], "needs.identity.outputs.mode == 'publish'")
-        self.assertEqual(manifest["environment"], "docker-hub")
-        combine = next(step for step in manifest["steps"]
-                       if step.get("name") == "Combine both platform images under the release tag")
-        self.assertIn('tag="$IMAGE_REPOSITORY:$RELEASE_VERSION-spark4.0"', combine["run"])
-        self.assertIn('docker buildx imagetools create --tag "$tag" "$tag-amd64" "$tag-arm64"', combine["run"])
-        self.assertIn("linux/amd64", combine["run"])
-        self.assertIn("linux/arm64", combine["run"])
-        latest = combine["run"].index('"$IMAGE_REPOSITORY:latest"')
-        self.assertLess(combine["run"].index("imagetools inspect"), latest)
-        self.assertIn('if [[ "$RELEASE_VERSION" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]]', combine["run"])
-        self.assertNotIn("secrets.", str(combine))
-        # Build and test jobs never enter the publication environments.
-        for name, job in release["jobs"].items():
-            if name not in ("publish", "central-test", "image", "image-manifest"):
-                self.assertNotIn("environment", job, name)
+        protected = {name: job["environment"] for name, job in release["jobs"].items()
+                     if "environment" in job}
+        self.assertEqual(protected, {"publish": "maven-central", "central-test": "maven-central"})
+        for name in ("release.yml", "build-artifacts.yml"):
+            text = (ROOT / ".github/workflows" / name).read_text()
+            for obsolete in ("DOCKERHUB_", "IMAGE_REPOSITORY", "docker/build.sh", "docker-hub"):
+                self.assertNotIn(obsolete, text)
 
 
 if __name__ == "__main__":
