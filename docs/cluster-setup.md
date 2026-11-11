@@ -377,8 +377,8 @@ Require driver phase `Succeeded` and the example's `Demo passed` output. The
 monitoring identity needs `get/list` on Pods and `get` on `pods/log`; the runtime
 Role does not include log-reading permissions.
 
-All application resources use image-local `local:///` paths. The connector is
-read-only and needs no Spark artifact-upload credentials for this chart.
+All application resources use image-local `local:///` paths. This chart runs
+read examples and needs no Spark artifact-upload credentials.
 Deployments using external application files or staging storage must configure
 Spark's upload mechanism and its Hadoop-compatible storage credentials
 separately. `--files` does not rewrite an absolute application argument from a

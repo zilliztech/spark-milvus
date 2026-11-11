@@ -4,7 +4,9 @@ The reader consumes fixed Storage V3 snapshots without service calls; the
 [column replacement](column-replacement.md) writes new columns of such a
 snapshot back from a DataFrame. Both support the Spark/Scala combinations in
 [README](../README.md#project-structure).
-Use a verified candidate built from this source.
+Use a published 3.0 version, or a verified candidate built from this source.
+Follow the [installation guide](../README.md#installing) to select matching
+artifacts; CI candidates are not automatically published to Maven Central.
 
 ## 1. Reading with DataFrames
 
