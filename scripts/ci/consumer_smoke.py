@@ -3,7 +3,8 @@
 
 Production classes come exclusively from the candidate's published coordinates.
 The compiler and spark-submit use separate, fresh dependency caches. Entries
-and thin modules read fixed, checksummed data with a worker JVM.
+and thin modules read fixed, checksummed data, replace stored columns and verify
+the resulting revisions with a worker JVM.
 """
 
 import argparse
@@ -24,15 +25,16 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = (
-    "spark/src/test/scala/com/zilliz/spark/connector/read/ReadOnlyConsumerSmoke.scala",
+    "spark/src/test/scala/com/zilliz/spark/connector/read/ArtifactConsumerSmoke.scala",
     "core/src/test/scala/com/zilliz/milvus/storage/io/ReadFixtures.scala",
 )
-MAIN = "com.zilliz.spark.connector.read.ReadOnlyConsumerSmoke"
+MAIN = "com.zilliz.spark.connector.read.ArtifactConsumerSmoke"
 FIXTURE_ROOT = ROOT / "core/src/test/resources/read-fixtures"
 FIXTURE_GROUPS = ("collections/basic",)
 REQUIRED_CHECKS = (
     "independent-executor", "v3-snapshot", "v3-advanced", "v3-empty",
-    "repeated-actions",
+    "repeated-actions", "physical-read", "column-replacement-receipt",
+    "column-replacement-readback", "source-snapshot-unchanged",
 )
 FIXTURE_CLASSES = (
     MAIN.replace(".", "/"), "com/zilliz/milvus/storage/io/ReadFixtures",
@@ -109,7 +111,7 @@ def verify_fixture_jar(jar, resources, allowed=FIXTURE_CLASSES):
             raise RuntimeError("Smoke JAR contains duplicate entries")
         classes = [name for name in names if name.endswith(".class")]
         if any(base + ".class" not in classes for base in allowed):
-            raise RuntimeError("Smoke JAR is missing its read-only entry or integrity helper")
+            raise RuntimeError("Smoke JAR is missing its artifact consumer entry or integrity helper")
         for name in classes:
             if not any(name == base + ".class" or name.startswith(base + "$")
                        for base in allowed):

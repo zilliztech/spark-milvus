@@ -4,6 +4,37 @@ The image packages a caller-supplied Spark 4.0 / Scala 2.13 assembly and the
 public reader demos. It uses Java 21 and contains the Storage native bundle
 for one Linux architecture. Building an image does not publish it.
 
+## Run a release image
+
+These commands require a 3.0 version published to Docker Hub. Choose a version
+from [GitHub Releases](https://github.com/zilliztech/spark-milvus/releases) and
+replace `<published-3.0-version>` below; a CI candidate alone does not publish
+an image. The image tag
+`milvusdb/spark-milvus:<version>-spark4.0` selects Linux amd64 or arm64 to match
+the Docker host. Architecture-specific tags end in `-amd64` or `-arm64`;
+`latest` tracks final releases only.
+
+Create `read-options.json` from the [S3 options template](../demo/config/s3-options.json)
+with your existing snapshot path and object-storage configuration. Supply the
+configured storage identity inside the container too; a host-only credential
+file is not available there automatically.
+
+```bash
+export RELEASE_VERSION='<published-3.0-version>'
+image="milvusdb/spark-milvus:$RELEASE_VERSION-spark4.0"
+docker pull "$image"
+docker run --rm \
+  --mount "type=bind,src=$PWD/read-options.json,dst=/run/read-options.json,readonly" \
+  "$image" /opt/spark-milvus/demo/run.sh python 01_read_snapshot.py \
+  --options /run/read-options.json
+```
+
+This read example inspects snapshots of up to 10,000 visible rows. Use your own
+Spark application for larger workloads. For cluster execution, configure access
+on every driver and executor as described in [cluster setup](../docs/cluster-setup.md).
+
+## Build an image
+
 ```bash
 ./docker/build.sh \
   --assembly /absolute/path/to/connector-assembly.jar \
