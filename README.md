@@ -20,11 +20,11 @@ then [run your application](#running-your-application). For all supported
 options, defaults and limits, see the
 [Reference](docs/reference.md#2-milvus-format-parameters).
 
-This guide covers the 3.0 connector line for Milvus 3.0. Earlier releases do not
-provide this API. Installation examples use `<published-3.0-version>`: replace
-it with a 3.0 version listed in
-[GitHub Releases](https://github.com/zilliztech/spark-milvus/releases) after
-publication. CI candidates are not automatically available on Maven Central.
+This guide uses **Spark-Milvus 3.0.0** for Milvus 3.0, available from
+[Maven Central](https://repo.maven.apache.org/maven2/com/zilliz/spark-milvus-4.0_2.13/3.0.0/).
+Earlier releases do not provide this API. See the
+[3.0.0 release notes](https://github.com/zilliztech/spark-milvus/releases/tag/v3.0.0)
+for capabilities and migration guidance.
 
 ## Requirements and compatibility
 
@@ -61,7 +61,7 @@ on your cluster.
 ```xml
 <properties>
   <spark.version>4.0.1</spark.version>
-  <spark-milvus.version>&lt;published-3.0-version&gt;</spark-milvus.version>
+  <spark-milvus.version>3.0.0</spark-milvus.version>
 </properties>
 
 <dependencies>
@@ -85,7 +85,7 @@ on your cluster.
 scalaVersion := "2.13.16"
 
 libraryDependencies ++= Seq(
-  "com.zilliz" % "spark-milvus-4.0_2.13" % "<published-3.0-version>",
+  "com.zilliz" % "spark-milvus-4.0_2.13" % "3.0.0",
   "org.apache.spark" %% "spark-sql" % "4.0.1" % Provided
 )
 ```
@@ -254,7 +254,7 @@ For a first run on a Linux x86_64 machine with Spark 4.0 installed, run the
 PySpark example locally:
 
 ```bash
-export RELEASE_VERSION='<published-3.0-version>'
+export RELEASE_VERSION=3.0.0
 export LD_PRELOAD="$JAVA_HOME/lib/libjsig.so"
 
 "$SPARK_HOME/bin/spark-submit" \
