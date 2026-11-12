@@ -27,6 +27,19 @@ Earlier releases do not provide this API. See the
 [3.0.0 release notes](https://github.com/zilliztech/spark-milvus/releases/tag/v3.0.0)
 for capabilities and migration guidance.
 
+## Why Spark-Milvus
+
+Milvus serves online vector search, while Spark provides distributed computing
+for data preparation and analysis. Spark-Milvus connects these workflows around
+the same Collection data, so applications can combine online retrieval with
+offline processing.
+
+For example, a product Collection can power similar-product search in Milvus.
+In Spark, you can join its data with a product catalog, check data quality and
+[update eligible fields in batches](docs/column-replacement.md). Your application
+controls when the resulting updates are submitted to Milvus and become visible
+online.
+
 ## Requirements and compatibility
 
 Before writing your application, prepare:
