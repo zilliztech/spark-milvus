@@ -302,7 +302,7 @@ jobs:
         run: |
           python3 scripts/ci/consumer_smoke.py \
             --candidate central-test-input \
-            --line 4.0 --platform linux-x86_64 --output central-test-consumer-results
+            --line 4.0 --scala 2.13.16 --platform linux-x86_64 --output central-test-consumer-results
       - name: Preserve Central test consumer evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -338,7 +338,7 @@ jobs:
       - name: Consume public files with fresh caches
         run: |
           python3 scripts/ci/consumer_smoke.py --candidate public-candidate \
-            --line 4.0 --platform linux-x86_64 --central --output public-consumer-results
+            --line 4.0 --scala 2.13.16 --platform linux-x86_64 --central --output public-consumer-results
       - name: Preserve public consumer evidence
         if: always()
         uses: actions/upload-artifact@v4

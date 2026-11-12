@@ -379,7 +379,7 @@ class WorkflowGateTest(unittest.TestCase):
         self.assertNotIn("if", build["jobs"]["jvm"])
         for name in ("native", "darwin-reads", "candidate"):
             self.assertEqual(build["jobs"][name]["if"], "inputs.build_native")
-        self.assertEqual(set(build["jobs"]["candidate"]["needs"]), {"native", "darwin-reads", "jvm", "thin"})
+        self.assertEqual(set(build["jobs"]["candidate"]["needs"]), {"native", "darwin-reads", "jvm"})
         # The macOS read suites run on the darwin bundle before any candidate is assembled.
         darwin = build["jobs"]["darwin-reads"]
         self.assertEqual(darwin["runs-on"], "macos-15")
@@ -410,24 +410,61 @@ class WorkflowGateTest(unittest.TestCase):
         self.assertNotIn("environment", build["jobs"]["native"])
         self.assertNotIn("environment", build["jobs"]["jvm"])
 
-    def test_thin_modules_are_exported_without_native_and_staged_with_the_same_candidate(self):
+    def test_jvm_exports_and_consumers_keep_scala_variants_separate(self):
         jobs = workflow("build-artifacts.yml")["jobs"]
-        steps = jobs["thin"]["steps"]
-        self.assertEqual(jobs["thin"]["strategy"]["matrix"], "${{ fromJSON(needs.plan.outputs.thin) }}")
-        self.assertNotIn("if", jobs["thin"])
-        export = next(step for step in steps if "releaseThinArtifacts" in step.get("run", ""))
+        self.assertNotIn("thin", jobs)
+        self.assertEqual(jobs["jvm"]["name"],
+                         "JVM (Spark ${{ matrix.line }}${{ matrix.line == '3.5' && "
+                         "format(', Scala {0}', matrix.scalaBinary) || '' }})")
+        steps = jobs["jvm"]["steps"]
+        self.assertEqual(jobs["jvm"]["strategy"]["matrix"], "${{ fromJSON(needs.plan.outputs.jvm) }}")
+        java = next(step for step in steps if step.get("uses", "").startswith("actions/setup-java"))
+        self.assertEqual(java["with"]["java-version"], "${{ matrix.buildJava }}")
+        export = next(step for step in steps if "releaseJvmArtifacts" in step.get("run", ""))
         self.assertEqual(export["env"]["RELEASE_VERSION"], "${{ inputs.version }}")
-        self.assertIn("spark/releaseThinArtifacts", export["run"])
+        self.assertEqual(export["env"]["SCALA_VERSION"], "${{ matrix.scala }}")
+        self.assertIn('"-DscalaVersion=$SCALA_VERSION"', export["run"])
         upload = next(step for step in steps if step.get("uses", "").startswith("actions/upload-artifact"))
-        self.assertEqual(upload["with"]["path"], "target/release-thin/${{ matrix.line }}/${{ matrix.scalaBinary }}/${{ matrix.product }}/")
+        self.assertEqual(upload["with"]["name"], "jvm-${{ matrix.line }}-${{ matrix.scalaBinary }}")
+        self.assertEqual(upload["with"]["path"], "target/release-jvm/${{ matrix.line }}/${{ matrix.scalaBinary }}/")
         self.assertEqual(upload["with"]["if-no-files-found"], "error")
         self.assertLess(steps.index(export), steps.index(upload))
         candidate = jobs["candidate"]["steps"]
-        download = next(step for step in candidate if step.get("with", {}).get("pattern") == "thin-*")
+        download = next(step for step in candidate if step.get("with", {}).get("pattern") == "jvm-*")
         stage = next(step for step in candidate if "release.py stage" in step.get("run", ""))
-        self.assertEqual(download["with"]["path"], "release-inputs")
         self.assertLess(candidate.index(download), candidate.index(stage))
-        self.assertNotIn("--thin-only", stage["run"])
+        self.assertFalse(any(step.get("with", {}).get("pattern") == "thin-*" for step in candidate))
+
+        consumer = workflow("integration.yml")["jobs"]["consumer"]["steps"]
+        runtime = next(step for step in consumer if step.get("id") == "runtime-java")
+        self.assertEqual(runtime["with"]["java-version"], "${{ matrix.java }}")
+        build = next(step for step in consumer if step.get("uses", "").startswith("actions/setup-java")
+                     and step.get("id") != "runtime-java")
+        self.assertEqual(build["with"]["java-version"], "${{ matrix.buildJava }}")
+        self.assertLess(consumer.index(runtime), consumer.index(build))
+        run = next(step for step in consumer if "consumer_smoke.py" in step.get("run", ""))
+        self.assertEqual(run["env"]["SCALA_VERSION"], "${{ matrix.scala }}")
+        self.assertEqual(run["env"]["CONSUMER_JAVA_HOME"], "${{ steps.runtime-java.outputs.path }}")
+        self.assertIn('--scala "$SCALA_VERSION"', run["run"])
+        upload = next(step for step in consumer if step.get("uses", "").startswith("actions/upload-artifact"))
+        self.assertEqual(upload["with"]["name"],
+                         "consumer-${{ matrix.platform }}-${{ matrix.os_version }}-${{ matrix.line }}-${{ matrix.scalaBinary }}")
+
+    def test_spark35_bundles_the_missing_arm_bridge_without_a_milvus_build(self):
+        jobs = workflow("build-artifacts.yml")["jobs"]
+        bridge = jobs["arrow-cdata"]
+        self.assertNotIn("if", bridge)
+        self.assertEqual(bridge["runs-on"], "ubuntu-22.04-arm")
+        build = next(step for step in bridge["steps"] if "arrow_cdata.py build" in step.get("run", ""))
+        self.assertIn("arrow_cdata.py verify", build["run"])
+        self.assertNotIn("milvus-storage", build["run"])
+        self.assertEqual(jobs["jvm"]["needs"], ["plan", "arrow-cdata"])
+        download = next(step for step in jobs["jvm"]["steps"]
+                        if step.get("with", {}).get("name") == "arrow-cdata-12-linux-aarch64")
+        self.assertEqual(download["if"], "matrix.line == '3.5'")
+        export = next(step for step in jobs["jvm"]["steps"] if "releaseJvmArtifacts" in step.get("run", ""))
+        self.assertIn("if [[ \"$SPARK_LINE\" == '3.5' ]]", export["run"])
+        self.assertIn("-Darrow.cdata.supplement=", export["run"])
 
     def test_public_native_build_has_no_cpu_variant_job(self):
         build = workflow("build-artifacts.yml")
@@ -515,7 +552,7 @@ class WorkflowGateTest(unittest.TestCase):
 
     def test_assembly_is_built_verified_and_consumed_from_the_audited_bundle(self):
         build = workflow("build-artifacts.yml")
-        self.assertEqual(set(build["jobs"]["plan"]["outputs"]), {"native", "jvm", "assembly", "thin"})
+        self.assertEqual(set(build["jobs"]["plan"]["outputs"]), {"native", "jvm", "assembly"})
         plan = next(step for step in build["jobs"]["plan"]["steps"] if step.get("id") == "plan")["run"]
         self.assertIn("{'linux-x86_64', 'linux-aarch64'}", plan)
         self.assertIn("must build every Linux native platform", plan)

@@ -30,7 +30,7 @@ jobs:
           PY
 
   consumer:
-    name: Consumer (Spark ${{ matrix.line }}, ${{ matrix.platform }}, ${{ matrix.os_version }})
+    name: Consumer (Spark ${{ matrix.line }}, Scala ${{ matrix.scalaBinary }}, ${{ matrix.platform }}, ${{ matrix.os_version }})
     needs: matrix
     strategy:
       fail-fast: false
@@ -46,11 +46,18 @@ jobs:
         with:
           python-version: '3.12'
       - uses: actions/setup-java@v5
+        id: runtime-java
         with:
           distribution: temurin
           java-version: '${{ matrix.java }}'
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '${{ matrix.buildJava }}'
       - uses: sbt/setup-sbt@v1
       - name: Record the consumer CPU, OS and JDK
+        env:
+          CONSUMER_JAVA_HOME: ${{ steps.runtime-java.outputs.path }}
         run: |
           mkdir -p consumer-results
           if [[ "$(uname -s)" == Darwin ]]; then
@@ -60,7 +67,7 @@ jobs:
             lscpu > consumer-results/runner-cpu.txt
             cat /etc/os-release > consumer-results/runner-os.txt
           fi
-          "$JAVA_HOME/bin/java" -version 2> consumer-results/runner-java.txt
+          "$CONSUMER_JAVA_HOME/bin/java" -version 2> consumer-results/runner-java.txt
       - name: Let the children of a JVM preloading libjsig run
         if: runner.os == 'macOS'
         run: scripts/ci/prepare_macos_jvm_children.sh
@@ -70,18 +77,20 @@ jobs:
           path: candidate
       - name: Verify exact candidate files
         run: python3 scripts/release.py verify --candidate candidate
-      - name: Resolve isolated thin and fat consumers and read fixed V3 files
+      - name: Resolve universal and platform entries and read and update fixed V3 files
         env:
           SPARK_LINE: ${{ matrix.line }}
+          SCALA_VERSION: ${{ matrix.scala }}
+          CONSUMER_JAVA_HOME: ${{ steps.runtime-java.outputs.path }}
           NATIVE_PLATFORM: ${{ matrix.platform }}
         run: |
           python3 scripts/ci/consumer_smoke.py --candidate candidate \
-            --line "$SPARK_LINE" --platform "$NATIVE_PLATFORM" --output consumer-results
+            --line "$SPARK_LINE" --scala "$SCALA_VERSION" --platform "$NATIVE_PLATFORM" --output consumer-results
       - name: Preserve consumer evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: consumer-${{ matrix.platform }}-${{ matrix.os_version }}-${{ matrix.line }}
+          name: consumer-${{ matrix.platform }}-${{ matrix.os_version }}-${{ matrix.line }}-${{ matrix.scalaBinary }}
           path: |
             consumer-results/
           if-no-files-found: warn

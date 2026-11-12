@@ -1,10 +1,13 @@
 """Consumer gates reject missing, substituted and excess native artifacts."""
 
+import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import shlex
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -33,14 +36,14 @@ class ConsumerTest(unittest.TestCase):
         return {"artifactId": artifact, "extension": "jar", "classifier": None,
                 "sha256": consumer.digest(path), "path": path.name}
 
-    def manifest(self):
+    def manifest(self, line="4.0", binary="2.13"):
         return {
             "plan": {"native": [{"platform": "linux-x86_64"}, {"platform": "linux-aarch64"},
                                 {"platform": "darwin-aarch64"}]},
             "artifacts": [
-                self.jar("spark-milvus-4.0_2.13"),
-                self.jar("spark-milvus-4.0-linux-x86_64_2.13"),
-                self.jar("spark-milvus-4.0-jvm_2.13"),
+                self.jar(f"spark-milvus-{line}_{binary}"),
+                self.jar(f"spark-milvus-{line}-linux-x86_64_{binary}"),
+                self.jar(f"spark-milvus-{line}-jvm_{binary}"),
                 self.jar("spark-milvus-native-linux-x86_64", "linux-x86_64"),
                 self.jar("spark-milvus-native-linux-aarch64", "linux-aarch64"),
                 self.jar("spark-milvus-native-darwin-aarch64", "darwin-aarch64"),
@@ -72,9 +75,9 @@ class ConsumerTest(unittest.TestCase):
 
     def test_universal_and_platform_have_distinct_native_closures(self):
         manifest = self.manifest()
-        _, universal = consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "universal")
+        _, universal = consumer.expected_artifacts(manifest, "4.0", "2.13", "linux-x86_64", "universal")
         self.assertEqual(len(universal), 5)
-        _, platform = consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "platform")
+        _, platform = consumer.expected_artifacts(manifest, "4.0", "2.13", "linux-x86_64", "platform")
         self.assertEqual(len(platform), 3)
         self.keep(platform)
         self.assertEqual(len(consumer.check_resolved(self.ivy, platform)), 3)
@@ -85,7 +88,7 @@ class ConsumerTest(unittest.TestCase):
 
     def test_substituted_candidate_jar_fails(self):
         manifest = self.manifest()
-        _, expected = consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "platform")
+        _, expected = consumer.expected_artifacts(manifest, "4.0", "2.13", "linux-x86_64", "platform")
         self.keep(expected)
         target = self.ivy / "jars/com.zilliz_spark-milvus-4.0-jvm_2.13-3.0.0.jar"
         with zipfile.ZipFile(target, "a") as archive:
@@ -95,7 +98,7 @@ class ConsumerTest(unittest.TestCase):
 
     def test_platform_entry_must_not_pull_other_architecture(self):
         manifest = self.manifest()
-        _, expected = consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "platform")
+        _, expected = consumer.expected_artifacts(manifest, "4.0", "2.13", "linux-x86_64", "platform")
         self.keep(expected)
         self.jar("spark-milvus-native-linux-aarch64", "linux-aarch64")
         with self.assertRaisesRegex(RuntimeError, "different connector artifacts"):
@@ -105,71 +108,62 @@ class ConsumerTest(unittest.TestCase):
         manifest = self.manifest()
         manifest["artifacts"].pop()
         with self.assertRaisesRegex(ValueError, "missing artifacts"):
-            consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "universal")
+            consumer.expected_artifacts(manifest, "4.0", "2.13", "linux-x86_64", "universal")
 
     def test_native_metadata_must_match_the_resolved_coordinate(self):
         manifest = self.manifest()
         manifest["artifacts"][3] = self.jar("spark-milvus-native-linux-x86_64", "linux-aarch64")
-        _, expected = consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "platform")
+        _, expected = consumer.expected_artifacts(manifest, "4.0", "2.13", "linux-x86_64", "platform")
         self.keep(expected)
         with self.assertRaisesRegex(RuntimeError, "Resolved native platforms"):
             consumer.check_resolved(self.ivy, expected)
 
     def test_other_groups_cannot_introduce_an_extra_native_platform(self):
         manifest = self.manifest()
-        _, expected = consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "platform")
+        _, expected = consumer.expected_artifacts(manifest, "4.0", "2.13", "linux-x86_64", "platform")
         self.keep(expected)
         with zipfile.ZipFile(self.ivy / "jars/other.group_bad.jar", "w") as archive:
             archive.writestr("native/milvus/2/linux-aarch64/manifest.properties", "format.version=2")
         with self.assertRaisesRegex(RuntimeError, "Resolved native platforms"):
             consumer.check_resolved(self.ivy, expected)
 
-    SHARED_THIN = {"spark-milvus-native-runtime", "spark-milvus-native-storage_2.13",
-                   "spark-milvus-core_2.13"}
-
-    def thin_manifest(self):
-        names = ("native-runtime", "native-storage_2.13",
-                 "core_2.13", "4.0-thin_2.13", "4.2-thin_2.13")
-        return {"plan": {"distribution": "thin", "native": []},
-                "artifacts": [self.jar("spark-milvus-" + name) for name in names]}
-
-    def test_thin_resolves_modules_without_a_platform_or_fat_jar(self):
-        for line, other in (("4.0", "4.2"), ("4.2", "4.0")):
-            with self.subTest(line=line):
-                manifest = self.thin_manifest()
-                entry, expected = consumer.expected_artifacts(manifest, line, "linux-x86_64", "thin")
-                self.assertEqual(entry, f"spark-milvus-{line}-thin_2.13")
-                # Both lines resolve the same shared modules below their own Spark module.
-                self.assertEqual(set(expected), self.SHARED_THIN | {entry})
-                self.keep(expected)
-                self.assertEqual(len(consumer.check_resolved(self.ivy, expected)), 4)
-                for extra in (f"spark-milvus-{line}-jvm_2.13", f"spark-milvus-{other}-thin_2.13"):
-                    self.jar(extra)
-                    with self.assertRaisesRegex(RuntimeError, "different connector artifacts"):
-                        consumer.check_resolved(self.ivy, expected)
+    def test_every_release_combination_resolves_both_entry_types(self):
+        for line, binary in (("3.5", "2.12"), ("3.5", "2.13"), ("4.0", "2.13"),
+                             ("4.1", "2.13"), ("4.2", "2.13")):
+            for kind in ("universal", "platform"):
+                with self.subTest(line=line, binary=binary, entry=kind):
+                    manifest = self.manifest(line, binary)
+                    entry, expected = consumer.expected_artifacts(
+                        manifest, line, binary, "linux-x86_64", kind)
+                    suffix = "" if kind == "universal" else "-linux-x86_64"
+                    self.assertEqual(entry, f"spark-milvus-{line}{suffix}_{binary}")
+                    self.assertIn(f"spark-milvus-{line}-jvm_{binary}", expected)
                     self.keep(expected)
+                    consumer.check_resolved(self.ivy, expected)
 
-    def test_thin_rejects_native_resources_in_transitive_dependencies(self):
-        manifest = self.thin_manifest()
-        _, expected = consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "thin")
-        self.keep(expected)
-        with zipfile.ZipFile(self.ivy / "jars/other.group_bad.jar", "w") as archive:
-            archive.writestr("native/milvus/2/linux-x86_64/manifest.properties", "format.version=2")
-        with self.assertRaisesRegex(RuntimeError, "Resolved native platforms"):
-            consumer.check_resolved(self.ivy, expected)
+    def test_spark_35_scala_binary_variants_are_not_interchangeable(self):
+        manifest = self.manifest("3.5", "2.12")
+        with self.assertRaisesRegex(ValueError, "missing artifacts"):
+            consumer.expected_artifacts(manifest, "3.5", "2.13", "linux-x86_64", "universal")
+        with self.assertRaisesRegex(ValueError, "Unsupported consumer entry"):
+            consumer.expected_artifacts(manifest, "3.5", "2.12", "linux-x86_64", "thin")
 
-    def test_thin_requires_complete_candidate_and_separate_native(self):
-        manifest = self.thin_manifest()
-        with self.assertRaisesRegex(ValueError, "needs --native-bundle"):
-            consumer.thin_native_bundle(self.root, manifest, "linux-x86_64")
-        manifest["artifacts"].pop()
-        with self.assertRaisesRegex(ValueError, "missing thin artifacts: spark-milvus-4.2-thin_2.13$"):
-            consumer.expected_artifacts(manifest, "4.2", "linux-x86_64", "thin")
-        consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "thin")
-        manifest["artifacts"] = [item for item in manifest["artifacts"]
-                                 if item["artifactId"] != "spark-milvus-core_2.13"]
-        with self.assertRaisesRegex(ValueError, "missing thin artifacts: spark-milvus-core_2.13$"):
-            consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "thin")
+    def test_release_row_requires_an_unambiguous_matching_scala_version(self):
+        rows = [{"line": "3.5", "scala": scala, "scalaBinary": binary}
+                for scala, binary in (("2.12.20", "2.12"), ("2.13.16", "2.13"))]
+        manifest = {"plan": {"jvm": rows}}
+        self.assertEqual(consumer.consumer_row(manifest, "3.5", "2.12.20"), rows[0])
+        self.assertEqual(consumer.consumer_row(manifest, "3.5", "2.13.16"), rows[1])
+        for line, scala in (("4.0", "2.13.16"), ("3.5", "2.13.15")):
+            with self.assertRaisesRegex(ValueError, "exactly one"):
+                consumer.consumer_row(manifest, line, scala)
+        rows.append(dict(rows[0]))
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            consumer.consumer_row(manifest, "3.5", "2.12.20")
+        rows.pop()
+        rows[0]["scalaBinary"] = "2.13"
+        with self.assertRaisesRegex(ValueError, "binary version differ"):
+            consumer.consumer_row(manifest, "3.5", "2.12.20")
 
     def test_ivy_resolvers_do_not_use_maven_local(self):
         path = self.root / "ivysettings.xml"
@@ -182,12 +176,12 @@ class ConsumerTest(unittest.TestCase):
 
     def test_fixture_compilation_uses_candidate_and_canonical_central_only(self):
         repository = "file:///candidate%20with%20spaces/repository"
-        row = {"scala": "2.13.16", "spark": "4.0.1"}
+        row = {"scala": "2.13.16", "scalaBinary": "2.13", "spark": "4.0.1"}
         with mock.patch.object(consumer, "fixture_resources", return_value={}), \
              mock.patch.object(consumer, "run") as run, \
              mock.patch.object(consumer, "verify_fixture_jar"):
             consumer.compile_fixture(self.root, repository, "3.0.0", row,
-                                     "spark-milvus-4.0-thin_2.13", {})
+                                     "spark-milvus-4.0_2.13", {})
         build = (self.root / "fixture/build.sbt").read_text()
         self.assertEqual((self.root / "fixture/project/build.properties").read_text(),
                          (consumer.ROOT / "project/build.properties").read_text())
@@ -200,6 +194,114 @@ class ConsumerTest(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["env"]["COURSIER_CACHE"],
                          str(self.root / "compile-coursier"))
 
+    def test_scala212_fixture_uses_the_selected_compiler_and_output(self):
+        row = {"scala": "2.12.20", "scalaBinary": "2.12", "spark": "3.5.5"}
+        with mock.patch.object(consumer, "fixture_resources", return_value={}), \
+             mock.patch.object(consumer, "run"), \
+             mock.patch.object(consumer, "verify_fixture_jar") as verify:
+            jar = consumer.compile_fixture(self.root, "file:///candidate", "3.0.1", row,
+                                           "spark-milvus-3.5_2.12", {})
+        self.assertEqual(jar, self.root / "fixture/target/scala-2.12/smoke.jar")
+        self.assertEqual(verify.call_args.args[0], jar)
+        build = (self.root / "fixture/build.sbt").read_text()
+        self.assertIn('scalaVersion := "2.12.20"', build)
+        self.assertIn('"org.apache.spark" %% "spark-sql" % "3.5.5" % "provided"', build)
+        self.assertIn('"com.zilliz" % "spark-milvus-3.5_2.12" % "3.0.1"', build)
+
+
+class SparkInstallationTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+
+    def distribution(self, *, binary="2.13", spark="3.5.5"):
+        home = self.root / "distribution"
+        (home / "jars").mkdir(parents=True, exist_ok=True)
+        (home / "bin").mkdir(exist_ok=True)
+        (home / "bin/spark-submit").touch()
+        for jar in (f"scala-library-{binary}.16.jar", f"spark-core_{binary}-{spark}.jar",
+                    f"spark-sql_{binary}-{spark}.jar"):
+            (home / "jars" / jar).touch()
+        return home
+
+    def test_runtime_rejects_wrong_scala_binary_and_spark_version(self):
+        home = self.distribution(binary="2.12")
+        row = {"spark": "3.5.5", "scalaBinary": "2.13"}
+        with self.assertRaisesRegex(ValueError, "wrong Scala binary"):
+            consumer.verify_spark_installation(home, row)
+        row["scalaBinary"] = "2.12"
+        consumer.verify_spark_installation(home, row)
+        row["spark"] = "3.5.6"
+        with self.assertRaisesRegex(ValueError, "selected runtime"):
+            consumer.verify_spark_installation(home, row)
+        row["spark"] = "3.5.5"
+        (home / "jars/scala-library-2.13.16.jar").touch()
+        with self.assertRaisesRegex(ValueError, "wrong Scala binary"):
+            consumer.verify_spark_installation(home, row)
+
+    def apache_archive(self):
+        name = "spark-3.5.5-bin-hadoop3-scala2.13"
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+            for path in ("bin/spark-submit", "jars/scala-library-2.13.8.jar",
+                         "jars/spark-core_2.13-3.5.5.jar", "jars/spark-sql_2.13-3.5.5.jar"):
+                item = tarfile.TarInfo(name + "/" + path)
+                archive.addfile(item, io.BytesIO())
+        return buffer.getvalue()
+
+    def test_scala213_spark35_downloads_and_verifies_official_distribution(self):
+        archive = self.apache_archive()
+        checksum = hashlib.sha512(archive).hexdigest()
+        row = {"line": "3.5", "spark": "3.5.5", "scalaBinary": "2.13"}
+        with mock.patch.object(consumer.urllib.request, "urlopen", side_effect=[
+                io.BytesIO((checksum + "  distribution.tgz\n").encode()), io.BytesIO(archive)]) as fetch, \
+             mock.patch.object(consumer, "run") as run:
+            home, python = consumer.install_spark(self.root, row, {})
+        self.assertEqual(home, self.root / "spark-3.5.5-bin-hadoop3-scala2.13")
+        self.assertEqual(python, consumer.sys.executable)
+        self.assertTrue((home / "bin/spark-submit").is_file())
+        url = "https://archive.apache.org/dist/spark/spark-3.5.5/spark-3.5.5-bin-hadoop3-scala2.13.tgz"
+        self.assertEqual(fetch.call_args_list, [mock.call(url + ".sha512", timeout=60),
+                                                mock.call(url, timeout=60)])
+        run.assert_not_called()
+
+    def test_corrupt_spark_archive_is_never_extracted(self):
+        row = {"line": "3.5", "spark": "3.5.5", "scalaBinary": "2.13"}
+        with mock.patch.object(consumer.urllib.request, "urlopen", side_effect=[
+                io.BytesIO(b"0" * 128), io.BytesIO(self.apache_archive())]), \
+             mock.patch.object(consumer.tarfile, "open") as extract, \
+             self.assertRaisesRegex(ValueError, "checksum mismatch"):
+            consumer.install_spark(self.root, row, {})
+        extract.assert_not_called()
+
+    def test_other_profiles_use_pyspark_but_still_verify_runtime_jars(self):
+        for line, spark, binary in (("3.5", "3.5.5", "2.12"), ("4.0", "4.0.1", "2.13"),
+                                    ("4.1", "4.1.1", "2.13"), ("4.2", "4.2.0", "2.13")):
+            with self.subTest(line=line):
+                home = self.distribution(binary=binary, spark=spark)
+                row = {"line": line, "spark": spark, "scalaBinary": binary}
+                with mock.patch.object(consumer, "run") as run, \
+                     mock.patch.object(consumer.subprocess, "check_output", return_value=str(home)), \
+                     mock.patch.object(consumer.urllib.request, "urlopen") as fetch:
+                    actual, python = consumer.install_spark(self.root, row, {})
+                self.assertEqual(actual, home)
+                self.assertEqual(python, str(self.root / "python/bin/python"))
+                self.assertIn("pyspark==" + spark, run.call_args.args[0])
+                fetch.assert_not_called()
+                for jar in (home / "jars").iterdir():
+                    jar.unlink()
+
+    def test_java_version_comes_from_the_selected_jdk(self):
+        home = self.root / "java17"
+        with mock.patch.object(consumer.subprocess, "check_output", return_value=(
+                "Property settings:\n    java.specification.version = 17\n")) as run:
+            self.assertEqual(consumer.java_major(home, {}), "17")
+        self.assertEqual(run.call_args.args[0][0], str(home / "bin/java"))
+        with mock.patch.object(consumer.subprocess, "check_output", return_value="unknown"), \
+             self.assertRaisesRegex(ValueError, "Cannot determine Java version"):
+            consumer.java_major(home, {})
+
 
 class ConsumerDiagnosticsTest(unittest.TestCase):
     def setUp(self):
@@ -210,7 +312,8 @@ class ConsumerDiagnosticsTest(unittest.TestCase):
         self.candidate = self.root / "candidate"
         self.candidate.mkdir()
         (self.candidate / "release-manifest.json").write_text(json.dumps({
-            "version": "3.0.0", "plan": {"jvm": [{"line": "4.0", "spark": "4.0.1"}]},
+            "version": "3.0.0", "plan": {"jvm": [{"line": "4.0", "spark": "4.0.1",
+                "scala": "2.13.16", "scalaBinary": "2.13", "java": "21", "buildJava": "21"}]},
             "artifacts": [],
         }))
         java_home = self.root / "java"
@@ -220,7 +323,7 @@ class ConsumerDiagnosticsTest(unittest.TestCase):
         self.environment.start()
         self.addCleanup(self.environment.stop)
 
-    def simulate(self, *, fail=False, line="4.0", native=None):
+    def simulate(self, *, fail=False, line="4.0", scala="2.13.16", runtime_java=None):
         commands = []
         spark_home = None
 
@@ -228,13 +331,15 @@ class ConsumerDiagnosticsTest(unittest.TestCase):
             nonlocal spark_home
             # This is inside smoke's actual TemporaryDirectory, so assertions
             # after smoke returns also prove diagnostics survive its cleanup.
-            spark_home = Path(args[0][0]).parents[2] / "spark"
+            spark_home = args[0] / "spark"
             spark_home.mkdir()
-            return str(spark_home) + "\n"
+            return spark_home, consumer.sys.executable
 
         def run(command, *, cwd, env, log=None):
             if log is None:
                 return
+            self.assertEqual(env["JAVA_HOME"], str(runtime_java or self.root / "java"))
+            self.assertEqual(env["LD_PRELOAD"], str(Path(env["JAVA_HOME"]) / "lib/libjsig.so"))
             commands.append(command)
             entry = cwd.name
             executor = spark_home / "work" / f"app-{entry}" / "0"
@@ -256,19 +361,21 @@ class ConsumerDiagnosticsTest(unittest.TestCase):
                 raise RuntimeError("original consumer failure")
 
         with mock.patch.object(consumer, "run", side_effect=run), \
-             mock.patch.object(consumer.subprocess, "check_output", side_effect=spark_installation), \
-             mock.patch.object(consumer, "compile_fixture", return_value=self.root / "smoke.jar"), \
+             mock.patch.object(consumer, "install_spark", side_effect=spark_installation), \
+             mock.patch.object(consumer, "compile_fixture", return_value=self.root / "smoke.jar") as compile_fixture, \
              mock.patch.object(consumer, "fixture_resources", return_value={"read-fixtures/test": "a" * 64}), \
              mock.patch.object(consumer, "expected_artifacts", side_effect=lambda *args: (args[-1], {})), \
              mock.patch.object(consumer, "check_resolved", return_value={}), \
-             mock.patch.object(consumer, "thin_native_bundle", return_value=native), \
+             mock.patch.object(consumer, "java_major", side_effect=lambda home, env: "17" if home == runtime_java else "21"), \
              mock.patch.object(consumer.sys, "platform", "linux"), \
              mock.patch.object(consumer.os, "uname", return_value=mock.Mock(machine="x86_64")):
             if fail:
                 with self.assertRaisesRegex(RuntimeError, "^original consumer failure$"):
-                    consumer.smoke(self.candidate, line, "linux-x86_64", self.output)
+                    consumer.smoke(self.candidate, line, scala, "linux-x86_64", self.output)
             else:
-                consumer.smoke(self.candidate, line, "linux-x86_64", self.output)
+                consumer.smoke(self.candidate, line, scala, "linux-x86_64", self.output)
+            for call in compile_fixture.call_args_list:
+                self.assertEqual(call.args[-1]["JAVA_HOME"], str(self.root / "java"))
         self.assertFalse(spark_home.exists(), "temporary Spark installation must be removed")
         return commands
 
@@ -307,25 +414,39 @@ class ConsumerDiagnosticsTest(unittest.TestCase):
             self.assertEqual(entry["passed"], entry["executed"])
             self.assertEqual((entry["failed"], entry["canceled"]), (0, 0))
 
-    def test_each_line_also_consumes_its_thin_module_with_a_separate_native_bundle(self):
-        native = self.root / "milvus-native-linux-x86_64.jar"
-        native.write_bytes(b"native bundle")
-        for line, spark in (("4.0", "4.0.1"), ("4.2", "4.2.0")):
-            with self.subTest(line=line):
+    def test_spark_35_runs_both_entries_with_java17_after_compiling_on_java21(self):
+        runtime = self.root / "runtime-java17"
+        (runtime / "lib").mkdir(parents=True)
+        (runtime / "lib/libjsig.so").touch()
+        for scala, binary in (("2.12.20", "2.12"), ("2.13.16", "2.13")):
+            with self.subTest(scala=scala):
                 (self.candidate / "release-manifest.json").write_text(json.dumps({
-                    "version": "3.0.0", "plan": {"jvm": [{"line": line, "spark": spark}]},
-                    "artifacts": [{"artifactId": f"spark-milvus-{line}-thin_2.13",
-                                   "extension": "jar", "classifier": ""}],
+                    "version": "3.0.0", "plan": {"jvm": [{"line": "3.5", "spark": "3.5.5",
+                        "scala": scala, "scalaBinary": binary, "java": "17", "buildJava": "21"}]},
+                    "artifacts": [],
                 }))
-                commands = self.simulate(line=line, native=native)
-                self.assertEqual(len(commands), 3)
+                with mock.patch.dict(os.environ, {"CONSUMER_JAVA_HOME": str(runtime)}):
+                    commands = self.simulate(line="3.5", scala=scala, runtime_java=runtime)
+                self.assertEqual(len(commands), 2)
                 self.assertNotIn("--jars", commands[0] + commands[1])
-                self.assertEqual(commands[2][commands[2].index("--jars") + 1], str(native))
                 report = json.loads((self.output / "consumer-result.json").read_text())
-                self.assertEqual(report["line"], line)
+                self.assertEqual((report["line"], report["scala"]), ("3.5", scala))
+                self.assertEqual((report["java"], report["buildJava"]), ("17", "21"))
                 self.assertEqual([entry["entry"] for entry in report["entries"]],
-                                 ["universal", "platform", "thin"])
-                self.assertEqual(report["entries"][2]["nativeBundle"]["sha256"], consumer.digest(native))
+                                 ["universal", "platform"])
+
+    def test_wrong_jdk_is_rejected_before_compilation_or_runtime_installation(self):
+        with mock.patch.object(consumer, "fixture_resources", return_value={}), \
+             mock.patch.object(consumer, "expected_artifacts", return_value=("entry", {})), \
+             mock.patch.object(consumer, "java_major", return_value="17"), \
+             mock.patch.object(consumer, "install_spark") as install, \
+             mock.patch.object(consumer, "compile_fixture") as compile_fixture, \
+             mock.patch.object(consumer.sys, "platform", "linux"), \
+             mock.patch.object(consumer.os, "uname", return_value=mock.Mock(machine="x86_64")), \
+             self.assertRaisesRegex(ValueError, "build requires Java 21"):
+            consumer.smoke(self.candidate, "4.0", "2.13.16", "linux-x86_64", self.output)
+        install.assert_not_called()
+        compile_fixture.assert_not_called()
 
     def test_required_check_evidence_rejects_missing_duplicate_and_canceled_work(self):
         lines = [f"MILVUS_CHECK\t{name}\tpassed" for name in consumer.REQUIRED_CHECKS]

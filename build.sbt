@@ -10,7 +10,6 @@ import ReleaseArtifacts.{
   releaseJvmSourceMappings,
   ReleaseJvm
 }
-import ThinArtifacts.{releaseThinArtifacts, thinModule}
 
 // Shared defaults. Per-line Scala and Java settings live in Modules.
 ThisBuild / scalaVersion := Versions.selectedScala
@@ -21,7 +20,8 @@ ThisBuild / version := connectorVersion
 // making Compile resolve or validate the host's native bundle.
 lazy val compileAndRuntime = "compile->compile;runtime->runtime"
 
-// The root is an aggregate only. Select one Spark line per sbt invocation.
+// The root is an aggregate only. Select one Spark/Scala combination per sbt
+// invocation; publication exports its complete JVM implementation, not modules.
 lazy val root = project
   .in(file("."))
   .aggregate(nativeRuntime, nativeStorage, core, spark)
@@ -34,9 +34,7 @@ lazy val root = project
     assembly / aggregate := false,
     assembly := sys.error("Use spark/assembly for the selected Spark line"),
     releaseJvmArtifacts / aggregate := false,
-    releaseJvmArtifacts := (spark / releaseJvmArtifacts).value,
-    releaseThinArtifacts / aggregate := false,
-    releaseThinArtifacts := (spark / releaseThinArtifacts).value
+    releaseJvmArtifacts := (spark / releaseJvmArtifacts).value
   )
 
 // Layer 1: one component-neutral runtime and cross-built Storage bindings.
@@ -46,7 +44,6 @@ lazy val nativeRuntime = Project("native-runtime", file("native/runtime"))
     moduleName := "spark-milvus-native-runtime",
     Modules.javaOnly,
     NativeBundle.settings,
-    ThinArtifacts.settings("native-runtime", Versions.sharedJavaRelease),
     ReadValidation.artifactSettings,
     libraryDependencies ++= Seq(
       "junit" % "junit" % "4.13.2" % Test,
@@ -62,7 +59,6 @@ lazy val nativeStorage = Project("native-storage", file("native/storage"))
     name := "native-storage",
     moduleName := "spark-milvus-native-storage",
     Modules.sparkFreeModuleSettings,
-    ThinArtifacts.settings("native-storage", Versions.sharedJavaRelease),
     NativeBundle.storageBindingSettings,
     ReadValidation.artifactSettings,
     // Native libraries reach the build only through the unified bundle. A
@@ -127,7 +123,6 @@ lazy val core = project
     name := "core",
     moduleName := "spark-milvus-core",
     Modules.sparkFreeModuleSettings,
-    ThinArtifacts.settings("core", Versions.sharedJavaRelease),
     ReadValidation.artifactSettings,
     Modules.jacksonPin,
     publish / skip := true,
@@ -233,7 +228,6 @@ lazy val spark = Project("spark", file("spark"))
     )
   )
   .settings(jvmReleaseSettings(Versions.selected))
-  .settings(thinReleaseSettings)
   .settings(
     if (Versions.selected.id == "3.5") Seq.empty
     else connectClient(Versions.selected)
@@ -266,47 +260,38 @@ def connectClient(l: Versions.SparkLine): Seq[Setting[_]] = Seq(
   }
 )
 
-// Thin candidates preserve module boundaries for downstream compilation. Their
-// POMs and manifests receive release coordinates without changing local modules.
-lazy val thinReleaseSettings: Seq[Setting[_]] =
-  ThinArtifacts.settings("spark", Versions.selected.javaRelease) ++ Seq(
-    releaseThinArtifacts / aggregate := false,
-    releaseThinArtifacts := ThinArtifacts.export(
-      (ThisBuild / baseDirectory).value,
-      Versions.selected,
-      scalaVersion.value,
-      scalaBinaryVersion.value,
-      Seq(
-        (nativeRuntime / thinModule).value,
-        (nativeStorage / thinModule).value,
-        (core / thinModule).value,
-        thinModule.value
-      ),
-      (Compile / fullClasspath).value ++ (Runtime / managedClasspath).value,
-      javaHome.value.getOrElse(file(sys.props("java.home"))),
-      streams.value.log
-    )
-  )
-
 // Maven's JVM implementation excludes the Milvus platform bundle. It uses
 // Compile products and the managed Runtime dependency selection, never the
 // native Runtime/unmanagedJars path. Existing local assemblies keep that path.
+// Export paths include the Scala binary version because Spark 3.5 publishes
+// both Scala variants; module wiring and local classpaths stay unchanged.
+// Arrow 12's missing Linux ARM64 C Data JNI resource is supplied independently
+// from the Milvus engine bundle, only when exporting the Spark 3.5 distribution.
 def jvmReleaseSettings(l: Versions.SparkLine): Seq[Setting[_]] =
   inConfig(ReleaseJvm)(baseAssemblySettings ++ fatJarRules) ++ Seq(
     releaseJvmArtifacts / aggregate := false,
     ReleaseArtifacts.prepareReleaseJvm := {
       ReleaseArtifacts.requireVersion()
       IO.createDirectory(
-        ReleaseArtifacts.outputDirectory((ThisBuild / baseDirectory).value, l)
+        ReleaseArtifacts.outputDirectory(
+          (ThisBuild / baseDirectory).value,
+          l,
+          scalaBinaryVersion.value
+        )
       )
     },
     ReleaseJvm / assembly := (ReleaseJvm / assembly)
       .dependsOn(ReleaseArtifacts.prepareReleaseJvm)
       .value,
-    releaseJvmClasspath := ReleaseArtifacts.classpath(
-      (Compile / fullClasspath).value,
-      (Runtime / managedClasspath).value
-    ),
+    releaseJvmClasspath :=
+      ReleaseArtifacts.classpath(
+        (Compile / fullClasspath).value,
+        (Runtime / managedClasspath).value
+      ) ++ ReleaseArtifacts.supplementClasspath(
+        (ThisBuild / baseDirectory).value,
+        l,
+        streams.value.log
+      ),
     ReleaseJvm / assembly / fullClasspath := releaseJvmClasspath.value,
     ReleaseJvm / assembly / externalDependencyClasspath :=
       releaseJvmClasspath.value.filter(_.data.isFile),
@@ -314,7 +299,11 @@ def jvmReleaseSettings(l: Versions.SparkLine): Seq[Setting[_]] =
     ReleaseJvm / assembly / packageOptions := Seq.empty,
     ReleaseJvm / assembly / assemblyOutputPath := {
       val output =
-        ReleaseArtifacts.outputDirectory((ThisBuild / baseDirectory).value, l)
+        ReleaseArtifacts.outputDirectory(
+          (ThisBuild / baseDirectory).value,
+          l,
+          scalaBinaryVersion.value
+        )
       val artifact = ReleaseArtifacts.artifactId(l, scalaBinaryVersion.value)
       output / s"$artifact-$connectorVersion.jar"
     },
@@ -429,6 +418,10 @@ lazy val fatJarRules: Seq[Setting[_]] = Seq(
     // Arrow JNI bindings contain hardcoded class names, so Arrow stays unshaded.
   ),
   assembly / assemblyMergeStrategy := {
+    // The Arrow supplement's source, licenses and provenance are checksum-bound
+    // to their exact paths; the default license renaming would invalidate them.
+    case PathList("META-INF", "spark-milvus", "arrow-cdata", _*) =>
+      MergeStrategy.deduplicate
     // Conflicting native resources must fail packaging.
     case "META-INF/milvus-native/requirements.list" =>
       MergeStrategy.filterDistinctLines

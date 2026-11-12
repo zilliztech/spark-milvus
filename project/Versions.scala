@@ -97,12 +97,13 @@ object Versions {
   val sharedJavaRelease = "11"
   val sharedScalas: Seq[String] = Seq(scala212, scala213)
 
-  /** Build checks cover every source combination. Publication remains a
-    * separate, smaller contract; a successful compile does not expand it.
+  /** Every supported Spark/Scala combination publishes the same bundled
+    * distribution. Consumers use the runtime versions below; compilation
+    * continues to target each line's compatibility floor with Java 21.
     */
   val buildJava = "21"
   val releaseConsumers: Map[String, String] =
-    Map("4.0" -> "4.0.1", "4.2" -> "4.2.0")
+    Map("3.5" -> "3.5.5", "4.0" -> "4.0.1", "4.1" -> "4.1.1", "4.2" -> "4.2.0")
 
   def buildMatrixJson: String = {
     import scala.util.parsing.json.{JSONArray, JSONObject}
@@ -139,20 +140,21 @@ object Versions {
         )
       )
     }
-    val release =
-      lines.filter(current => releaseConsumers.contains(current.id)).map {
-        current =>
-          JSONObject(
-            Map(
-              "line" -> current.id,
-              "project" -> current.projectId,
-              "spark" -> releaseConsumers(current.id),
-              "compileSpark" -> current.spark,
-              "scala" -> scala213,
-              "java" -> buildJava
-            )
-          )
-      }
+    val release = for {
+      current <- lines
+      scala <- current.scalas
+    } yield JSONObject(
+      Map(
+        "line" -> current.id,
+        "project" -> current.projectId,
+        "spark" -> releaseConsumers(current.id),
+        "compileSpark" -> current.spark,
+        "scala" -> scala,
+        "scalaBinary" -> binary(scala),
+        "buildJava" -> buildJava,
+        "java" -> (if (current.id == "3.5") "17" else buildJava)
+      )
+    )
     JSONObject(
       Map(
         "schemaVersion" -> 1,

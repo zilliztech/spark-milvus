@@ -398,5 +398,7 @@ Use one matching Storage platform bundle on both driver and executor classpaths.
 Native manifest format 2 lives under `native/milvus/2/<platform>/`; each binding
 publishes its component requirement under `META-INF/milvus-native/requirements/`.
 A missing component, mismatched source revision or corrupt library fails loading.
-Thin JARs contain no native libraries. See [releasing](releasing.md) for artifact
-selection and [contributing](contributing.md) for native build checks.
+The JVM implementation JAR contains no Milvus native libraries; Maven entry
+artifacts bring the matching platform JARs through their dependencies. See
+[releasing](releasing.md) for artifact selection and
+[contributing](contributing.md) for native build checks.

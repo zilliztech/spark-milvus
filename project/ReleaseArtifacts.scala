@@ -4,7 +4,7 @@ import java.security.MessageDigest
 import java.util.jar.JarFile
 import java.util.zip.{ZipEntry, ZipOutputStream}
 import scala.collection.JavaConverters._
-import scala.sys.process.Process
+import scala.sys.process.{Process, ProcessLogger}
 import scala.util.parsing.json.{JSONArray, JSONObject}
 
 import sbt._
@@ -52,8 +52,13 @@ object ReleaseArtifacts {
   def artifactId(line: Versions.SparkLine, scalaBinary: String): String =
     s"spark-milvus-${line.id}-jvm_$scalaBinary"
 
-  def outputDirectory(root: File, line: Versions.SparkLine): File =
-    root / "target" / "release-jvm" / line.id
+  /** Spark 3.5 has two Scala variants; both must survive candidate staging. */
+  def outputDirectory(
+      root: File,
+      line: Versions.SparkLine,
+      scalaBinary: String
+  ): File =
+    root / "target" / "release-jvm" / line.id / scalaBinary
 
   /** These families are supplied by the Spark distribution. parquet-avro and
     * Arrow's C Data bridge are not supplied by Spark and remain in the JAR.
@@ -89,6 +94,59 @@ object ReleaseArtifacts {
     )
   }
 
+  /** Apache Arrow 12 does not publish its Linux ARM64 C Data JNI resource. The
+    * separately audited supplement preserves Arrow's own resource loader and
+    * must never change another Spark line's Arrow implementation.
+    */
+  def supplementClasspath(
+      root: File,
+      line: Versions.SparkLine,
+      log: Logger
+  ): Classpath = {
+    val configured = sys.props.get("arrow.cdata.supplement")
+    if (line.id == "3.5") {
+      val path = file(
+        configured.getOrElse(
+          sys.error(
+            "Spark 3.5 JVM export requires -Darrow.cdata.supplement=/absolute/path/to/arrow-cdata-12-linux-aarch64.jar"
+          )
+        )
+      )
+      require(
+        path.isAbsolute && path.isFile,
+        "Arrow C Data supplement must be an existing absolute JAR path"
+      )
+      verifySupplement(root, path, embedded = false, log = log)
+      Seq(Attributed.blank(path))
+    } else {
+      require(
+        configured.isEmpty,
+        "The Arrow 12 supplement is only valid for Spark 3.5"
+      )
+      Seq.empty
+    }
+  }
+
+  private def verifySupplement(
+      root: File,
+      path: File,
+      embedded: Boolean,
+      log: Logger
+  ): Unit = {
+    val arguments = Seq(
+      "python3",
+      (root / "scripts" / "ci" / "arrow_cdata.py").getAbsolutePath,
+      "verify",
+      "--input",
+      path.getAbsolutePath
+    ) ++ (if (embedded) Seq("--embedded") else Seq.empty)
+    require(
+      Process(arguments, root, "LD_PRELOAD" -> "")
+        .!(ProcessLogger(log.info(_), log.error(_))) == 0,
+      "Arrow C Data supplement validation failed"
+    )
+  }
+
   def export(
       root: File,
       line: Versions.SparkLine,
@@ -104,11 +162,14 @@ object ReleaseArtifacts {
   ): Seq[File] = {
     val version = requireVersion()
     require(
-      scalaBinary == "2.13",
-      "The release matrix currently supports Scala 2.13"
+      line.scalas.contains(scalaVersion) &&
+        scalaBinary == scalaVersion.split('.').take(2).mkString("."),
+      s"Unsupported release combination: Spark ${line.id}, Scala $scalaVersion ($scalaBinary)"
     )
     verifyBinary(binary)
-    val directory = outputDirectory(root, line)
+    if (line.id == "3.5")
+      verifySupplement(root, binary, embedded = true, log = log)
+    val directory = outputDirectory(root, line, scalaBinary)
     IO.createDirectory(directory)
     val stem = s"${artifactId(line, scalaBinary)}-$version"
     require(
@@ -223,8 +284,10 @@ object ReleaseArtifacts {
       val forbidden = names.filter { name =>
         // These JVM dependencies carry portable upstream JNI resources. Keep
         // them where their own loaders expect; neither is a Milvus platform bundle.
+        // Arrow 12 uses architecture directories at the JAR root; newer Arrow
+        // versions place those same directories under arrow_cdata_jni/.
         val arrowBridge = name.matches(
-          "arrow_cdata_jni/(aarch_64|x86_64)/(libarrow_cdata_jni\\.(so|dylib)|arrow_cdata_jni\\.dll)"
+          "(?:arrow_cdata_jni/)?(aarch_64|x86_64)/(libarrow_cdata_jni\\.(so|dylib)|arrow_cdata_jni\\.dll)"
         )
         val grpcTransport = name.matches(
           "META-INF/native/(?:lib)?io_grpc_netty_shaded_netty_(?:tcnative|transport_native_epoll)_[A-Za-z0-9_]+\\.(?:so|dylib|dll)"

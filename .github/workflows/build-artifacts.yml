@@ -28,7 +28,6 @@ jobs:
       native: ${{ steps.plan.outputs.native }}
       jvm: ${{ steps.plan.outputs.jvm }}
       assembly: ${{ steps.plan.outputs.assembly }}
-      thin: ${{ steps.plan.outputs.thin }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -65,7 +64,7 @@ jobs:
           if len(assembly) != len(platforms):
               raise SystemExit('Release plan must build every Linux native platform')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
-              for key, rows in (('native', plan['native']), ('jvm', plan['jvm']), ('assembly', assembly), ('thin', plan['thin'])):
+              for key, rows in (('native', plan['native']), ('jvm', plan['jvm']), ('assembly', assembly)):
                   print(f'{key}={json.dumps({"include": rows}, separators=(",", ":"))}', file=out)
           PY
       - uses: actions/upload-artifact@v4
@@ -243,9 +242,42 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  # Arrow 12 omits its Linux ARM64 C Data JNI library from the upstream JAR.
+  # Build that small upstream component separately, even when Milvus native
+  # builds are disabled, so both Spark 3.5 Scala variants remain consumable.
+  arrow-cdata:
+    name: Arrow 12 C Data JNI (Linux ARM64)
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Build the pinned Arrow 12 JNI supplement
+        run: |
+          python3 scripts/ci/arrow_cdata.py build \
+            --work-dir "$RUNNER_TEMP/arrow-cdata" \
+            --output target/arrow-cdata-12-linux-aarch64.jar
+          python3 scripts/ci/arrow_cdata.py verify --input target/arrow-cdata-12-linux-aarch64.jar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arrow-cdata-12-linux-aarch64
+          path: target/arrow-cdata-12-linux-aarch64.jar
+          if-no-files-found: error
+          retention-days: 14
+
   jvm:
-    name: JVM (Spark ${{ matrix.line }})
-    needs: plan
+    # Preserve the existing 4.0/4.2 required-check names. Only Spark 3.5 has
+    # multiple Scala variants that need distinct check names.
+    name: JVM (Spark ${{ matrix.line }}${{ matrix.line == '3.5' && format(', Scala {0}', matrix.scalaBinary) || '' }})
+    needs: [plan, arrow-cdata]
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.jvm) }}
@@ -261,54 +293,30 @@ jobs:
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '${{ matrix.java }}'
+          java-version: '${{ matrix.buildJava }}'
           cache: sbt
       - uses: sbt/setup-sbt@v1
-      - name: Build the JVM artifact without a native bundle
-        env:
-          RELEASE_VERSION: ${{ inputs.version }}
-          SPARK_LINE: ${{ matrix.line }}
-          SCALA_VERSION: ${{ matrix.scala }}
-        run: sbt "-DsparkVersion=$SPARK_LINE" "-DscalaVersion=$SCALA_VERSION" "-Drelease.version=$RELEASE_VERSION" "spark/releaseJvmArtifacts"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/download-artifact@v4
+        if: matrix.line == '3.5'
         with:
-          name: jvm-${{ matrix.line }}
-          path: target/release-jvm/${{ matrix.line }}/
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 14
-
-  thin:
-    name: Thin ${{ matrix.product }} (Spark ${{ matrix.line }}, Scala ${{ matrix.scala }})
-    needs: plan
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.thin) }}
-    runs-on: ubuntu-22.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-      - run: git submodule update --init --recursive milvus-proto milvus-storage
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '21'
-          cache: sbt
-      - uses: sbt/setup-sbt@v1
-      - name: Export the selected thin product and its exact dependencies
+          name: arrow-cdata-12-linux-aarch64
+          path: arrow-cdata-input
+      - name: Build the JVM artifact without a Milvus native bundle
         env:
           RELEASE_VERSION: ${{ inputs.version }}
           SPARK_LINE: ${{ matrix.line }}
           SCALA_VERSION: ${{ matrix.scala }}
         run: |
+          extra=()
+          if [[ "$SPARK_LINE" == '3.5' ]]; then
+            extra+=("-Darrow.cdata.supplement=$GITHUB_WORKSPACE/arrow-cdata-input/arrow-cdata-12-linux-aarch64.jar")
+          fi
           sbt "-DsparkVersion=$SPARK_LINE" "-DscalaVersion=$SCALA_VERSION" \
-            "-Drelease.version=$RELEASE_VERSION" spark/releaseThinArtifacts
+            "-Drelease.version=$RELEASE_VERSION" "${extra[@]}" spark/releaseJvmArtifacts
       - uses: actions/upload-artifact@v4
         with:
-          name: thin-${{ matrix.line }}-${{ matrix.scala }}-${{ matrix.product }}
-          path: target/release-thin/${{ matrix.line }}/${{ matrix.scalaBinary }}/${{ matrix.product }}/
+          name: jvm-${{ matrix.line }}-${{ matrix.scalaBinary }}
+          path: target/release-jvm/${{ matrix.line }}/${{ matrix.scalaBinary }}/
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
@@ -442,7 +450,7 @@ jobs:
           retention-days: 7
 
   candidate:
-    needs: [native, darwin-reads, jvm, thin]
+    needs: [native, darwin-reads, jvm]
     if: inputs.build_native
     runs-on: ubuntu-22.04
     timeout-minutes: 20
@@ -462,10 +470,6 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           pattern: jvm-*
-          path: release-inputs
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: thin-*
           path: release-inputs
       - uses: actions/download-artifact@v4
         with:

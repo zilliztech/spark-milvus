@@ -53,8 +53,8 @@ Follow the [sbt skill](../.agents/skills/spark-milvus-sbt/SKILL.md).
 `build.sbt` owns module wiring and exports; `project/Versions.scala` owns profiles;
 `Dependencies.scala` owns dependency declarations; `Modules.scala` enforces
 layering and tests. `NativeBundle.scala` validates component requirements and
-platform bundles. `ThinArtifacts.scala` exports the reader closure;
-`ReleaseArtifacts.scala` exports the reader JVM distribution.
+platform bundles. `ReleaseArtifacts.scala` exports the bundled JVM distribution
+for every supported Spark and Scala combination.
 
 ## Fixed inputs for read tests
 
