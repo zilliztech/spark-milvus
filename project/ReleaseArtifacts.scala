@@ -11,7 +11,7 @@ import sbt._
 import sbt.Keys._
 
 /** Exports immutable JVM release inputs; signing and repository publication are
-  * deliberately outside the build. See docs/releasing.md.
+  * deliberately outside the build.
   */
 object ReleaseArtifacts {
   val ReleaseJvm = config("releaseJvm")

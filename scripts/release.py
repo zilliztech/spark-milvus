@@ -568,7 +568,8 @@ def stage(plan_path, inputs, output):
             document_jars(artifact, "native", f"# {artifact}\n\nResource-only native artifact.\n"
                 f"Storage source: https://github.com/milvus-io/milvus-storage/tree/{plan['pins']['milvus-storage']}\n"
                 "The main JAR contains dependency provenance and third-party licenses.\n"
-                "See docs/releasing.md in the connector source for build and system requirements.\n", platform=platform)
+                "See docs/contributing.md for build instructions and docs/cluster-setup.md "
+                "for system requirements in the connector source.\n", platform=platform)
         jvm_lines = [] if plan.get("distribution") == "thin" else plan["jvm"]
         metadata = [json.loads(path.read_text()) | {"_directory": path.parent}
                     for path in inputs.rglob("artifact.json")]

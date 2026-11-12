@@ -76,8 +76,9 @@ provided for Windows, musl-based Linux (including Alpine), or Intel Macs.
 Both the Spark driver and every executor must meet these requirements and have
 a matching native platform library on their classpaths.
 
-See [artifact selection](docs/releasing.md#using-release-artifacts) for the full
-runtime requirements and thin-module coordinates.
+See [cluster setup](docs/cluster-setup.md#prepare-every-driver-and-executor) for
+runtime requirements and [artifact selection](docs/release-notes/3.0.md#maven-dependencies)
+for thin-module coordinates.
 
 ## Installing
 
@@ -312,8 +313,7 @@ application owns submission to Milvus and online visibility of the replacements.
 | [Reference](docs/reference.md) | Supported options, defaults, storage credentials and data types |
 | [Examples](demo/README.md) | Collection reads, SQL and column replacement |
 | [Cluster setup](docs/cluster-setup.md) | Driver and executor permissions, networking and native runtime |
-| [3.0 release notes](docs/release-notes/3.0.md) | Capabilities and migration from earlier versions |
-| [Release artifacts](docs/releasing.md#using-release-artifacts) | Maven coordinates and platform choices |
+| [3.0 release notes](docs/release-notes/3.0.md) | Capabilities, Maven coordinates, platform choices and migration from earlier versions |
 
 ## License
 
