@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Stage and verify the Spark 4.0 assembly that the release image packages.
+"""Stage and verify the Spark 4.0 assembly against its release plan.
 
-``stage`` records the assembly next to a manifest that names the release plan it
-was built from. ``verify`` checks a downloaded staging directory against the
-release tag before any credential is used, and exports the image tags.
+``stage`` records the assembly identity and native bundle checksum in a manifest.
+``verify`` checks the staged JAR contents and checksum against its expected
+version, source commit and native platform.
 """
 
 import argparse
@@ -17,10 +17,7 @@ from zipfile import BadZipFile, ZipFile
 
 
 SPARK_LINE = "4.0"
-PLATFORMS = {
-    "linux-x86_64": {"dockerPlatform": "linux/amd64", "architecture": "amd64"},
-    "linux-aarch64": {"dockerPlatform": "linux/arm64", "architecture": "arm64"},
-}
+PLATFORMS = ("linux-x86_64", "linux-aarch64")
 MANIFEST = "assembly-manifest.json"
 PROVIDER = "com/zilliz/spark/connector/sources/MilvusDataSource.class"
 LIBRARIES = ("libmilvus-storage-jni.so",)
@@ -56,18 +53,12 @@ def load_json(path, description):
     return value
 
 
-def platform_entry(platform):
-    require(platform in PLATFORMS, "Image platform must be one of " + ", ".join(sorted(PLATFORMS)))
-    return PLATFORMS[platform]
+def check_platform(platform):
+    require(platform in PLATFORMS, "Assembly platform must be one of " + ", ".join(sorted(PLATFORMS)))
 
 
 def jar_name(version):
     return f"spark-milvus-{SPARK_LINE}-bundle-{version}.jar"
-
-
-def image_tag(version, architecture=None):
-    tag = f"{version}-spark{SPARK_LINE}"
-    return tag if architecture is None else f"{tag}-{architecture}"
 
 
 def check_assembly(jar, platform):
@@ -96,7 +87,7 @@ def check_assembly(jar, platform):
 
 
 def stage(assembly, plan_path, platform, native_bundle, output):
-    entry = platform_entry(platform)
+    check_platform(platform)
     plan = load_json(plan_path, "Release plan")
     version, source = plan.get("version", ""), plan.get("sourceSha", "")
     require(VERSION.fullmatch(version) is not None and not version.endswith("-SNAPSHOT"),
@@ -117,8 +108,6 @@ def stage(assembly, plan_path, platform, native_bundle, output):
         "sourceSha": source,
         "sparkLine": SPARK_LINE,
         "platform": platform,
-        "dockerPlatform": entry["dockerPlatform"],
-        "architecture": entry["architecture"],
         "jar": staged.name,
         "sha256": sha256(staged),
         "nativeBundleSha256": sha256(native_bundle),
@@ -129,7 +118,7 @@ def stage(assembly, plan_path, platform, native_bundle, output):
 
 
 def verify(directory, platform, version, source):
-    entry = platform_entry(platform)
+    check_platform(platform)
     manifest = load_json(directory / MANIFEST, "Assembly manifest")
     expected = {
         "schemaVersion": 1,
@@ -137,8 +126,6 @@ def verify(directory, platform, version, source):
         "sourceSha": source,
         "sparkLine": SPARK_LINE,
         "platform": platform,
-        "dockerPlatform": entry["dockerPlatform"],
-        "architecture": entry["architecture"],
         "jar": jar_name(version),
     }
     for key, value in expected.items():
@@ -152,19 +139,7 @@ def verify(directory, platform, version, source):
     check_assembly(jar, platform)
     return {
         "assembly": str(jar.resolve()),
-        "docker_platform": entry["dockerPlatform"],
-        "image_tag": image_tag(version, entry["architecture"]),
-        "manifest_tag": image_tag(version),
     }
-
-
-def write_outputs(values, github_output):
-    if github_output is None:
-        return
-    with open(github_output, "a", encoding="utf-8") as out:
-        for key, value in values.items():
-            require("\n" not in value, f"Output {key} must be a single line")
-            print(f"{key}={value}", file=out)
 
 
 def main(argv=None):
@@ -176,12 +151,11 @@ def main(argv=None):
     staging.add_argument("--platform", required=True)
     staging.add_argument("--native-bundle", required=True, type=Path)
     staging.add_argument("--output", required=True, type=Path)
-    checking = commands.add_parser("verify", help="Check a staged assembly against the release tag")
+    checking = commands.add_parser("verify", help="Check a staged assembly against its release identity")
     checking.add_argument("--input", required=True, type=Path)
     checking.add_argument("--platform", required=True)
     checking.add_argument("--version", required=True)
     checking.add_argument("--source-sha", required=True)
-    checking.add_argument("--github-output")
     args = parser.parse_args(argv)
     try:
         if args.command == "stage":
@@ -189,10 +163,9 @@ def main(argv=None):
             print(json.dumps(manifest, indent=2, sort_keys=True))
         else:
             values = verify(args.input, args.platform, args.version, args.source_sha)
-            write_outputs(values, args.github_output)
             print(json.dumps(values, indent=2, sort_keys=True))
     except VerificationError as error:
-        print(f"Assembly image check failed: {error}", file=sys.stderr)
+        print(f"Assembly check failed: {error}", file=sys.stderr)
         return 1
     return 0
 

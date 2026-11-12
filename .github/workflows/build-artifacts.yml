@@ -27,7 +27,7 @@ jobs:
     outputs:
       native: ${{ steps.plan.outputs.native }}
       jvm: ${{ steps.plan.outputs.jvm }}
-      image: ${{ steps.plan.outputs.image }}
+      assembly: ${{ steps.plan.outputs.assembly }}
       thin: ${{ steps.plan.outputs.thin }}
     steps:
       - uses: actions/checkout@v5
@@ -57,17 +57,15 @@ jobs:
           python3 - <<'PY'
           import json, os
           plan = json.load(open('plan.json'))
-          # The Spark 4.0 image covers the Linux native platforms; each is
-          # assembled on its own architecture because sbt validates the
-          # bundle against the build host.
-          docker = {'linux-x86_64': 'linux/amd64', 'linux-aarch64': 'linux/arm64'}
-          image = [{'platform': row['platform'], 'runner': row['runner'],
-                    'docker_platform': docker[row['platform']]}
-                   for row in plan['native'] if row['platform'] in docker]
-          if len(image) != len(docker):
+          # The Spark 4.0 assembly is built on each Linux architecture because
+          # sbt validates the native bundle against the build host.
+          platforms = {'linux-x86_64', 'linux-aarch64'}
+          assembly = [{'platform': row['platform'], 'runner': row['runner']}
+                      for row in plan['native'] if row['platform'] in platforms]
+          if len(assembly) != len(platforms):
               raise SystemExit('Release plan must build every Linux native platform')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
-              for key, rows in (('native', plan['native']), ('jvm', plan['jvm']), ('image', image), ('thin', plan['thin'])):
+              for key, rows in (('native', plan['native']), ('jvm', plan['jvm']), ('assembly', assembly), ('thin', plan['thin'])):
                   print(f'{key}={json.dumps({"include": rows}, separators=(",", ":"))}', file=out)
           PY
       - uses: actions/upload-artifact@v4
@@ -316,12 +314,12 @@ jobs:
           retention-days: 14
 
   assembly:
-    name: Spark 4.0 assembly and image (${{ matrix.platform }})
+    name: Spark 4.0 assembly (${{ matrix.platform }})
     needs: [plan, native]
     if: inputs.build_native
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.image) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.assembly) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
@@ -361,23 +359,37 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version }}
           NATIVE_PLATFORM: ${{ matrix.platform }}
         run: |
-          python3 scripts/ci/assembly_image.py stage \
+          python3 scripts/ci/assembly.py stage \
             --assembly "spark/target/scala-2.13/spark-milvus-4.0-bundle-$RELEASE_VERSION.jar" \
             --plan release-inputs/plan.json --platform "$NATIVE_PLATFORM" \
             --native-bundle "native-input/milvus-native-$NATIVE_PLATFORM.jar" \
             --output "target/assembly-$NATIVE_PLATFORM"
-      - name: Build the image locally and run both demo languages in it
+      - name: Verify the staged assembly identity and contents
         env:
           RELEASE_VERSION: ${{ inputs.version }}
           NATIVE_PLATFORM: ${{ matrix.platform }}
-          DOCKER_PLATFORM: ${{ matrix.docker_platform }}
         run: |
-          image="spark-milvus:ci-$NATIVE_PLATFORM"
-          ./docker/build.sh \
-            --assembly "$GITHUB_WORKSPACE/target/assembly-$NATIVE_PLATFORM/spark-milvus-4.0-bundle-$RELEASE_VERSION.jar" \
-            --image "$image" --platform "$DOCKER_PLATFORM"
-          docker run --rm "$image" /opt/spark-milvus/demo/run.sh python 01_read_snapshot.py
-          docker run --rm "$image" /opt/spark-milvus/demo/run.sh java FilterProject --explain
+          python3 scripts/ci/assembly.py verify --input "target/assembly-$NATIVE_PLATFORM" \
+            --platform "$NATIVE_PLATFORM" --version "$RELEASE_VERSION" \
+            --source-sha "$(git rev-parse HEAD)"
+      - name: Read fixed Snapshot files with the assembly in Python and Java
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          NATIVE_PLATFORM: ${{ matrix.platform }}
+          OMP_NUM_THREADS: '2'
+          OPENBLAS_NUM_THREADS: '2'
+          SPARK_LOCAL_IP: '127.0.0.1'
+        run: |
+          python_env="$RUNNER_TEMP/assembly-spark"
+          python3 -m venv "$python_env"
+          spark_version="$(python3 -c 'import json; print(next(row["spark"] for row in json.load(open("release-inputs/plan.json"))["jvm"] if row["line"] == "4.0"))')"
+          "$python_env/bin/python" -m pip install --disable-pip-version-check "pyspark==$spark_version"
+          SPARK_HOME="$("$python_env/bin/python" -c 'import os,pyspark; print(os.path.dirname(pyspark.__file__))')"
+          export SPARK_HOME
+          export PYTHON="$python_env/bin/python" PYSPARK_PYTHON="$python_env/bin/python"
+          export CONNECTOR_JAR="$GITHUB_WORKSPACE/target/assembly-$NATIVE_PLATFORM/spark-milvus-4.0-bundle-$RELEASE_VERSION.jar"
+          ./demo/run.sh python 01_read_snapshot.py
+          ./demo/run.sh java FilterProject --explain
       - uses: actions/upload-artifact@v4
         with:
           name: assembly-${{ matrix.platform }}

@@ -93,6 +93,31 @@ wrong type fails the write before any manifest changes.
 The snapshot must be a Milvus snapshot file with a positive `snapshot_info.id`
 and Storage V3 segments. Only Storage V3 is written.
 
+## Write options
+
+Reuse the Snapshot path and storage settings from the read. Keep
+`milvus.read.mode=physical` and `milvus.read.include_row_id=true` on the read
+builder only, as in the example above; do not put them in the shared options
+map passed to the writer.
+
+| Option | Default | What to provide |
+|---|---|---|
+| `milvus.write.operation` | Unset; required for a write | `replace_columns`, the only supported write operation. |
+| `milvus.snapshot.path` | Unset; required | The same Snapshot file used to produce `_milvus_row_id`. The writer reads its schema, segments and pinned manifest revisions. |
+| `milvus.snapshot.max.json.bytes` | `67108864` (64 MiB) | A positive integer byte limit for the Snapshot JSON file read during planning. Increase it if the Snapshot metadata exceeds the default. |
+| `fs.*` | Resolved from the supplied options and Spark's Hadoop configuration | The [storage settings](reference.md#22-storage-location-and-credentials) for the Snapshot. The job needs read access to the existing data and write access to the segment locations and result address. |
+| `path` | Unset; required | Supply it with `.save(resultPath)`. It is a fresh address for the write's records and receipt; the replacement column files are stored beside the existing segment data. |
+
+The writer takes the fields to replace from the DataFrame's columns. Read
+selection options do not choose the write's rows or fields:
+
+| Options rejected by the writer | Reason |
+|---|---|
+| `milvus.read.mode`, `milvus.read.include_row_id` | These configure the source read. The DataFrame must already contain `_milvus_row_id`. |
+| `milvus.partitions`, `milvus.segments`, `milvus.filter` | The write must cover every stored row of the Snapshot. |
+| `fieldIDs`, `milvus.extra.columns` | Select the replacement columns in the DataFrame before writing. |
+| `milvus.snapshot.manifests`, `milvus.snapshot.schema.bytes`, `milvus.snapshot.schema.json` | A write requires the original Snapshot file, not an explicit empty Snapshot. |
+
 ## Write modes
 
 The write is a DataSource V2 batch write and accepts `mode("append")` only:
@@ -156,6 +181,16 @@ write's files the segment is `committed`, otherwise `not_committed`.
 `milvus.read.mode=write_result` reads `_result.json` and returns one row per
 segment. It reads only a published receipt; for a write that did not complete
 the error names the failure record.
+
+| Option | Default | What to provide |
+|---|---|---|
+| `milvus.read.mode` | Unset | Set `write_result` to read a receipt. |
+| `path` | Unset; required | Pass the write's result address to `.load(resultPath)`, not the `_result.json` file itself. |
+| `fs.*` | Resolved from the supplied options and Spark's Hadoop configuration | Storage settings with read access to the result address. This read resolves its own storage identity. |
+
+A receipt read does not need `milvus.snapshot.path` or access to the source
+Snapshot. The driver reads the receipt metadata and Spark returns it with the
+fixed schema below; do not supply a different schema.
 
 | Column | Type | Meaning |
 |---|---|---|

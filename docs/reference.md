@@ -3,7 +3,7 @@
 The reader consumes fixed Storage V3 snapshots without service calls; the
 [column replacement](column-replacement.md) writes new columns of such a
 snapshot back from a DataFrame. Both support the Spark/Scala combinations in
-[README](../README.md#project-structure).
+[README](../README.md#requirements-and-compatibility).
 Use a published 3.0 version, or a verified candidate built from this source.
 Follow the [installation guide](../README.md#installing) to select matching
 artifacts; CI candidates are not automatically published to Maven Central.
@@ -77,21 +77,37 @@ happen inside milvus-storage.
 
 ## 2. `milvus` format parameters
 
+Pass connector options to `.option("key", "value")` or `.options(...)` on the
+DataFrame reader or writer. Connector read/write option names are
+case-insensitive; use the canonical lowercase spellings for native storage
+properties. For a normal read, start with `milvus.snapshot.path` and the
+storage settings in [section 2.2](#22-storage-location-and-credentials); the read options in
+[section 2.3](#23-data-operation-parameters) are optional.
+
 ### 2.1 Fixed snapshot inputs
 
-Use `milvus.snapshot.path` for every nonempty snapshot. Explicit schema options
-can describe an empty snapshot only.
+Use `milvus.snapshot.path` for every nonempty Snapshot. Its file supplies the
+schema and data locations, so you do not need to provide schema, collection ID
+or partition IDs separately.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `milvus.snapshot.path` | unset | Fixed snapshot JSON location: a standard object-store URI, bucket-relative key, or local path for a local backend. Schema, partitions, deletes, indexes and segments come from this file. |
-| `milvus.snapshot.mode` | inferred | Inferred as `true` from a nonblank path or manifest list. Set `true` explicitly for a schema-only empty snapshot. `false` does not enable a different input mode. |
+| `milvus.snapshot.max.json.bytes` | 67108864 (64 MiB) | Positive maximum size of the snapshot JSON file, in bytes. Increase it only when your snapshot metadata needs a larger limit. |
+
+The following options describe an **empty Snapshot** without a snapshot file.
+They are not needed for ordinary reads. When `milvus.snapshot.path` is set,
+schema, collection ID and partition metadata are read from that file instead
+of these explicit metadata options.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `milvus.snapshot.mode` | inferred | Inferred as `true` from a nonblank path or manifest list. Set `true` explicitly when supplying only schema metadata. Setting it to `false` rejects a snapshot read; it does not select an online read mode. |
 | `milvus.snapshot.manifests` | unset | Only the empty JSON array `[]` is accepted, with schema bytes or schema JSON below. Nonempty lists are rejected: use `milvus.snapshot.path`. Mutually exclusive with `milvus.snapshot.path`. |
 | `milvus.snapshot.schema.bytes` | unset | Base64-encoded protobuf `CollectionSchema` bytes for an empty snapshot. Takes precedence over schema JSON when both are supplied. |
 | `milvus.snapshot.schema.json` | unset | Raw snapshot JSON containing the collection schema, used when schema bytes are absent. This is not Spark `StructType` JSON. |
-| `milvus.snapshot.collection.id` | 0 when absent | Collection ID for explicit metadata; a supplied value must be a positive Long. |
-| `milvus.snapshot.partition.ids` | unset | Comma-separated nonnegative partition IDs for explicit metadata. Use `milvus.partitions` below to select among a resolved snapshot's partitions. |
-| `milvus.snapshot.max.json.bytes` | 67108864 | Positive maximum size of a snapshot JSON file, in bytes. |
+| `milvus.snapshot.collection.id` | 0 when absent | Collection ID for the empty snapshot; a supplied value must be a positive Long. |
+| `milvus.snapshot.partition.ids` | unset | Comma-separated nonnegative partition IDs for the empty snapshot. Use `milvus.partitions` below to select among a resolved snapshot's partitions. |
 
 A standard object-store URI uses `s3a://`, `s3://`, `gs://` or `oss://` with
 the bucket as its authority. A bucket-relative key uses `fs.bucket_name`.
@@ -121,9 +137,10 @@ manifests alone cannot identify L0 segments or their delete scope.
 Supplying Spark `.schema()` does not replace the Milvus schema: field names,
 types and selection must match the fixed input.
 
-Options not listed in this reference are not read. The generic Spark `path`
-argument is not an input: provide `milvus.snapshot.path`. Use the canonical
-`fs.*` keys below for storage location and credentials.
+For snapshot data, supply `milvus.snapshot.path` and call `.load()` without a
+path argument. Spark's `.load(path)` selects the result location only when
+`milvus.read.mode=write_result` reads a column-replacement receipt. Use the
+canonical `fs.*` keys below for storage location and credentials.
 
 ### 2.2 Storage location and credentials
 
@@ -133,24 +150,40 @@ set `spark.redaction.regex=(?i)secret|password|token|access[._]?key` before
 starting Spark; preserve any additional rules your environment already uses.
 The default Spark pattern does not match the underscore spelling of these keys.
 
-| Canonical property | Meaning |
-| --- | --- |
-| `fs.storage_type` | `remote` by default; `local` for files available at the same path to driver and executors. Local storage does not use a bucket, endpoint or credentials. |
-| `fs.address` | Storage endpoint; required for remote storage after option/Hadoop resolution. |
-| `fs.bucket_name` | Bucket bound to the input. A standard snapshot URI can supply it; a conflicting bucket fails. |
-| `fs.root_path` | Milvus storage root, `files` by default. Set it to the root used by your snapshot. |
-| `fs.cloud_provider` | Backend understood by milvus-storage, such as `aws`. |
-| `fs.region` | Region used by storage requests. Set it explicitly for your deployment. |
-| `fs.use_ssl` | Whether the storage connection uses TLS; an endpoint URL's scheme also participates in resolution as described below. |
-| `fs.use_iam` | Use the native default credential chain instead of static keys. |
-| `fs.access_key_id`, `fs.access_key_value` | Paired long-term static credentials when neither IAM nor a role is selected. |
-| `fs.role_arn`, `fs.session_name`, `fs.external_id` | AssumeRole identity and optional session fields. |
-| `fs.use_virtual_host` | Virtual-host access; the inverse of path-style access. |
+| Canonical property | Default / resolution | Meaning |
+| --- | --- | --- |
+| `fs.storage_type` | `remote` with a resolved bucket; otherwise inferred `local` | Use `local` for files available at the same path to driver and executors. Local storage does not use a bucket, endpoint or credentials. |
+| `fs.address` | Explicit option or Hadoop endpoint; no fallback | Storage endpoint. Required for remote storage after configuration is resolved. |
+| `fs.bucket_name` | Snapshot URI or explicit configuration | Bucket bound to the input. Required for a bucket-relative remote key; a bucket that conflicts with the URI fails. |
+| `fs.root_path` | `files` | Storage root, including the local filesystem root. It is not automatically prepended to remote Snapshot keys: include the full bucket-relative key in the path. |
+| `fs.cloud_provider` | Hadoop translation or native default `aws` | Backend recognized by the bundled native library: `aws`, `gcp`, `aliyun`, `azure`, `tencent`, `huawei` or `volcengine`. Backend-specific credentials may require additional native properties. |
+| `fs.region` | Hadoop region or fallback `us-west-2` | Region used by storage requests. Set your actual region explicitly. |
+| `fs.use_ssl` | Resolved from explicit option, endpoint scheme or Hadoop SSL configuration | Whether storage requests use TLS. Set explicitly to match your endpoint; resolution details follow below. |
+| `fs.use_iam` | `true` for remote storage when no explicit setting, complete static-key pair or role is resolved | Use the native credential chain. Explicit `false` disables that fallback and requires static keys unless a role is selected. |
+| `fs.access_key_id`, `fs.access_key_value` | Unset or translated Hadoop keys | Paired long-term static credentials, used only when neither IAM nor a role is selected. |
+| `fs.role_arn` | Unset or translated Hadoop role | AssumeRole identity. Uses the native chain for source credentials and takes precedence over static keys. |
+| `fs.session_name`, `fs.external_id` | Unset | Optional role session name and external ID, where supported by the backend. |
+| `fs.use_virtual_host` | Inherited addressing setting or native default `false` | Virtual-host access, the inverse of path-style access. Some cloud backends require virtual-host addressing. |
 
-Additional native `fs.*` properties, such as `fs.ssl_ca_cert`, pass to
-milvus-storage and are validated there. No Milvus service TLS configuration is
-used. Storage options are per input; reading one input does not change the
-session's shared Hadoop configuration.
+Set `fs.use_iam=true` to use credentials available in each driver and executor
+process, such as an AWS role or AWS environment variables. For explicit
+long-term keys, replace it with `fs.use_iam=false` and provide both
+`fs.access_key_id` and `fs.access_key_value`. There is no `fs.session_token`
+option; use the native credential chain for temporary AWS credentials.
+
+Additional native `fs.*` properties, such as `fs.ssl_ca_cert`, and
+`extfs.<name>.*` groups pass to milvus-storage for validation and interpretation.
+Supported properties depend on the bundled native version and backend. Each
+external group needs its own location and credential settings; IAM fallback
+is not added to those groups. They do not enable cross-bucket references within
+one Snapshot. Storage options are per input; reading one input does not change
+the session's shared Hadoop configuration.
+
+#### Existing Hadoop configuration and aliases
+
+Prefer the canonical names above in new applications. For the bucket, legacy
+aliases `fs.bucketName` and `s3.bucketName` are accepted after `fs.bucket_name`,
+in that order.
 
 For S3-compatible endpoints, `fs.address` is the canonical endpoint option;
 DataFrame options `fs.s3a.endpoint` and `s3.endpoint` are aliases, in that
@@ -203,28 +236,54 @@ fails during planning.
 
 ### 2.3 Data Operation Parameters
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `MilvusOption.MilvusPartitions` (`milvus.partitions`) | String | No | unset | Comma-separated numeric partition IDs. The selector is applied after any snapshot source resolves. Every requested ID must exist; duplicates are ignored without changing the first-seen order. |
-| `MilvusOption.MilvusSegments` (`milvus.segments`) | String | No | unset | Comma-separated numeric segment IDs. It may be combined with `milvus.partitions`, in which case the scan reads their intersection. Every requested ID must exist. |
-| `MilvusOption.ReaderFieldIDs` (`fieldIDs`) | String | No | unset | Comma-separated numeric field IDs, applied during both schema inference and table creation. Each requested ID must exist in the snapshot schema; Spark projection can further prune this set. With an external `.schema()`, its non-metadata fields must select exactly these IDs and their names and Spark types must match the snapshot. |
-| `MilvusOption.MilvusExtraColumns` (`milvus.extra.columns`) | String | No | "" | Comma-separated metadata columns. The supported names are `_segment_id`, `_row_offset`, and `_timestamp`; see [Output schema](#output-schema). |
-| `MilvusOption.MilvusFilter` (`milvus.filter`) | String | No | unset | Milvus scalar expression for an ordinary table read. It is parsed and validated against the fixed snapshot during planning, evaluated in both row and columnar readers, and combined with Spark predicates and deletes before Limit. |
-| `MilvusOption.ReadMode` (`milvus.read.mode`) | String | No | unset | What a load reads. Unset reads the collection's live rows. `physical` reads every stored row, rows marked deleted included, which is what a [column replacement](column-replacement.md) must write back; it cannot be combined with `milvus.read.apply.deletes=true`. `write_result` reads the receipt a column replacement published at the load path instead of collection data. |
-| `MilvusOption.ReadIncludeRowId` (`milvus.read.include_row_id`) | Boolean | No | false | Adds `_milvus_row_id` to a `physical` read; see [Output schema](#output-schema). The snapshot must carry a positive `snapshot_info.id`. |
-| `MilvusOption.ReadApplyDeletes` (`milvus.read.apply.deletes`) | Boolean | No | true | Apply all segment-local and applicable L0 deletes visible in the fixed snapshot. L0 deletes apply within the same source channel and partition; partition `-1` covers all partitions of that channel. Setting this to `false` is explicit opt-out; any provided value besides `true` or `false`, including a blank value, is rejected. |
-| `milvus.read.vector.raw` | Boolean | No | false | Output type for vector columns. With the default `false`, vectors are converted to native Spark types (`FloatVector`/`Float16Vector`/`BFloat16Vector` to `ArrayType(FloatType)`, `Int8Vector` to `ArrayType(ShortType)`, `SparseFloatVector` to `MapType(LongType, FloatType)`). Set to `true` and vector columns come out as `BinaryType`, the bytes exactly as stored, for the caller to decode using `dim` and the element type. That path does no per-element conversion, which suits batch jobs that hand the bytes straight to a native library |
-| `milvus.read.columnar` | Boolean | No | true | How the scan delivers rows. With the default `true` Spark gets whole Arrow batches (`ColumnarBatch`) that wrap the native buffers without copying, with vector columns typed as `milvus.read.vector.raw` decides; a batch with deleted rows is delivered through a position map over the surviving rows, still without copying. `false` delivers one row at a time. Row and columnar readers use the same expected-row guard. |
-| `milvus.read.batch.max.rows` | Int | No | 8192 | Positive maximum rows requested from milvus-storage for one record batch; delivered as `reader.record_batch_max_rows`. |
-| `milvus.read.batch.max.bytes` | Long | No | 33554432 | Positive target byte limit for one native record batch; delivered as `reader.record_batch_max_size`. The current upstream maximum is 4294967296 (4 GiB). |
-| `milvus.read.arrow.max.bytes` | Long | No | 9223372036854775807 | Positive hard limit of the Arrow child allocator owned by one Spark read task. It covers imported/read Arrow buffers on row, columnar and vector paths, but not milvus-storage's separate native memory pool. |
+All options in this section are optional. By default, a scan reads all live
+rows and collection fields in the fixed Snapshot, converts vectors to Spark
+types, and uses columnar batches. Spark's `select` and `where` are enough for
+most applications; use these options when you need additional control.
 
-Provided selector lists reject blanks, empty entries and non-numeric values.
+#### Selecting rows and columns
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `milvus.partitions` | all partitions | Comma-separated nonnegative partition IDs, such as `10,11`. Every requested ID must exist. |
+| `milvus.segments` | all data segments | Comma-separated nonnegative data-segment IDs. Every requested ID must exist. If `milvus.partitions` is also set, every requested segment must belong to those partitions; a segment outside them fails planning. Applicable delete-only segments are retained automatically. |
+| `fieldIDs` | all collection fields | Comma-separated nonnegative field IDs. Each ID must exist in the snapshot schema, including its system fields. This limits the initial schema; Spark `select` can narrow it further. An explicit `.schema()` must select exactly these IDs with matching names and Spark types. |
+| `milvus.filter` | no filter | Scalar expression such as `category == 1 and rating >= 2.0`. See [Milvus scalar filter](#milvus-scalar-filter) for the supported syntax. It combines with Spark filters and delete filtering before a row limit is applied. |
+| `milvus.extra.columns` | none | Comma-separated metadata names: `_segment_id`, `_row_offset`, `_timestamp`. For example, `_segment_id,_row_offset`. See [Output schema](#output-schema). Request `_milvus_row_id` through `milvus.read.include_row_id` instead. |
+
+Partition, segment and field-ID lists reject blanks, empty entries, negative
+IDs and non-numeric values. Repeated IDs are ignored, preserving their
+first-seen order. Metadata-column lists also ignore repeats; a blank value
+requests no extra columns.
+
+#### Read modes and output
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `milvus.read.mode` | unset: live rows | Leave unset for normal analysis. `physical` includes stored rows marked deleted and is required for [column replacement](column-replacement.md). `write_result` reads a replacement receipt using `.load(resultPath)`. Values are case-insensitive; a blank value behaves as unset. `live` is not an accepted value. |
+| `milvus.read.apply.deletes` | `true`; `false` in physical mode | Apply segment-local and applicable L0 deletes from the snapshot. `false` includes deleted rows. Physical mode rejects `true`. L0 deletes apply within the same source channel and partition; partition `-1` covers all partitions of that channel. |
+| `milvus.read.include_row_id` | `false` | Add `_milvus_row_id` for column replacement. Requires `milvus.read.mode=physical` and a positive `snapshot_info.id` in the snapshot. Keep this column unchanged when writing replacements. |
+| `milvus.read.vector.raw` | `false` | `false` converts vectors to Spark arrays or maps as listed under [Supported data types](#supported-data-types). `true` returns stored vector bytes as `BinaryType`, for applications that decode them themselves or pass them to a native library. Binary vectors remain `BinaryType` in either mode. |
+| `milvus.read.columnar` | `true` | Deliver Arrow batches to Spark. `false` uses the row-at-a-time reader. This does not change the output schema or delete semantics. |
+
+`write_result` reads a fixed receipt schema, not snapshot data. Supply its
+result path and storage options; snapshot selectors and the scan tuning
+options below do not control this receipt read.
+
+#### Batch size and memory
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `milvus.read.batch.max.rows` | 8192 | Positive Int: maximum rows requested for one native record batch. Passed to milvus-storage as `reader.record_batch_max_rows`. |
+| `milvus.read.batch.max.bytes` | 33554432 (32 MiB) | Positive Long: target byte limit for one native record batch. Maximum 4294967296 (4 GiB). Passed as `reader.record_batch_max_size`; this is not a limit on total task memory. |
+| `milvus.read.arrow.max.bytes` | 9223372036854775807 (`Long.MaxValue`) | Positive Long: hard limit of one read task's Arrow child allocator. Covers imported/read Arrow buffers, but not milvus-storage's separate native memory pool or other Spark memory. |
+
 Boolean read options (`milvus.snapshot.mode`, `milvus.read.apply.deletes`,
 `milvus.read.include_row_id`, `milvus.read.vector.raw`, `milvus.read.columnar`)
 accept only `true` or `false`,
 case-insensitively. Positive integer/long options reject blanks, zero, negative,
-non-decimal and overflowing values, reporting the key and supplied value.
+non-decimal and overflowing values, reporting the key and supplied value. Use
+decimal byte counts such as `33554432`, not size strings such as `32m`.
 
 #### Spark predicate pushdown
 
@@ -265,6 +324,19 @@ or an incompatible literal fails planning instead of being ignored.
 
 JSON paths, Array predicates, and `json_contains`
 are not in the current scalar subset.
+
+### 2.4 Column replacement and receipts
+
+The writer replaces the fields selected in the input DataFrame. It requires
+`milvus.write.operation=replace_columns`, the original `milvus.snapshot.path`,
+storage settings, and `.mode("append").save(resultPath)`. Use a fresh result
+path for each write. The [write option table](column-replacement.md#write-options)
+lists all accepted settings and the read options that the writer rejects.
+
+To read the receipt, set `milvus.read.mode=write_result` and call
+`.load(resultPath)` with storage options for that address. No Snapshot file is
+required for this read. See [Receipt](column-replacement.md#receipt)
+for its fixed schema and configuration.
 
 ## Output schema
 

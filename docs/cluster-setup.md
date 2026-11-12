@@ -1,9 +1,9 @@
 # Spark cluster permissions and configuration
 
-Use this guide when moving the [Python and Java demos](../demo/README.md) from
-`local[2]` to a Spark cluster. Its concrete commands target Linux, Spark 4.0.1,
-Scala 2.13 and Java 21, matching the demo launcher. The connector's other Spark
-lines use their own
+Use this guide when integrating the connector into an existing Spark cluster.
+Its examples target Linux, Spark 4.0.1, Scala 2.13 and Java 21. The
+[Python and Java demos](../demo/README.md) can verify the same configuration.
+The connector's other Spark lines use their own
 [release artifacts](releasing.md#artifact-graph).
 
 Creating the compute environment, submitting a Spark application and reading a
@@ -39,7 +39,7 @@ before exposing it to other users.
 |---|---|
 | Matching runtime | Install Spark 4.0.1 / Scala 2.13 and Java 21. For Python demos, install a compatible Python interpreter and the same environment on driver and workers; set `spark.pyspark.python` to its worker path. `--py-files` does not install Python or a virtual environment. |
 | Connector JARs | Distribute one assembly containing the matching native bundle, or the corresponding JVM and platform JARs. Do not combine the assembly with another copy of the connector. Make JARs available to both driver and executors through Spark's dependency distribution or the application image. |
-| OS and CPU | Use a native bundle matching each JVM's architecture and a supported OS/ABI. The demo launcher selects artifacts for the submit host; use the same architecture on its workers. For the Kubernetes example below, select `amd64` nodes and an x86_64 image/bundle; change both for ARM64. |
+| OS and CPU | Use a native bundle matching each JVM's architecture and a supported OS/ABI. The demo launcher selects artifacts for the submit host; use the same architecture on its workers. For Kubernetes, schedule each process on nodes matching its native bundle. |
 | Native extraction | The process UID must be able to create directories, files and hard links under `java.io.tmpdir`, with enough disk space for extracted libraries. The filesystem must allow shared-library mappings; a `noexec` temporary mount can prevent JNI loading. Configure a different directory before JVM startup if needed. |
 | Spark working space | Provide writable local space for shuffle, spill and downloaded dependencies. On Kubernetes with a read-only root filesystem, mount writable volumes for `/tmp` and Spark's local directories. These are local runtime writes, not snapshot writes. |
 | Signal chaining | Before each JVM starts, preload that JVM's JRE library: `LD_PRELOAD=/path/to/its/jdk/lib/libjsig.so`. Configure the remote driver's environment too; exporting on the submit host only affects a client-mode driver. |
@@ -199,201 +199,43 @@ environment through `spark.yarn.appMasterEnv.*`, while executors use
 Use Kubernetes or YARN for Python cluster deployment; Spark standalone cluster
 deploy mode does not support Python applications.
 
-## Use the application image
+## Kubernetes applications
 
-Build the [connector image](../docker/README.md) from the current Storage-only
-assembly. Select the same Linux architecture for the assembly, image and nodes:
+Use the Spark runtime and application submission process supplied by your
+platform. Add the matching connector artifacts with `--packages` or distribute
+the JVM and native JARs together; see [installation](../README.md#installing).
+The application's Spark version, Scala version and native architecture must
+match the selected artifacts on the driver and executors.
 
-```bash
-./docker/build.sh \
-  --assembly /absolute/path/to/connector-assembly.jar \
-  --image registry.example.com/spark-milvus-demo:current-amd64 \
-  --platform linux/amd64
+Configure the remote driver's signal library before its JVM starts, as well as
+the executor environment:
+
+```text
+spark.kubernetes.driverEnv.LD_PRELOAD=/path/in/driver/jdk/lib/libjsig.so
+spark.executorEnv.LD_PRELOAD=/path/in/executor/jdk/lib/libjsig.so
 ```
 
-The build helper validates the assembly's native platform and stages only
-explicit public demo files. Options, credentials and the rest of the checkout
-are excluded. It compiles all Java entry points into `demo-java.jar`; cluster
-submission does not compile source. The image stays local unless `--push` is
-supplied. Registry publishing needs the build operator's credentials; registry
-pull access belongs to the Kubernetes nodes or configured image-pull Secrets.
-For repeatable deployment, pin the base image using `--base-image` and set the
-resulting application image digest in Helm values.
+Use paths that exist in the selected Spark runtime. Configure writable native
+extraction and Spark working directories, and budget container memory for
+native allocations in addition to the JVM heap. The driver needs Kubernetes
+permissions to manage executors; each process separately needs its storage
+identity, readable credential files and access to all snapshot objects.
 
-The runtime uses non-root UID/GID `185:185`, supplies the native signal-chaining
-and allocator environment, and preserves Spark's `/opt/entrypoint.sh` for its
-driver and executor modes. Its writable working directory is
-`/opt/spark/work-dir`, separate from the immutable JARs under
-`/opt/spark-milvus`. This distinction also prevents dependency localization
-from overwriting an image-baked source JAR. See the image README for the full
-filesystem contract and local smoke commands.
-
-## Kubernetes deployment templates
-
-Use the [Helm chart](../deploy/helm/spark-milvus-demo/README.md). It uses native
-Spark on Kubernetes and needs no Spark Operator. Provision the Kubernetes
-cluster and node capacity first; Spark does not need a separate master/worker
-Deployment in this mode.
-
-The chart creates a submission Job, pod-template ConfigMap, three
-ServiceAccounts and namespace-scoped RBAC. The Job runs the image's
-`spark-submit` against the in-cluster Kubernetes API in **cluster** deploy mode.
-Spark creates the driver Pod and supporting resources; the driver creates
-executor Pods. The chart defaults to the read example and requires an existing
-input Secret containing snapshot options.
-
-### Operator permissions and runtime accounts
-
-The chart installer needs permissions to manage Jobs, ConfigMaps,
-ServiceAccounts, Roles and RoleBindings in the application namespace, plus the
-release-storage Secrets used by Helm's default storage backend. Kubernetes also
-checks whether the installer can grant the Role's permissions. The operator
-creating input or registry Secrets needs the corresponding Secret permission.
-Creating a namespace with `--create-namespace` requires namespace creation
-permission; the chart itself does not own or delete namespaces.
-
-A platform operator can instead provision the accounts and bindings, then set
-`serviceAccounts.<role>.create=false`, the account's `name`, and
-`rbac.create=false`. These settings support pre-existing workload-identity
-accounts. They do not grant the installer additional privileges.
-
-The runtime accounts have separate responsibilities:
-
-| Account | Kubernetes API access in this template |
-|---|---|
-| Submitter | Create, monitor and clean up driver Pods and their supporting Services/ConfigMaps. Its API token and CA are mounted in the submission Job. |
-| Driver | Create, monitor and clean up executor Pods and supporting Services/ConfigMaps. Its account is explicitly independent of the submitter. |
-| Executor | No application Kubernetes API Role. Configure its object-storage identity independently. |
-
-The baseline Role allows `create/get/list/watch/patch/delete/deletecollection`
-on Pods, Services and ConfigMaps in one namespace. `patch` is needed for
-[server-side apply](https://kubernetes.io/docs/reference/using-api/server-side-apply/#access-control-and-permissions)
-and Pod lifecycle updates; collection deletion supports Spark's label-filtered
-cleanup. It grants no Secret reads or cluster-scoped access. Spark's
-[Kubernetes RBAC documentation](https://spark.apache.org/docs/4.0.1/running-on-kubernetes.html#rbac)
-explains the account model. Additional schedulers, PVCs or custom feature steps
-need their own permission review.
-
-The chart explicitly disables driver PVC ownership/reuse and dynamic
-allocation. Its submitter, driver and executor pod templates use non-root UID
-185, drop capabilities, disable privilege escalation, set RuntimeDefault
-seccomp and use read-only root filesystems with writable `/tmp` and
-`/opt/spark/work-dir` volumes. Kubernetes admission policy must permit these
-Pods and Spark's added local-storage volumes.
-
-### Provide the input and values
-
-Prepare `read-options.json` using the API-returned snapshot location and the
-storage configuration above. After the operator creates the namespace, create
-a namespace-local Secret containing the options file:
-
-```bash
-kubectl -n spark-demo create secret generic milvus-read-options \
-  --from-file=read-options.json=/private/read-options.json
-```
-
-The chart references this existing Secret. It does not put its contents in Helm
-values, create it, or require the application's ServiceAccounts to read it
-through the API. Spark mounts it once in the driver at
-`/etc/spark-milvus/input`; options are read there before creating
-Spark. Secret volume mounting is performed by Kubernetes, separately from
-application RBAC. Use a DNS label of at most 56 characters for its name, as
-Spark appends a suffix when naming the volume.
-
-The options Secret does not establish a cloud identity. For IAM-based storage,
-configure **both** driver and executor accounts and any required annotations.
-Provider token files or custom CA files needed by executors must be available
-there too; use the platform's identity injection or Spark Secret mounts through
-`extraSparkConf`. See [Spark Secret management](https://spark.apache.org/docs/4.0.1/running-on-kubernetes.html#secret-management).
-Additional Spark configuration is stored in the Helm release and submission
-arguments; keep credentials in workload identity or existing Secret files.
-
-Save the following as `/private/spark-demo-values.yaml`:
-
-```yaml
-image:
-  repository: registry.example.com/spark-milvus-demo
-  tag: "current-amd64"
-  # Prefer digest: sha256:... to pin the image.
-language: python
-example: read
-input:
-  existingSecret: milvus-read-options
-  optionsKey: read-options.json
-nodeSelector:
-  kubernetes.io/os: linux
-  kubernetes.io/arch: amd64
-```
-
-For Java, set `language: java`; `example: read` then selects the precompiled
-`ReadSnapshot` class. The chart also supports `read`, `filter`, `sql`,
-`partition`. Use `image.pullSecrets` for a
-private registry. Replace the example repository and tag with the image you
-built and pushed above. For ARM64, build an ARM64 image from matching artifacts
-and change both the image reference and node selector.
-See the chart's [values](../deploy/helm/spark-milvus-demo/values.yaml) for the
-complete configuration, including existing accounts and resource sizing.
-
-The defaults request two executors with 4 GiB heap and 4 GiB overhead each,
-plus a driver with 2 GiB heap and 1 GiB overhead and a separate submission Job.
-These are example budgets, not production sizing. Ensure quotas and nodes can
-satisfy them, then tune for your column widths, segment sizes and Python/native
-memory use. Default ServiceAccount names are scoped to each release; fixed
-account names should be provisioned separately and selected with `create=false`
-when sharing them across releases.
-
-### Render, install and check the application
-
-Render the deployment templates for review, then install with the operator's
-configured Kubernetes identity:
-
-```bash
-helm lint deploy/helm/spark-milvus-demo \
-  --values /private/spark-demo-values.yaml
-helm template milvus-demo deploy/helm/spark-milvus-demo \
-  --namespace spark-demo --values /private/spark-demo-values.yaml \
-  > /private/spark-demo-rendered.yaml
-helm install milvus-demo deploy/helm/spark-milvus-demo \
-  --namespace spark-demo --values /private/spark-demo-values.yaml
-```
-
-This is a one-shot submission: use a fresh release name for a new run and follow
-the chart README's cleanup steps before reusing a name. The chart sets
-`spark.kubernetes.submission.waitAppCompletion=true`, but Spark 4.0.1 can return
-success from the submission process after a **failed** driver becomes terminal.
-A completed submission Job or `helm --wait-for-jobs` alone is therefore not an
-application-success check. Inspect the release's driver phase and logs:
-
-```bash
-kubectl -n spark-demo get pods \
-  -l app.kubernetes.io/instance=milvus-demo,spark-role=driver \
-  -o custom-columns=NAME:.metadata.name,PHASE:.status.phase
-kubectl -n spark-demo logs \
-  -l app.kubernetes.io/instance=milvus-demo,spark-role=driver \
-  --all-containers=true
-```
-
-Require driver phase `Succeeded` and the example's `Demo passed` output. The
-monitoring identity needs `get/list` on Pods and `get` on `pods/log`; the runtime
-Role does not include log-reading permissions.
-
-All application resources use image-local `local:///` paths. This chart runs
-read examples and needs no Spark artifact-upload credentials.
-Deployments using external application files or staging storage must configure
-Spark's upload mechanism and its Hadoop-compatible storage credentials
-separately. `--files` does not rewrite an absolute application argument from a
-submit-host path into a driver path. See [Kubernetes dependency management](https://spark.apache.org/docs/4.0.1/running-on-kubernetes.html#dependency-management)
-and [application submission](https://spark.apache.org/docs/4.0.1/submitting-applications.html).
+Follow Spark's [dependency management](https://spark.apache.org/docs/4.0.1/running-on-kubernetes.html#dependency-management)
+for application and JAR staging, and its [Secret management](https://spark.apache.org/docs/4.0.1/running-on-kubernetes.html#secret-management)
+for mounted credentials and configuration. A local file on the submit host is
+not automatically available at the same path in a remote driver or executor.
+Check the driver status and application logs to confirm successful completion.
 
 ## Check the setup before running a large job
 
 For Kubernetes, have the operator check RBAC using an identity allowed to
 impersonate the ServiceAccount; the submitter can check its own identity. Set
-`DRIVER_ACCOUNT` to the driver account name in the rendered templates, or the
-existing account selected in values:
+`DRIVER_ACCOUNT` to the ServiceAccount configured for your Spark driver and
+replace `spark-demo` with the application namespace:
 
 ```bash
-DRIVER_ACCOUNT="your-rendered-driver-account"
+DRIVER_ACCOUNT="your-driver-account"
 kubectl auth can-i create pods -n spark-demo
 kubectl auth can-i patch configmaps -n spark-demo
 kubectl auth can-i create pods -n spark-demo \
@@ -419,9 +261,7 @@ the snapshot's segment directories and to its write result address; see
 | Container OOM with free JVM heap | Native/Python memory and executor overhead, actual segment sizes and task concurrency. |
 | Options file missing in cluster mode | Its path in the driver container, Secret mount or dependency localization, not the submit host's filesystem. |
 
-The Helm chart is a deployment template for the documented Spark version and
-this connector's runtime. Image smoke tests and offline template checks do not
-verify a live Kubernetes deployment. The
+The
 [read integration tests](contributing.md#tests-that-need-the-native-library)
 exercise local Spark against isolated object storage; they do not establish that
 your namespace RBAC, cloud IAM or multi-node network configuration has been tested.
