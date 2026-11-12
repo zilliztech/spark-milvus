@@ -4,7 +4,7 @@ Use this guide when integrating the connector into an existing Spark cluster.
 Its examples target Linux, Spark 4.0.1, Scala 2.13 and Java 21. The
 [Python and Java demos](../demo/README.md) can verify the same configuration.
 The connector's other Spark lines use their own
-[release artifacts](releasing.md#artifact-graph).
+[release artifacts](release-notes/3.0.md#maven-dependencies).
 
 Creating the compute environment, submitting a Spark application and reading a
 Milvus snapshot require different permissions. The Spark driver and executors read
@@ -35,6 +35,13 @@ before exposing it to other users.
 
 ## Prepare every driver and executor
 
+Released native libraries support Linux x86_64 and ARM64 with glibc 2.35 or
+later, and Apple silicon with macOS 14 or later. Linux binaries are tested on
+Ubuntu 22.04 and 24.04 and require a system `libstdc++` providing
+`GLIBCXX_3.4.30` and `CXXABI_1.3.13` (GCC 12's runtime or newer); this library is
+not bundled. Windows, musl-based Linux (including Alpine) and Intel Macs have
+no released native artifacts.
+
 | Requirement | Configuration or permission |
 |---|---|
 | Matching runtime | Install Spark 4.0.1 / Scala 2.13 and Java 21. For Python demos, install a compatible Python interpreter and the same environment on driver and workers; set `spark.pyspark.python` to its worker path. `--py-files` does not install Python or a virtual environment. |
@@ -48,8 +55,11 @@ before exposing it to other users.
 
 The native loader's local extraction behavior is implemented in
 [NativeLibraries](../native/runtime/src/main/java/com/zilliz/milvus/jni/runtime/NativeLibraries.java).
-See the [artifact and runtime contract](releasing.md#artifact-graph).
 Increasing JVM heap alone does not budget native memory.
+
+On macOS, preload the JVM's own `lib/libjsig.dylib` with
+`DYLD_INSERT_LIBRARIES`. Pass this setting to the JVM rather than system shell
+utilities, and configure it separately for every driver and executor process.
 
 ## Grant read access to the whole snapshot
 

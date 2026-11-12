@@ -400,5 +400,5 @@ publishes its component requirement under `META-INF/milvus-native/requirements/`
 A missing component, mismatched source revision or corrupt library fails loading.
 The JVM implementation JAR contains no Milvus native libraries; Maven entry
 artifacts bring the matching platform JARs through their dependencies. See
-[releasing](releasing.md) for artifact selection and
+[artifact selection](release-artifacts.md) for artifact selection and
 [contributing](contributing.md) for native build checks.

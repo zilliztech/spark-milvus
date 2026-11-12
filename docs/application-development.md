@@ -57,11 +57,10 @@ Spark distributes the JARs to the driver and executors. The universal and
 platform-specific entry JARs rely on their Maven dependencies; passing only an
 entry JAR to `--jars` does not install the connector. Thin deployments also need
 their declared JVM dependencies; see
-[artifact selection](releasing.md#using-release-artifacts).
+[artifact selection](release-notes/3.0.md#maven-dependencies).
 
 ## Building the connector from source
 
 To develop the connector itself or build an assembly from source, follow
 [Contributing](contributing.md). It covers submodules, the Java 21 build,
-native libraries, formatting and tests. Maintainers can find the candidate
-validation and publication procedure in [Releasing](releasing.md).
+native libraries, formatting and tests.
