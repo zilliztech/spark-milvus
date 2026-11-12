@@ -56,6 +56,9 @@ layering and tests. `NativeBundle.scala` validates component requirements and
 platform bundles. `ThinArtifacts.scala` exports the reader closure;
 `ReleaseArtifacts.scala` exports the reader JVM distribution.
 
+For candidate acceptance, Maven Central publication and GitHub release notes,
+use the [release skill](../.agents/skills/spark-milvus-release/SKILL.md).
+
 ## Fixed inputs for read tests
 
 Fixed files in `core/src/test/resources/read-fixtures` and `core/src/test/data`
@@ -262,9 +265,9 @@ repository, say so in the message and fix the document in the same commit.
 
 Public documents are English Markdown files in `docs/`, including this
 guide, [reference.md](reference.md), and the
-[release guide](releasing.md). They describe the connector, its use, build and
-release process. Contributions may include design proposals, decisions and the
-rationale needed to review a change in the same pull request.
+[release notes](release-notes/3.0.md). They describe the connector, its use,
+build and released capabilities. Contributions may include design proposals,
+decisions and the rationale needed to review a change in the same pull request.
 
 ### Repository-local document references
 
