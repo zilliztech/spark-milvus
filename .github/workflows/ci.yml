@@ -199,12 +199,6 @@ jobs:
           bash -n deploy/helm/spark-milvus-integration/run.sh
           deploy/helm/spark-milvus-integration/tests/run-test.sh
 
-      - name: Lint the Spark demo chart
-        run: helm lint --strict deploy/helm/spark-milvus-demo --set input.existingSecret=read-input
-
-      - name: Test Spark demo templates
-        run: python3 deploy/helm/spark-milvus-demo/tests/test_chart.py
-
   # Verify mounted source/gitlink ownership with the native image's Git baseline.
   # The check name is retained by the upstream main/release rulesets.
   docker-git-ownership:

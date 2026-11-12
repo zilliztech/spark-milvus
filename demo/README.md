@@ -60,7 +60,3 @@ Replacing stored columns from a DataFrame is described in
 [column replacement](../docs/column-replacement.md). Its result is new segment
 revisions and a receipt; registering them with a running Milvus service is
 outside these examples.
-
-The [image guide](../docker/README.md) and
-[demo Helm chart](../deploy/helm/spark-milvus-demo/README.md) package the reader
-examples for containers and Kubernetes.
