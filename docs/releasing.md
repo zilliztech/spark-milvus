@@ -55,7 +55,7 @@ Sources and Javadoc accompany the Maven artifacts.
 Resolve an entry with Maven, sbt or `spark-submit --packages`, as shown in
 [the installation examples](../README.md#installing). Entry JARs contain only
 delivery documentation: `--jars` does not resolve their POM dependencies.
-For `--jars`, [build an assembly](../README.md#building), or explicitly supply
+For `--jars`, [build an assembly](application-development.md#building-the-connector-from-source), or explicitly supply
 the bundled JVM artifact and exactly one matching native platform JAR from
 [Maven Central](https://repo.maven.apache.org/maven2/com/zilliz/).
 Spark 3.5/4.1 thin deployments also need their declared JVM dependencies.

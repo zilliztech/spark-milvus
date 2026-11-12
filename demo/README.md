@@ -1,8 +1,11 @@
-# Milvus Spark Connector demos
+# Spark-Milvus examples
 
-These examples read existing Storage V3 snapshots. They use Spark 4.0.1,
-Scala 2.13 and Java 21. The committed sample includes 14 visible rows after
-applying deletes; examples check results against that fixed input.
+These examples cover reading Collection data and updating existing field values
+with Spark. For writes, start with [Column replacement](#column-replacement).
+
+The runnable reader examples below use existing Storage V3 snapshots with
+Spark 4.0.1, Scala 2.13 and Java 21. The committed sample includes 14 visible
+rows after applying deletes; examples check results against that fixed input.
 
 | Python | Java | Operation |
 |---|---|---|
@@ -14,7 +17,7 @@ applying deletes; examples check results against that fixed input.
 
 ## Run a reader example
 
-Build the selected [assembly](../README.md#building), or use a verified release
+Build the selected [assembly](../docs/application-development.md#building-the-connector-from-source), or use a verified release
 candidate. The assembly must contain the Storage native libraries for the
 local Linux x86_64 or aarch64 platform.
 
@@ -54,9 +57,10 @@ not connector runtime APIs, and never create a snapshot. Pass `--help` for
 URI, database, collection, snapshot, storage-options and output arguments.
 The reader examples take the returned path and storage configuration directly.
 
-## Replacing columns
+## Column replacement
 
-Replacing stored columns from a DataFrame is described in
-[column replacement](../docs/column-replacement.md). Its result is new segment
-revisions and a receipt; registering them with a running Milvus service is
-outside these examples.
+For a Scala example that updates existing field values, see the
+[column replacement example](../docs/column-replacement.md#example). The guide
+also covers physical reads, external updates, write results and recovery.
+The write produces new segment revisions and a receipt; registering them with
+a running Milvus service is outside these examples.

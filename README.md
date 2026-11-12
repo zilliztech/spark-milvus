@@ -17,8 +17,8 @@ and writes data files directly in object storage.
 
 To get started, [add the dependency](#installing), follow the
 [read](#reading-collection-data) and [write](#writing-collection-data) examples,
-then [run your application](#running-your-application). For all supported
-options, defaults and limits, see the
+then [run your application](docs/application-development.md#running-your-application).
+For all supported options, defaults and limits, see the
 [Reference](docs/reference.md#2-milvus-format-parameters).
 
 This guide uses **Spark-Milvus 3.0.0** for Milvus 3.0, available from
@@ -39,6 +39,8 @@ Before writing your application, prepare:
 - Storage access on both the Spark driver and executors, plus a matching native
   platform library on their classpaths.
 
+### Spark and Scala
+
 | Spark | Scala binary version | Available dependency choices |
 |---|---|---|
 | 3.5 | 2.12, 2.13 | Thin modules plus a native platform |
@@ -46,9 +48,22 @@ Before writing your application, prepare:
 | 4.1 | 2.13 | Thin modules plus a native platform |
 | 4.2 | 2.13 | Universal, platform-specific or thin |
 
-Native platforms are glibc Linux x86_64 and ARM64, and macOS on Apple silicon.
-Linux requires glibc 2.35 or later; macOS requires version 14 or later. See
-[artifact selection](docs/releasing.md#using-release-artifacts) for the full
+### Operating systems and CPU architectures
+
+Published native libraries support the following platforms:
+
+| Operating system | CPU architecture | Artifact platform ID | Minimum system requirements |
+|---|---|---|---|
+| Linux | x86_64 (AMD64) | `linux-x86_64` | glibc 2.35+ and GCC 12 C++ runtime or newer |
+| Linux | ARM64 (aarch64) | `linux-aarch64` | glibc 2.35+ and GCC 12 C++ runtime or newer |
+| macOS | Apple silicon (ARM64) | `darwin-aarch64` | macOS 14 or later |
+
+Linux binaries are tested on Ubuntu 22.04 and 24.04. Native artifacts are not
+provided for Windows, musl-based Linux (including Alpine), or Intel Macs.
+Both the Spark driver and every executor must meet these requirements and have
+a matching native platform library on their classpaths.
+
+See [artifact selection](docs/releasing.md#using-release-artifacts) for the full
 runtime requirements and thin-module coordinates.
 
 ## Installing
@@ -79,6 +94,33 @@ on your cluster.
   </dependency>
 </dependencies>
 ```
+
+### Gradle
+
+For a Spark 4.0 / Scala 2.13 application, use the following `build.gradle`
+(Groovy DSL):
+
+```groovy
+plugins {
+    id 'scala'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.scala-lang:scala-library:2.13.16'
+    implementation 'com.zilliz:spark-milvus-4.0_2.13:3.0.0'
+    compileOnly 'org.apache.spark:spark-sql_2.13:4.0.1'
+}
+```
+
+Set the Spark version to the one installed on your cluster. Gradle's
+[`compileOnly`](https://docs.gradle.org/current/userguide/dependency_configurations.html)
+keeps Spark available for compilation; your Spark runtime supplies it when the
+application runs. For a Java-only application, use the `java` plugin and omit
+the explicit `scala-library` dependency.
 
 ### sbt
 
@@ -120,7 +162,7 @@ executors. For access-key authentication and other providers, see
 ### Scala
 
 Save this as your application's `ReadMilvus.scala`, then package it using your
-Maven or sbt project:
+Maven, Gradle or sbt project:
 
 ```scala
 import org.apache.spark.sql.SparkSession
@@ -249,75 +291,16 @@ The receipt identifies the committed revisions. The connector does not create
 a Snapshot, and the original Snapshot keeps reading its original values. Your
 application owns submission to Milvus and online visibility of the replacements.
 
-## Running your application
-
-### Resolve dependencies with `--packages`
-
-For a first run on a Linux x86_64 machine with Spark 4.0 installed, run the
-PySpark example locally:
-
-```bash
-export RELEASE_VERSION=3.0.0
-export LD_PRELOAD="$JAVA_HOME/lib/libjsig.so"
-
-"$SPARK_HOME/bin/spark-submit" \
-  --master 'local[2]' \
-  --packages "com.zilliz:spark-milvus-4.0-linux-x86_64_2.13:$RELEASE_VERSION" \
-  read_milvus.py
-```
-
-For the Scala example, use the same dependency and runtime settings, replacing
-`read_milvus.py` with `--class ReadMilvus /path/to/your-application.jar`.
-
-For a cluster run, replace `local[2]` with your cluster's master and set
-`--conf spark.executorEnv.LD_PRELOAD=/path/on/workers/to/jdk/lib/libjsig.so`.
-Each JVM must preload its own JRE's signal library before startup. The export
-above configures a Linux client-mode driver; a remote driver needs the setting
-in its own environment too. On macOS, use the `darwin-aarch64` artifact and
-that JRE's `lib/libjsig.dylib` through
-`DYLD_INSERT_LIBRARIES` on the JVM. The native loader also needs a writable
-extraction directory that permits shared-library loading. See
-[cluster setup](docs/cluster-setup.md#prepare-every-driver-and-executor) for
-worker identities, networking, memory and native runtime configuration.
-
-### Use local JARs with `--jars`
-
-If your cluster cannot resolve Maven dependencies, obtain these two artifacts
-from [Maven Central](https://repo.maven.apache.org/maven2/com/zilliz/) at the
-same published version and put them under `lib/`:
-
-- `spark-milvus-4.0-jvm_2.13`: the bundled JVM implementation.
-- `spark-milvus-native-linux-x86_64`: the matching native platform libraries.
-
-Keep the signal-library settings above and replace `--packages` with:
-
-```bash
---jars "lib/spark-milvus-4.0-jvm_2.13-${RELEASE_VERSION}.jar,lib/spark-milvus-native-linux-x86_64-${RELEASE_VERSION}.jar"
-```
-
-Spark distributes the JARs to the driver and executors. The universal and
-platform-specific entry JARs rely on their Maven dependencies; passing only an
-entry JAR to `--jars` does not install the connector. Thin deployments also need
-their declared JVM dependencies; see
-[artifact selection](docs/releasing.md#using-release-artifacts).
-
 ## Documents
 
 | Document | Contents |
 |---|---|
+| [Application development](docs/application-development.md) | Running applications, resolving JARs and building the connector from source |
 | [Reference](docs/reference.md) | Supported options, defaults, storage credentials and data types |
-| [Column replacement](docs/column-replacement.md) | Physical reads, external updates, write results and recovery |
-| [Examples](demo/README.md) | More Python and Java Collection reads and SQL |
+| [Examples](demo/README.md) | Collection reads, SQL and column replacement |
 | [Cluster setup](docs/cluster-setup.md) | Driver and executor permissions, networking and native runtime |
 | [3.0 release notes](docs/release-notes/3.0.md) | Capabilities and migration from earlier versions |
 | [Release artifacts](docs/releasing.md#using-release-artifacts) | Maven coordinates and platform choices |
-
-## Building
-
-To develop the connector itself or build an assembly from source, follow
-[Contributing](docs/contributing.md). It covers submodules, the Java 21 build,
-native libraries, formatting and tests. Maintainers can find the candidate
-validation and publication procedure in [Releasing](docs/releasing.md).
 
 ## License
 
