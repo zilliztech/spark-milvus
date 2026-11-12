@@ -20,8 +20,11 @@ Use the current repository contracts:
   publication; [scripts/release.py](../../../scripts/release.py) owns planning,
   verification, signing and Central operations.
 - [Release notes](../../../docs/release-notes/3.0.md) own user-facing Maven
-  coordinates, installation examples and supported platforms. Keep that material
-  there and in the corresponding GitHub release announcement.
+  coordinates, dependency XML, artifact choices and supported platforms. Keep
+  that material there and in the corresponding GitHub release announcement.
+- [Application development](../../../docs/application-development.md) owns
+  application launch commands, including `--packages` and `--jars` usage. Link
+  to that guide instead of repeating those instructions in release notes.
 - For source changes or commits, use the repository's
   [contributing checks](../../../docs/contributing.md#formatting).
 
@@ -238,12 +241,14 @@ body, replacing every `{{VERSION}}` with the published version without `v`.
 Remove the unreleased-template notice and ensure the capabilities and artifact
 inventory match that version. Do not apply next-release packaging changes to the
 published 3.0.0 announcement.
-Keep Maven examples, artifact choices and platform requirements in that body;
+Keep Maven coordinates, dependency XML, artifact choices and platform requirements
+in that body;
 do not replace it with a link-only announcement. Verify no placeholder remains
 and all repository links resolve at the intended tag. GitHub release bodies
 need absolute repository links; relative document links resolve differently
 there. A documentation correction to an existing announcement can use the
-approved updated template without moving its release tag.
+approved updated template without moving its release tag. If a linked document
+does not exist at that tag, use an immutable commit containing the document.
 
 Create or edit the announcement only within the user's authorized release-note
 scope. Pass multiline Markdown using `--notes-file` or a structured API body.
