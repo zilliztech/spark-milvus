@@ -4,6 +4,7 @@ import scala.sys.process.Process
 import xerial.sbt.Sonatype._
 import Dependencies._
 import ReleaseArtifacts.{
+  arrowCDataSupplement,
   releaseJvmArtifacts,
   releaseJvmClasspath,
   releaseJvmDocumentation,
@@ -265,11 +266,16 @@ def connectClient(l: Versions.SparkLine): Seq[Setting[_]] = Seq(
 // native Runtime/unmanagedJars path. Existing local assemblies keep that path.
 // Export paths include the Scala binary version because Spark 3.5 publishes
 // both Scala variants; module wiring and local classpaths stay unchanged.
-// Arrow 12's missing Linux ARM64 C Data JNI resource is supplied independently
-// from the Milvus engine bundle, only when exporting the Spark 3.5 distribution.
+// Arrow 12's missing Linux ARM64 C Data JNI resource is shared by both Spark 3.5
+// packaging paths. It never enters the normal compile or test classpaths.
 def jvmReleaseSettings(l: Versions.SparkLine): Seq[Setting[_]] =
   inConfig(ReleaseJvm)(baseAssemblySettings ++ fatJarRules) ++ Seq(
     releaseJvmArtifacts / aggregate := false,
+    arrowCDataSupplement := ReleaseArtifacts.supplementClasspath(
+      (ThisBuild / baseDirectory).value,
+      l,
+      streams.value.log
+    ),
     ReleaseArtifacts.prepareReleaseJvm := {
       ReleaseArtifacts.requireVersion()
       IO.createDirectory(
@@ -287,11 +293,7 @@ def jvmReleaseSettings(l: Versions.SparkLine): Seq[Setting[_]] =
       ReleaseArtifacts.classpath(
         (Compile / fullClasspath).value,
         (Runtime / managedClasspath).value
-      ) ++ ReleaseArtifacts.supplementClasspath(
-        (ThisBuild / baseDirectory).value,
-        l,
-        streams.value.log
-      ),
+      ) ++ arrowCDataSupplement.value,
     ReleaseJvm / assembly / fullClasspath := releaseJvmClasspath.value,
     ReleaseJvm / assembly / externalDependencyClasspath :=
       releaseJvmClasspath.value.filter(_.data.isFile),
@@ -338,6 +340,10 @@ def lineBundle(l: Versions.SparkLine): Seq[Setting[_]] =
   fatJarRules ++ Seq(
     organization := "com.zilliz",
     version := connectorVersion,
+    // Local bundles need the same complete Arrow C Data platform resources as
+    // release bundles. Evaluate this only for assembly, never compile or test.
+    assembly / fullClasspath ++= arrowCDataSupplement.value,
+    assembly / externalDependencyClasspath ++= arrowCDataSupplement.value,
     // The Jackson and Arrow modules Spark ships stay out, so the connector
     // uses Spark's whichever class loader goes first. Bundled, a family splits
     // across the two loaders under userClassPathFirst=true. Arrow's jackson-bom

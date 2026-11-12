@@ -9,6 +9,7 @@ the resulting revisions with a worker JVM.
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -19,12 +20,22 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
+_DOWNLOAD_SPEC = importlib.util.spec_from_file_location(
+    "consumer_pinned_download", Path(__file__).with_name("pinned_download.py"))
+downloads = importlib.util.module_from_spec(_DOWNLOAD_SPEC)
+_DOWNLOAD_SPEC.loader.exec_module(downloads)
+# Apache's official SHA-512 for this exact Scala 2.13 binary distribution.
+# Upgrade this immutable input explicitly when changing the consumer runtime.
+SPARK_ARCHIVES = {
+    ("3.5.5", "2.13"): (
+        "a462656d2a87afcf81f24e4dea9a99e6666ed5c8ff7ba0cc9c936188498c549cf8"
+        "52d0ebb475325761d6cf645d1184d527be9a609503d587bb47d5532b533aa1"),
+}
 FIXTURES = (
     "spark/src/test/scala/com/zilliz/spark/connector/read/ArtifactConsumerSmoke.scala",
     "core/src/test/scala/com/zilliz/milvus/storage/io/ReadFixtures.scala",
@@ -337,25 +348,19 @@ def verify_spark_installation(home, row):
         raise ValueError("Spark distribution is missing spark-submit")
 
 
-def install_spark(root, row, env):
+def install_spark(root, row, env, download_cache=None):
     # Spark 3.5's PyPI distribution uses Scala 2.12. Apache publishes a separate
     # Scala 2.13 distribution; check its SHA-512 before extracting any files.
     if row["line"] == "3.5" and row["scalaBinary"] == "2.13":
+        identity = (row["spark"], row["scalaBinary"])
+        if identity not in SPARK_ARCHIVES:
+            raise ValueError("No pinned Apache Spark archive for " + str(identity) +
+                             "; update SPARK_ARCHIVES before changing the consumer runtime")
         name = f"spark-{row['spark']}-bin-hadoop3-scala2.13"
         url = f"https://archive.apache.org/dist/spark/spark-{row['spark']}/{name}.tgz"
-        archive = root / (name + ".tgz")
-        with urllib.request.urlopen(url + ".sha512", timeout=60) as response:
-            checksum = response.read().decode("ascii").split()[0]
-        if not re.fullmatch(r"[a-fA-F0-9]{128}", checksum):
-            raise ValueError("Invalid Apache Spark SHA-512 checksum")
-        with urllib.request.urlopen(url, timeout=60) as response, archive.open("wb") as stream:
-            shutil.copyfileobj(response, stream)
-        with archive.open("rb") as stream:
-            if hashlib.file_digest(stream, "sha512").hexdigest() != checksum.lower():
-                raise ValueError("Apache Spark archive checksum mismatch")
+        archive = downloads.fetch(url, SPARK_ARCHIVES[identity], cache_dir=download_cache)
         with tarfile.open(archive) as bundle:
             bundle.extractall(root, filter="data")
-        archive.unlink()
         home = root / name
         python = sys.executable
     else:
@@ -373,7 +378,7 @@ def install_spark(root, row, env):
     return home, python
 
 
-def smoke(candidate, line, scala, platform, output, *, central=False, entry=None):
+def smoke(candidate, line, scala, platform, output, *, central=False, entry=None, download_cache=None):
     manifest = json.loads((candidate / "release-manifest.json").read_text())
     version = manifest["version"]
     row = consumer_row(manifest, line, scala)
@@ -412,7 +417,7 @@ def smoke(candidate, line, scala, platform, output, *, central=False, entry=None
         # only into the JVMs, through a launcher spark-submit selects as JAVA_HOME.
         launch = ({"JAVA_HOME": str(jvm_launcher(root, java_home, signal))} if darwin
                   else {"JAVA_HOME": str(java_home), preload: str(signal)})
-        spark_home, python = install_spark(root, row, env)
+        spark_home, python = install_spark(root, row, env, download_cache)
         env["SPARK_HOME"] = str(spark_home)
         env["PYSPARK_PYTHON"] = python
         reports = []
@@ -477,9 +482,11 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--central", action="store_true", help="Resolve from public Maven Central")
     parser.add_argument("--entry", choices=("universal", "platform"), help="Consume one delivery form")
+    parser.add_argument("--download-cache", type=Path,
+                        help="Verified download cache (default: SPARK_MILVUS_DOWNLOAD_CACHE or ~/.cache/spark-milvus/downloads)")
     args = parser.parse_args()
     smoke(args.candidate.resolve(), args.line, args.scala, args.platform, args.output.resolve(),
-          central=args.central, entry=args.entry)
+          central=args.central, entry=args.entry, download_cache=args.download_cache)
 
 
 if __name__ == "__main__":

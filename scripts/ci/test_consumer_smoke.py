@@ -254,26 +254,40 @@ class SparkInstallationTest(unittest.TestCase):
         archive = self.apache_archive()
         checksum = hashlib.sha512(archive).hexdigest()
         row = {"line": "3.5", "spark": "3.5.5", "scalaBinary": "2.13"}
-        with mock.patch.object(consumer.urllib.request, "urlopen", side_effect=[
-                io.BytesIO((checksum + "  distribution.tgz\n").encode()), io.BytesIO(archive)]) as fetch, \
+        with mock.patch.object(consumer, "SPARK_ARCHIVES", {("3.5.5", "2.13"): checksum}), \
+             mock.patch.object(consumer.downloads.urllib.request, "urlopen",
+                               return_value=io.BytesIO(archive)) as fetch, \
              mock.patch.object(consumer, "run") as run:
-            home, python = consumer.install_spark(self.root, row, {})
+            home, python = consumer.install_spark(self.root, row, {}, self.root / "cache")
         self.assertEqual(home, self.root / "spark-3.5.5-bin-hadoop3-scala2.13")
         self.assertEqual(python, consumer.sys.executable)
         self.assertTrue((home / "bin/spark-submit").is_file())
         url = "https://archive.apache.org/dist/spark/spark-3.5.5/spark-3.5.5-bin-hadoop3-scala2.13.tgz"
-        self.assertEqual(fetch.call_args_list, [mock.call(url + ".sha512", timeout=60),
-                                                mock.call(url, timeout=60)])
+        self.assertEqual(fetch.call_args_list, [mock.call(url, timeout=120)])
+        self.assertTrue((self.root / "cache/sha512" / checksum).is_file())
+        second = self.root / "second-consumer"
+        second.mkdir()
+        with mock.patch.object(consumer, "SPARK_ARCHIVES", {("3.5.5", "2.13"): checksum}), \
+                mock.patch.object(consumer.downloads.urllib.request, "urlopen") as fetch:
+            consumer.install_spark(second, row, {}, self.root / "cache")
+        fetch.assert_not_called()
         run.assert_not_called()
 
     def test_corrupt_spark_archive_is_never_extracted(self):
         row = {"line": "3.5", "spark": "3.5.5", "scalaBinary": "2.13"}
-        with mock.patch.object(consumer.urllib.request, "urlopen", side_effect=[
-                io.BytesIO(b"0" * 128), io.BytesIO(self.apache_archive())]), \
+        with mock.patch.object(consumer.downloads.urllib.request, "urlopen",
+                               return_value=io.BytesIO(self.apache_archive())), \
              mock.patch.object(consumer.tarfile, "open") as extract, \
              self.assertRaisesRegex(ValueError, "checksum mismatch"):
-            consumer.install_spark(self.root, row, {})
+            consumer.install_spark(self.root, row, {}, self.root / "cache")
         extract.assert_not_called()
+
+    def test_unpinned_spark_archive_version_fails_before_download(self):
+        row = {"line": "3.5", "spark": "3.5.6", "scalaBinary": "2.13"}
+        with mock.patch.object(consumer.downloads, "fetch") as fetch, \
+                self.assertRaisesRegex(ValueError, "update SPARK_ARCHIVES"):
+            consumer.install_spark(self.root, row, {}, self.root / "cache")
+        fetch.assert_not_called()
 
     def test_other_profiles_use_pyspark_but_still_verify_runtime_jars(self):
         for line, spark, binary in (("3.5", "3.5.5", "2.12"), ("4.0", "4.0.1", "2.13"),
@@ -283,7 +297,7 @@ class SparkInstallationTest(unittest.TestCase):
                 row = {"line": line, "spark": spark, "scalaBinary": binary}
                 with mock.patch.object(consumer, "run") as run, \
                      mock.patch.object(consumer.subprocess, "check_output", return_value=str(home)), \
-                     mock.patch.object(consumer.urllib.request, "urlopen") as fetch:
+                     mock.patch.object(consumer.downloads, "fetch") as fetch:
                     actual, python = consumer.install_spark(self.root, row, {})
                 self.assertEqual(actual, home)
                 self.assertEqual(python, str(self.root / "python/bin/python"))
@@ -319,7 +333,7 @@ class ConsumerDiagnosticsTest(unittest.TestCase):
         java_home = self.root / "java"
         (java_home / "lib").mkdir(parents=True)
         (java_home / "lib/libjsig.so").touch()
-        self.environment = mock.patch.dict(os.environ, {"JAVA_HOME": str(java_home)})
+        self.environment = mock.patch.dict(os.environ, {"JAVA_HOME": str(java_home)}, clear=True)
         self.environment.start()
         self.addCleanup(self.environment.stop)
 

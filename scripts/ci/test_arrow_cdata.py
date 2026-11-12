@@ -1,8 +1,12 @@
 """Arrow's supplemental resource stays bound to its source and audited ARM bytes."""
 
+import io
 import json
+import os
 from pathlib import Path
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -40,6 +44,7 @@ class ArrowCDataSupplementTest(unittest.TestCase):
         }
         # These tests exercise packaging/verification failures independently of
         # the build host. The production builder and Linux verifier run readelf.
+        self.real_inspector = arrow_cdata.inspect_library
         inspector = mock.patch.object(arrow_cdata, "inspect_library", return_value=self.abi)
         self.inspector = inspector.start()
         self.addCleanup(inspector.stop)
@@ -114,6 +119,17 @@ class ArrowCDataSupplementTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unrelated"):
             arrow_cdata.verify_jar(self.jar)
 
+    def test_embedded_foreign_arrow_version_is_rejected(self):
+        self.rewrite(lambda entries: entries.update({
+            "META-INF/spark-milvus/arrow-cdata/11.0.0/linux-aarch64.json": b"{}"}))
+        with self.assertRaisesRegex(ValueError, "supplement resources"):
+            arrow_cdata.verify_jar(self.jar, embedded=True)
+
+    def test_embedded_archive_parent_directories_are_permitted(self):
+        self.rewrite(lambda entries: entries.update({
+            "META-INF/": b"", "META-INF/spark-milvus/arrow-cdata/": b""}))
+        arrow_cdata.verify_jar(self.jar, embedded=True)
+
     def test_linux_rechecks_actual_abi(self):
         with mock.patch.object(arrow_cdata.platform, "system", return_value="Linux"):
             self.inspector.return_value = dict(self.abi, needed=["libunexpected.so"])
@@ -149,6 +165,36 @@ class ArrowCDataSupplementTest(unittest.TestCase):
                 mock.patch.object(arrow_cdata.platform, "machine", return_value="x86_64"):
             with self.assertRaisesRegex(ValueError, "cross compiler"):
                 arrow_cdata.build(self.root / "work", self.root / "output.jar")
+
+    def test_missing_binutils_fails_before_downloading_build_sources(self):
+        with mock.patch.object(arrow_cdata.platform, "system", return_value="Linux"), \
+                mock.patch.object(arrow_cdata.platform, "machine", return_value="aarch64"), \
+                mock.patch.object(arrow_cdata.shutil, "which", return_value=None), \
+                mock.patch.object(arrow_cdata.downloads, "fetch") as fetch, \
+                self.assertRaisesRegex(ValueError, "requires readelf; install binutils"):
+            arrow_cdata.build(self.root / "work", self.root / "output.jar")
+        fetch.assert_not_called()
+
+    def test_linux_verification_explains_missing_binutils(self):
+        self.inspector.side_effect = self.real_inspector
+        with mock.patch.object(arrow_cdata.platform, "system", return_value="Linux"), \
+                mock.patch.object(arrow_cdata.shutil, "which", return_value=None), \
+                self.assertRaisesRegex(ValueError, "requires readelf; install binutils"):
+            arrow_cdata.verify_jar(self.jar)
+
+    def test_failed_build_command_retains_stdout_and_stderr_in_log_and_exception(self):
+        log = self.root / "configure.log"
+        output = io.StringIO()
+        with mock.patch.object(arrow_cdata.sys, "stderr", output), \
+                self.assertRaises(subprocess.CalledProcessError) as failure:
+            arrow_cdata.command([sys.executable, "-c",
+                "import sys; print('compiler stdout', flush=True); print('fatal compiler error', file=sys.stderr); sys.exit(1)"],
+                os.environ.copy(), log)
+        self.assertIn("compiler stdout", log.read_text())
+        self.assertIn("fatal compiler error", log.read_text())
+        self.assertEqual(log.read_text(), failure.exception.output)
+        self.assertIn("fatal compiler error", output.getvalue())
+        self.assertIn(str(log), output.getvalue())
 
 
 if __name__ == "__main__":

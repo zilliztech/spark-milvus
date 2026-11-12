@@ -37,7 +37,12 @@ CENTRAL_REPOSITORY = "https://repo.maven.apache.org/maven2"
 SIGNING_FINGERPRINT = "F0004DED15D9C011F344D6A8526AB23093F3D44A"
 REQUIREMENTS = "META-INF/milvus-native/requirements/storage.properties"
 REQUIREMENTS_LIST = "META-INF/milvus-native/requirements.list"
-SDK_PACKAGES = ("io/milvus/client/", "io/milvus/v2/", "io/milvus/param/", "io/milvus/response/")
+# The build exporter and the final candidate verifier enforce the same module
+# anchors and upstream JNI resource allowlist. Package ownership alone cannot
+# detect a completely missing module.
+JVM_CONTRACT = json.loads((ROOT / "project/release-jvm-contract.json").read_text())
+if JVM_CONTRACT.get("formatVersion") != 1:
+    raise ValueError("Unsupported JVM release contract")
 # Positive package ownership is shared with compile-time boundary checks.
 PUBLIC_PACKAGES = {}
 for _line in (ROOT / "project/public-packages.txt").read_text().splitlines():
@@ -277,15 +282,17 @@ def verify_native(path, plan, platform):
 def verify_jvm(path, plan, row):
     with zipfile.ZipFile(path) as archive:
         names = archive_names(archive)
-        require(not any(name.startswith("native/") for name in names), "JVM JAR embeds a platform bundle")
-        require(not any(name.startswith(SDK_PACKAGES) for name in names),
-                "JVM JAR embeds the official Milvus SDK")
-        require(not any(name.startswith("org/apache/spark/") for name in names),
-                "JVM JAR embeds Spark classes")
-        required = ["io/milvus/storage/", "com/zilliz/spark/connector/"]
-        for prefix in required:
-            require(any(name.startswith(prefix) and name.endswith(".class") for name in names),
-                    f"JVM JAR is missing API classes: {prefix}")
+        files = {entry.filename for entry in archive.infolist() if not entry.is_dir()}
+        for module, required in JVM_CONTRACT["requiredEntries"].items():
+            missing = set(required) - files
+            require(not missing, f"JVM JAR is missing {module} API entries: " + ", ".join(sorted(missing)))
+        forbidden = [name for name in files
+                     if name.startswith(tuple(JVM_CONTRACT["forbiddenPrefixes"]))
+                     or name in JVM_CONTRACT["forbiddenEntries"]
+                     or (re.fullmatch(JVM_CONTRACT["nativeResourcePattern"], name)
+                         and not any(re.fullmatch(pattern, name)
+                                     for pattern in JVM_CONTRACT["allowedNativeResources"]))]
+        require(not forbidden, "JVM JAR contains forbidden resources: " + ", ".join(sorted(forbidden)))
         verify_public_classes(names)
         verify_storage_requirement(archive, plan)
         # Assemblies include parent directories; the supplement contract is
@@ -299,7 +306,18 @@ def verify_jvm(path, plan, row):
             require(all(name.startswith(arrow_cdata.PREFIX) or name == arrow_cdata.RESOURCE
                         for name in supplement), "Unexpected Arrow C Data supplement version")
     if row["line"] == "3.5":
-        arrow_cdata.verify_jar(path, embedded=True)
+        return bundled_components(arrow_cdata.verify_jar(path, embedded=True))
+    return []
+
+
+def bundled_components(arrow):
+    """Expose source-built binaries alongside Maven dependencies for auditing."""
+    return [{"type": "source-built-native", "name": "Apache Arrow C Data JNI",
+             "version": arrow_cdata.VERSION, "platform": arrow_cdata.PLATFORM,
+             "resource": arrow_cdata.RESOURCE, "sha256": arrow["library"]["sha256"],
+             "size": arrow["library"]["size"], "provenance": arrow_cdata.PROVENANCE,
+             "licenses": [arrow_cdata.PREFIX + "source/LICENSE.txt", arrow_cdata.PREFIX + "source/NOTICE.txt"],
+             "source": arrow["source"]}]
 
 
 def verify_public_classes(names, project=None):
@@ -541,8 +559,12 @@ def stage(plan_path, inputs, output):
                 require(digest(source) == file["sha256"] and source.stat().st_size == file["size"],
                         "JVM build checksum mismatch")
                 if not file["classifier"]:
-                    verify_jvm(source, plan, item)
+                    components = verify_jvm(source, plan, item)
+                    require(data.get("bundledComponents") == components,
+                            "JVM build bundled component inventory differs from its embedded provenance")
                 record(artifact, "jvm", source=source, classifier=file["classifier"], line=line, binary=binary)
+                if not file["classifier"]:
+                    manifest["artifacts"][-1]["bundledComponents"] = components
             dependencies = [dict(dep, scope="provided") for dep in data["providedDependencies"]]
             dependencies.extend(data.get("runtimeDependencies", []))
             verify_jvm_dependencies(dependencies, item, plan)
@@ -618,7 +640,9 @@ def verify(candidate):
             if file["kind"] == "jvm":
                 row = next(item for item in plan["jvm"]
                            if jvm_selection(item) == (file["line"], file["scalaBinary"]))
-                verify_jvm(path, plan, row)
+                components = verify_jvm(path, plan, row)
+                require(file.get("bundledComponents") == components,
+                        "JVM bundled component inventory differs from its embedded provenance")
             elif file["kind"] == "native":
                 verify_native(path, plan, file["platform"])
                 abi = manifest["nativeAbi"][file["platform"]]

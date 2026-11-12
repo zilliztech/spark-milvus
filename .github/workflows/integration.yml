@@ -77,6 +77,11 @@ jobs:
           path: candidate
       - name: Verify exact candidate files
         run: python3 scripts/release.py verify --candidate candidate
+      - uses: actions/cache@v4
+        if: matrix.line == '3.5' && matrix.scalaBinary == '2.13'
+        with:
+          path: ~/.cache/spark-milvus/downloads
+          key: apache-spark-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ci/consumer_smoke.py') }}
       - name: Resolve universal and platform entries and read and update fixed V3 files
         env:
           SPARK_LINE: ${{ matrix.line }}

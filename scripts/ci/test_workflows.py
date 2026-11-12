@@ -379,7 +379,7 @@ class WorkflowGateTest(unittest.TestCase):
         self.assertNotIn("if", build["jobs"]["jvm"])
         for name in ("native", "darwin-reads", "candidate"):
             self.assertEqual(build["jobs"][name]["if"], "inputs.build_native")
-        self.assertEqual(set(build["jobs"]["candidate"]["needs"]), {"native", "darwin-reads", "jvm"})
+        self.assertEqual(set(build["jobs"]["candidate"]["needs"]), {"native", "darwin-reads", "jvm-gate"})
         # The macOS read suites run on the darwin bundle before any candidate is assembled.
         darwin = build["jobs"]["darwin-reads"]
         self.assertEqual(darwin["runs-on"], "macos-15")
@@ -413,9 +413,9 @@ class WorkflowGateTest(unittest.TestCase):
     def test_jvm_exports_and_consumers_keep_scala_variants_separate(self):
         jobs = workflow("build-artifacts.yml")["jobs"]
         self.assertNotIn("thin", jobs)
-        self.assertEqual(jobs["jvm"]["name"],
-                         "JVM (Spark ${{ matrix.line }}${{ matrix.line == '3.5' && "
-                         "format(', Scala {0}', matrix.scalaBinary) || '' }})")
+        self.assertEqual(jobs["jvm"]["name"], "JVM (Spark ${{ matrix.line }})")
+        self.assertEqual(jobs["jvm35"]["name"],
+                         "JVM (Spark ${{ matrix.line }}, Scala ${{ matrix.scalaBinary }})")
         steps = jobs["jvm"]["steps"]
         self.assertEqual(jobs["jvm"]["strategy"]["matrix"], "${{ fromJSON(needs.plan.outputs.jvm) }}")
         java = next(step for step in steps if step.get("uses", "").startswith("actions/setup-java"))
@@ -458,13 +458,70 @@ class WorkflowGateTest(unittest.TestCase):
         build = next(step for step in bridge["steps"] if "arrow_cdata.py build" in step.get("run", ""))
         self.assertIn("arrow_cdata.py verify", build["run"])
         self.assertNotIn("milvus-storage", build["run"])
-        self.assertEqual(jobs["jvm"]["needs"], ["plan", "arrow-cdata"])
-        download = next(step for step in jobs["jvm"]["steps"]
+        self.assertEqual(jobs["jvm"]["needs"], "plan")
+        self.assertEqual(jobs["jvm35"]["needs"], ["plan", "arrow-cdata"])
+        self.assertFalse(any(step.get("with", {}).get("name") == "arrow-cdata-12-linux-aarch64"
+                             for step in jobs["jvm"]["steps"]))
+        download = next(step for step in jobs["jvm35"]["steps"]
                         if step.get("with", {}).get("name") == "arrow-cdata-12-linux-aarch64")
-        self.assertEqual(download["if"], "matrix.line == '3.5'")
-        export = next(step for step in jobs["jvm"]["steps"] if "releaseJvmArtifacts" in step.get("run", ""))
-        self.assertIn("if [[ \"$SPARK_LINE\" == '3.5' ]]", export["run"])
+        self.assertNotIn("if", download)
+        export = next(step for step in jobs["jvm35"]["steps"] if "releaseJvmArtifacts" in step.get("run", ""))
         self.assertIn("-Darrow.cdata.supplement=", export["run"])
+        logs = next(step for step in bridge["steps"] if step.get("name") == "Preserve Arrow build diagnostics")
+        self.assertEqual(logs["if"], "always()")
+        self.assertIn("configure.log", logs["with"]["path"])
+        self.assertIn("build.log", logs["with"]["path"])
+
+    def test_jvm_gate_rejects_missing_failed_canceled_and_skipped_builds(self):
+        gate = workflow("build-artifacts.yml")["jobs"]["jvm-gate"]
+        self.assertEqual(gate["if"], "always()")
+        expected = {"plan", "arrow-cdata", "jvm", "jvm35"}
+        self.assertEqual(set(gate["needs"]), expected)
+        code = gate["steps"][0]["run"].split("python3 - <<'PY_GATE'\n", 1)[1].rsplit("\nPY_GATE", 1)[0]
+        results = {name: {"result": "success"} for name in expected}
+        with mock.patch.dict(os.environ, {"BUILD_RESULTS": json.dumps(results)}):
+            exec(compile(code, "jvm-gate", "exec"), {})
+        for name in expected:
+            for result in ("failure", "cancelled", "skipped", None):
+                bad = dict(results)
+                if result is None:
+                    del bad[name]
+                else:
+                    bad[name] = {"result": result}
+                with self.subTest(name=name, result=result), \
+                        mock.patch.dict(os.environ, {"BUILD_RESULTS": json.dumps(bad)}), \
+                        self.assertRaises(SystemExit):
+                    exec(compile(code, "jvm-gate", "exec"), {})
+
+    def test_spark35_partition_preserves_all_exported_profiles(self):
+        plan = next(step for step in workflow("build-artifacts.yml")["jobs"]["plan"]["steps"]
+                    if step.get("id") == "plan")
+        code = plan["run"].split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        profiles = [{"line": line, "scalaBinary": binary} for line, binary in
+                    (("3.5", "2.12"), ("3.5", "2.13"), ("4.0", "2.13"), ("4.1", "2.13"), ("4.2", "2.13"))]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "plan.json").write_text(json.dumps({"jvm": profiles, "native": [
+                {"platform": "linux-" + arch, "runner": "runner"} for arch in ("x86_64", "aarch64")]}))
+            output = root / "output"
+            subprocess.run(["python3", "-c", code], cwd=root, check=True,
+                           env={**os.environ, "GITHUB_OUTPUT": str(output)})
+            matrices = dict(line.split("=", 1) for line in output.read_text().splitlines())
+            self.assertEqual(json.loads(matrices["jvm35"])["include"], profiles[:2])
+            self.assertEqual(json.loads(matrices["jvm"])["include"], profiles[2:])
+
+    def test_public_consumers_and_assembly_select_scala_from_candidate(self):
+        release = workflow("release.yml")["jobs"]
+        for name in ("central-test-consumer", "public-consumer"):
+            run = next(step["run"] for step in release[name]["steps"]
+                       if "consumer_smoke.py" in step.get("run", ""))
+            self.assertIn("candidate_scala.py --candidate", run)
+            self.assertIn('--scala "$scala_version"', run)
+            self.assertNotIn("2.13.16", run)
+        assembly = workflow("build-artifacts.yml")["jobs"]["assembly"]
+        run = next(step["run"] for step in assembly["steps"] if "spark/assembly" in step.get("run", ""))
+        self.assertIn("candidate_scala.py --plan", run)
+        self.assertIn('"-DscalaVersion=$scala_version"', run)
 
     def test_public_native_build_has_no_cpu_variant_job(self):
         build = workflow("build-artifacts.yml")
@@ -552,7 +609,7 @@ class WorkflowGateTest(unittest.TestCase):
 
     def test_assembly_is_built_verified_and_consumed_from_the_audited_bundle(self):
         build = workflow("build-artifacts.yml")
-        self.assertEqual(set(build["jobs"]["plan"]["outputs"]), {"native", "jvm", "assembly"})
+        self.assertEqual(set(build["jobs"]["plan"]["outputs"]), {"native", "jvm", "jvm35", "assembly"})
         plan = next(step for step in build["jobs"]["plan"]["steps"] if step.get("id") == "plan")["run"]
         self.assertIn("{'linux-x86_64', 'linux-aarch64'}", plan)
         self.assertIn("must build every Linux native platform", plan)
@@ -577,7 +634,7 @@ class WorkflowGateTest(unittest.TestCase):
         self.assertLess(stage, verify)
         self.assertLess(verify, smoke)
         self.assertLess(smoke, upload)
-        self.assertIn("-DsparkVersion=4.0 -DscalaVersion=2.13.16", runs[sbt])
+        self.assertIn('-DsparkVersion=4.0 "-DscalaVersion=$scala_version"', runs[sbt])
         self.assertIn('"-Drelease.version=$RELEASE_VERSION"', runs[sbt])
         self.assertIn("-Dmilvus.native.bundle=$GITHUB_WORKSPACE/native-input/milvus-native-$NATIVE_PLATFORM.jar",
                       runs[sbt])

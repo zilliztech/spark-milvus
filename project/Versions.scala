@@ -108,6 +108,19 @@ object Versions {
   def buildMatrixJson: String = {
     import scala.util.parsing.json.{JSONArray, JSONObject}
 
+    // A new or removed supported line requires an explicit consumer runtime;
+    // never silently omit it or fail later with an unhelpful map lookup error.
+    val supported = lines.map(_.id).toSet
+    val missing = supported -- releaseConsumers.keySet
+    val unexpected = releaseConsumers.keySet -- supported
+    require(
+      missing.isEmpty && unexpected.isEmpty,
+      "Versions.releaseConsumers must match the supported Spark lines; " +
+        s"missing: ${missing.toSeq.sorted.mkString(", ")}; " +
+        s"unexpected: ${unexpected.toSeq.sorted.mkString(", ")}. " +
+        "Configure a release consumer runtime for every Versions.lines entry."
+    )
+
     def binary(scala: String): String = scala.split('.').take(2).mkString(".")
     val spark = for {
       current <- lines

@@ -87,12 +87,20 @@ snapshots remain isolated by branch and architecture.
 
 `project/public-packages.txt` declares package ownership for the four modules.
 JVM bundles may contain the four production modules and their declared
-dependencies. Update
-a package's responsibility statement before changing this positive contract.
+dependencies. The exporter and final candidate verifier share
+[`project/release-jvm-contract.json`](../project/release-jvm-contract.json): it
+requires named entry points and binding metadata from all four modules, and
+permits native resources only at the declared Arrow and gRPC dependency paths.
+Unexpected native binaries, including a `.so` at the JAR root, are rejected.
+Update a package's responsibility statement before changing this contract.
 
 Use Java 21 and initialize `milvus-proto` and `milvus-storage`. The sbt
 `exportBuildMatrix` task is authoritative for source profiles, native platforms
 and deployment inputs. `scripts/release.py plan` derives the artifact inventory.
+On Linux, install `binutils` so `readelf` is available before building the Arrow
+supplement, exporting JVM artifacts, staging or verifying a candidate. These
+checks repeat the supplement's ELF and ABI audit; candidate consumers such as
+the Demo launcher also need this tool when they verify the complete candidate.
 
 ```bash
 sbt 'exportBuildMatrix target/build-matrix.json'
@@ -133,6 +141,22 @@ provenance. The JVM export verifies and embeds those same bytes. The release
 workflow builds this supplement independently of the Milvus native bundle and
 requires real reads and writes on ARM64 before publication.
 
+Arrow sources and the Spark 3.5 / Scala 2.13 consumer distribution use fixed
+SHA-512 digests checked into their download scripts. Downloads retry transient
+network failures up to three attempts. Verified archives are cached by digest
+and rechecked before reuse; a checksum mismatch fails the download. Both
+`arrow_cdata.py build` and `consumer_smoke.py` accept `--download-cache PATH`.
+The default is `SPARK_MILVUS_DOWNLOAD_CACHE`, or
+`~/.cache/spark-milvus/downloads` when that variable is unset. Updating the Spark
+consumer runtime requires adding its official archive digest to `SPARK_ARCHIVES`
+in `scripts/ci/consumer_smoke.py`; an unpinned version is rejected.
+
+Export metadata lists Maven dependencies under `bundledDependencies` and the
+source-built Arrow JNI library under `bundledComponents`. The latter records
+its version, platform, binary digest, source archive identity, and paths to its
+embedded provenance, LICENSE and NOTICE; staging also preserves it in the
+candidate manifest. Dependency and license audits must inspect both inventories.
+
 Restart sbt and clean module outputs when changing profiles. Pass the collected
 native and JVM inputs to `scripts/release.py stage`; its `--help` lists
 required paths. Then verify the complete inventory:
@@ -141,10 +165,11 @@ required paths. Then verify the complete inventory:
 python3 scripts/release.py verify --candidate target/release-candidate
 ```
 
-The verifier rejects missing or surplus modules, classes outside the public
-packages, wrong native components, incompatible POMs, changed shared GAVs, source
-mismatches and changed file bytes. Do not reuse a previously published version
-for the new graph.
+The verifier rejects missing required module entries, classes outside the public
+packages, undeclared native binaries, wrong native components, incompatible
+POMs, changed shared GAVs, source mismatches and changed file bytes. It also
+checks the source-built component inventory against the embedded provenance.
+Do not reuse a previously published version for the new graph.
 
 ## CI and acceptance
 
@@ -156,7 +181,11 @@ under a prefix-scoped identity. The write must commit revisions that read back;
 a mocked manifest is not runtime evidence.
 
 Candidate consumers resolve the selected artifacts in isolated projects and
-run with independent executors. All nine acceptance checks must pass: executor
+run with independent executors. Set `JAVA_HOME` to JDK 21 for compiling their
+fixtures. `CONSUMER_JAVA_HOME` selects the Spark runtime JDK: use JDK 17 for
+Spark 3.5 and JDK 21 for Spark 4.x. When unset, it defaults to `JAVA_HOME`.
+The consumer validates both JDK versions before installing Spark or compiling
+fixtures. All nine acceptance checks must pass: executor
 isolation, fixed V3 rows, projection and deletes, empty results, repeated actions,
 physical row identities, a column-replacement receipt, readback of the committed
 revisions, and an unchanged source snapshot. Readback compares fixed expected
@@ -261,11 +290,15 @@ Locally, the corresponding commands are:
 ```bash
 python3 scripts/release.py download-public --candidate target/release-candidate \
   --output target/public-candidate
+consumer_scala=$(python3 scripts/ci/candidate_scala.py \
+  --candidate target/public-candidate --line 4.0 --scala-binary 2.13)
 python3 scripts/ci/consumer_smoke.py --candidate target/public-candidate \
-  --line 4.0 --scala 2.13.16 --platform linux-x86_64 --central --output target/public-consumer
+  --line 4.0 --scala "$consumer_scala" --platform linux-x86_64 \
+  --central --output target/public-consumer
 ```
 
 After the public Central consumer succeeds, prepare the
 GitHub release announcement from [the 3.0 release notes](release-notes/3.0.md).
-Replace `{{VERSION}}` with the published version and link the release to its
-source tag. This announcement is a maintainer step outside the release workflow.
+Replace `{{VERSION}}` with the published version, remove the unreleased-template
+notice and link the release to its source tag. This announcement is a maintainer
+step outside the release workflow.

@@ -20,8 +20,13 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import urllib.request
 import zipfile
+
+
+_DOWNLOAD_SPEC = importlib.util.spec_from_file_location(
+    "arrow_pinned_download", Path(__file__).with_name("pinned_download.py"))
+downloads = importlib.util.module_from_spec(_DOWNLOAD_SPEC)
+_DOWNLOAD_SPEC.loader.exec_module(downloads)
 
 
 VERSION = "12.0.1"
@@ -89,6 +94,7 @@ def abi_module():
 
 
 def inspect_library(path):
+    require_readelf()
     abi = abi_module().inspect_elf(path, PLATFORM)
     require(not abi["violations"], "Arrow C Data JNI exceeds the Linux ABI baseline: " +
             ", ".join(abi["violations"]))
@@ -96,6 +102,11 @@ def inspect_library(path):
             "Arrow C Data JNI must depend only on system libraries")
     require(abi["soname"] == "libarrow_cdata_jni.so", "Unexpected Arrow C Data JNI SONAME")
     return abi
+
+
+def require_readelf():
+    require(shutil.which("readelf"),
+            "Linux Arrow C Data verification requires readelf; install binutils before building or verifying a candidate")
 
 
 def verify_library(contents, recorded):
@@ -139,7 +150,8 @@ def verify_jar(path, embedded=False):
     with zipfile.ZipFile(path) as archive:
         names = zip_entries(archive)
         expected = {RESOURCE, PROVENANCE, *(PREFIX + "source/" + name for name in SOURCE_FILES)}
-        selected = {name for name in names if name.startswith(PREFIX) or name == RESOURCE}
+        selected = {name for name in names
+                    if name.startswith("META-INF/spark-milvus/arrow-cdata/") or name == RESOURCE}
         require(selected == expected, "Missing or unexpected Arrow C Data supplement resources")
         require(embedded or names == expected, "Standalone supplement contains unrelated entries")
         record = json.loads(archive.read(PROVENANCE))
@@ -212,22 +224,28 @@ def extract_sources(archive_path, destination):
                 output.write_bytes(source.read())
 
 
-def command(arguments, environment):
-    result = subprocess.run(arguments, env=environment, text=True, check=True,
+def command(arguments, environment, log=None):
+    result = subprocess.run(arguments, env=environment, text=True, check=False,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if log is not None:
+        log.write_text(result.stdout)
+    if result.returncode:
+        print(result.stdout, file=sys.stderr, end="" if result.stdout.endswith("\n") else "\n")
+        if log is not None:
+            print("Build command failed; full output saved to " + str(log), file=sys.stderr)
+        result.check_returncode()
     return result.stdout.strip()
 
 
-def build(work, output, cxx=None):
+def build(work, output, cxx=None, download_cache=None):
     require(platform.system() == "Linux", "Build the supplement on Linux")
     require(cxx or platform.machine() in ("aarch64", "arm64"),
             "Use a Linux ARM64 runner, or explicitly select an ARM64 cross compiler with --cxx")
     require(not work.exists(), "Arrow C Data build directory already exists")
     require(not output.exists(), "Arrow C Data supplement already exists")
+    require_readelf()
     work.mkdir(parents=True)
-    source_archive = work / "apache-arrow.tar.gz"
-    with urllib.request.urlopen(SOURCE_URL, timeout=120) as response, source_archive.open("wb") as stream:
-        shutil.copyfileobj(response, stream)
+    source_archive = downloads.fetch(SOURCE_URL, SOURCE_SHA512, cache_dir=download_cache)
     sources = work / "source"
     extract_sources(source_archive, sources)
     environment = os.environ.copy()
@@ -246,10 +264,10 @@ def build(work, output, cxx=None):
         "-DBUILD_TESTING=OFF", "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_INSTALL_LIBDIR=lib/aarch_64",
         "-DCMAKE_INSTALL_PREFIX=" + str(work / "install"), "-DCMAKE_CXX_COMPILER=" + compiler,
     ]
-    (work / "configure.log").write_text(command(configure, environment) + "\n")
-    (work / "build.log").write_text(command(
+    command(configure, environment, work / "configure.log")
+    command(
         ["cmake", "--build", str(work / "build"), "--target", "install", "--config", "Release"],
-        environment) + "\n")
+        environment, work / "build.log")
     evidence = {
         "compiler": command([compiler, "--version"], environment).splitlines()[0],
         "compilerTarget": compiler_target,
@@ -266,19 +284,21 @@ def main(argv=None):
     builder.add_argument("--work-dir", type=Path, required=True)
     builder.add_argument("--output", type=Path, required=True)
     builder.add_argument("--cxx", help="Explicit Linux ARM64 cross compiler, for build/ABI checks only")
+    builder.add_argument("--download-cache", type=Path,
+                         help="Verified download cache (default: SPARK_MILVUS_DOWNLOAD_CACHE or ~/.cache/spark-milvus/downloads)")
     verifier = commands.add_parser("verify")
     verifier.add_argument("--input", type=Path, required=True)
     verifier.add_argument("--embedded", action="store_true")
     args = parser.parse_args(argv)
     try:
         if args.command == "build":
-            record = build(args.work_dir.resolve(), args.output.resolve(), args.cxx)
+            record = build(args.work_dir.resolve(), args.output.resolve(), args.cxx, args.download_cache)
         else:
             record = verify_jar(args.input, embedded=args.embedded)
         print(json.dumps({"version": VERSION, "platform": PLATFORM,
                           "librarySha256": record["library"]["sha256"]}))
         return 0
-    except (ValueError, OSError, KeyError, zipfile.BadZipFile, tarfile.TarError,
+    except (ValueError, RuntimeError, OSError, KeyError, zipfile.BadZipFile, tarfile.TarError,
             subprocess.CalledProcessError) as error:
         print(str(error), file=sys.stderr)
         return 1

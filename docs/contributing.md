@@ -27,6 +27,15 @@ Restart sbt and clean module outputs between selections. Do not use interactive
 compilation and source JARs include only selected roots. The root publishes no
 artifact. Use `spark/assembly` for a local reader bundle.
 
+For Spark 3.5, both `spark/assembly` and `spark/releaseJvmArtifacts` require
+`-Darrow.cdata.supplement=/absolute/path/to/arrow-cdata-12-linux-aarch64.jar`.
+This supplies Arrow 12's missing Linux ARM64 JNI library in local assemblies as
+well as release bundles. Build or obtain the verified supplement as described
+in [the candidate build guide](releasing.md#build-a-candidate).
+Ordinary compilation and tests do not require this packaging property. On
+Linux, install `binutils` before packaging or verifying candidates: the Arrow
+supplement audit invokes `readelf`.
+
 ## Imports
 
 Import types and objects at the top of Scala and Java source files, then use

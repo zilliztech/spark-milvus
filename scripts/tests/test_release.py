@@ -134,12 +134,13 @@ class ReleaseTest(unittest.TestCase):
                 contents.update({name: "source fixture" for names in release.API_SOURCES.values() for name in names})
             if not classifier:
                 contents.update({
-                    "com/zilliz/spark/connector/Api.class": b"class fixture",
                     release.REQUIREMENTS: "format.version=2\nrevision=" + "b" * 40 + "\nentry=milvus-storage-jni\n",
                     release.REQUIREMENTS_LIST: "storage\n",
                 })
-                if not omit_api:
-                    contents["io/milvus/storage/Api.class"] = b"class fixture"
+                contents.update({name: b"class fixture"
+                                 for names in release.JVM_CONTRACT["requiredEntries"].values() for name in names
+                                 if name.endswith(".class")
+                                 and not (omit_api and name.startswith("io/milvus/storage/"))})
                 if line == "3.5":
                     contents.update(self.arrow_entries)
             self.jar(path, contents)
@@ -151,6 +152,8 @@ class ReleaseTest(unittest.TestCase):
             scalaVersion=row["scala"], scalaBinaryVersion=binary, files=records,
             providedDependencies=[dict(groupId="org.apache.spark", artifactId=f"spark-{name}_{binary}",
                                        version=row["compileSpark"]) for name in ("core", "sql", "catalyst")],
+            bundledComponents=(release.bundled_components(json.loads(self.arrow_entries[release.arrow_cdata.PROVENANCE]))
+                               if line == "3.5" else []),
             runtimeDependencies=[]))
 
     def rewrite_jvm_export(self, line, binary, transform, classifier=""):
@@ -275,16 +278,113 @@ class ReleaseTest(unittest.TestCase):
             release.verify(self.output)
 
     def test_jvm_jar_must_not_embed_spark_or_native_classes(self):
-        for name, message in (("org/apache/spark/sql/Dataset.class", "Spark classes"),
-                              ("native/milvus/2/linux-x86_64/libtest.so", "platform bundle")):
+        for name in ("org/apache/spark/sql/Dataset.class", "org/apache/hadoop/conf/Configuration.class",
+                     "native/milvus/2/linux-x86_64/libtest.so", "META-INF/milvus-native/provenance.json"):
             self.jvm("3.5", "2.12")
             def mutate(path):
                 with zipfile.ZipFile(path) as archive:
                     contents = {entry: archive.read(entry) for entry in archive.namelist()}
                 self.jar(path, contents | {name: b"unexpected"})
             self.rewrite_jvm_export("3.5", "2.12", mutate)
-            with self.subTest(name=name), self.assertRaisesRegex(ValueError, message):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "forbidden resources"):
                 self.stage()
+
+    def test_every_release_profile_requires_all_module_apis_not_only_package_prefixes(self):
+        for row in self.plan["jvm"]:
+            line, binary = release.jvm_selection(row)
+            path = self.inputs / line / binary / f"spark-milvus-{line}-jvm_{binary}-{self.plan['version']}.jar"
+            with zipfile.ZipFile(path) as archive:
+                original = {name: archive.read(name) for name in archive.namelist()}
+            for module, names in release.JVM_CONTRACT["requiredEntries"].items():
+                for missing in (name for name in names if name.endswith(".class")):
+                    entries = dict(original)
+                    entries.pop(missing)
+                    # A placeholder in the right package must not satisfy a
+                    # concrete API requirement, unlike the old prefix check.
+                    entries[missing.rpartition("/")[0] + "/Placeholder.class"] = b"unrelated class"
+                    self.jar(path, entries)
+                    with self.subTest(line=line, binary=binary, missing=missing), \
+                            self.assertRaisesRegex(ValueError, "missing " + module + " API"):
+                        release.verify_jvm(path, self.plan, row)
+            self.jar(path, original)
+
+    def test_candidate_rejects_missing_modules_after_all_checksums_are_rewritten(self):
+        manifest = self.stage()
+        record = next(item for item in manifest["artifacts"]
+                      if item["artifactId"] == "spark-milvus-4.1-jvm_2.13"
+                      and item["extension"] == "jar" and not item["classifier"])
+        path = self.output / "repository" / record["path"]
+        with zipfile.ZipFile(path) as archive:
+            original = {name: archive.read(name) for name in archive.namelist()}
+        for module, packages in release.PUBLIC_PACKAGES.items():
+            entries = {name: content for name, content in original.items()
+                       if not (name.endswith(".class") and name.rpartition("/")[0] in packages)}
+            self.jar(path, entries)
+            self.rewrite_file(manifest, record, path.read_bytes())
+            with self.subTest(module=module), self.assertRaisesRegex(ValueError, "missing " + module + " API"):
+                release.verify(self.output)
+
+    def test_candidate_rejects_unapproved_native_binaries_after_all_checksums_are_rewritten(self):
+        manifest = self.stage()
+        record = next(item for item in manifest["artifacts"]
+                      if item["artifactId"] == "spark-milvus-4.1-jvm_2.13"
+                      and item["extension"] == "jar" and not item["classifier"])
+        path = self.output / "repository" / record["path"]
+        with zipfile.ZipFile(path) as archive:
+            original = {name: archive.read(name) for name in archive.namelist()}
+        for name in ("libunexpected.so", "nested/libunexpected.so.1.2", "libunexpected.dylib", "unexpected.dll",
+                     "libunexpected.jnilib", "META-INF/native/libunexpected.so",
+                     "arrow_cdata_jni/x86_64/libunexpected.so", "unexpected/x86_64/libarrow_cdata_jni.so",
+                     "arrow_cdata_jni/x86_64/libarrow_cdata_jni.so.1"):
+            self.jar(path, original | {name: b"unexpected native binary"})
+            self.rewrite_file(manifest, record, path.read_bytes())
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "forbidden resources"):
+                release.verify(self.output)
+
+    def test_upstream_arrow_and_grpc_jni_resources_remain_allowed(self):
+        def add_jni(path):
+            with zipfile.ZipFile(path) as archive:
+                entries = {name: archive.read(name) for name in archive.namelist()}
+            names = ("x86_64/libarrow_cdata_jni.so", "x86_64/libarrow_cdata_jni.dylib",
+                     "arrow_cdata_jni/aarch_64/libarrow_cdata_jni.so",
+                     "arrow_cdata_jni/x86_64/arrow_cdata_jni.dll",
+                     "META-INF/native/libio_grpc_netty_shaded_netty_tcnative_linux_x86_64.so",
+                     "META-INF/native/libio_grpc_netty_shaded_netty_transport_native_epoll_aarch_64.so")
+            entries.update({name: b"upstream JNI fixture" for name in names})
+            self.jar(path, entries)
+        self.rewrite_jvm_export("4.1", "2.13", add_jni)
+        self.stage()
+
+    def test_bundled_source_build_is_discoverable_and_bound_to_embedded_provenance(self):
+        manifest = self.stage()
+        for record in (item for item in manifest["artifacts"]
+                       if item["kind"] == "jvm" and item["extension"] == "jar" and not item["classifier"]):
+            components = record["bundledComponents"]
+            self.assertEqual(bool(components), record["line"] == "3.5")
+            if components:
+                self.assertEqual(components[0]["name"], "Apache Arrow C Data JNI")
+                self.assertEqual(components[0]["source"], release.arrow_cdata.source_identity())
+                self.assertEqual(components[0]["resource"], release.arrow_cdata.RESOURCE)
+        record = next(item for item in manifest["artifacts"] if item.get("bundledComponents"))
+        original = copy.deepcopy(record["bundledComponents"])
+        for change in ([], [dict(original[0], sha256="0" * 64)], [dict(original[0], licenses=[])]):
+            record["bundledComponents"] = change
+            release.write_json(self.output / "release-manifest.json", manifest)
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, "bundled component inventory"):
+                release.verify(self.output)
+
+    def test_stage_rejects_missing_or_incorrect_bundled_component_inventory(self):
+        for line, binary in (("3.5", "2.12"), ("3.5", "2.13"), ("4.1", "2.13")):
+            path = self.inputs / line / binary / "artifact.json"
+            original = json.loads(path.read_text())
+            changes = [None, []] if line == "3.5" else [None, [{"name": "unexpected component"}]]
+            for value in changes:
+                metadata = dict(original, bundledComponents=value)
+                release.write_json(path, metadata)
+                with self.subTest(line=line, binary=binary, value=value), \
+                        self.assertRaisesRegex(ValueError, "bundled component inventory"):
+                    self.stage()
+            release.write_json(path, original)
 
     def test_spark_35_supplement_accepts_assembly_directories_but_rejects_other_version_files(self):
         def add_directories(path):
@@ -419,7 +519,7 @@ class ReleaseTest(unittest.TestCase):
 
     def test_missing_unmanaged_api_is_rejected(self):
         self.jvm("4.0", omit_api=True)
-        with self.assertRaisesRegex(ValueError, "missing API classes"):
+        with self.assertRaisesRegex(ValueError, "missing native-storage API"):
             self.stage()
 
     def test_jvm_from_another_commit_is_rejected(self):
@@ -496,7 +596,22 @@ class ReleaseTest(unittest.TestCase):
             with self.subTest(name=name):
                 self.jar(path, {**original, name: b"unexpected SDK class"})
                 self.rewrite_file(manifest, record, path.read_bytes())
-                with self.assertRaisesRegex(ValueError, "JVM JAR embeds the official Milvus SDK"):
+                with self.assertRaisesRegex(ValueError, "forbidden resources"):
+                    release.verify(self.output)
+
+    def test_sdk_pom_dependencies_are_rejected_even_when_provided_and_rehashed(self):
+        manifest = self.stage()
+        record = next(item for item in manifest["artifacts"]
+                      if item["artifactId"] == "spark-milvus-4.1-jvm_2.13" and item["extension"] == "pom")
+        path = self.output / "repository" / record["path"]
+        _, original = release.pom_dependencies(path)
+        for scope in ("compile", "runtime", "provided"):
+            for artifact in ("milvus-sdk-java", "milvus-sdk-java_2.13"):
+                dependency = dict(groupId="io.milvus", artifactId=artifact, version="3.0.0", scope=scope)
+                self.rewrite_file(manifest, record, release.pom_bytes(record["artifactId"], self.plan,
+                                                                     original + [dependency]))
+                with self.subTest(scope=scope, artifact=artifact), \
+                        self.assertRaisesRegex(ValueError, "depends on the official Milvus SDK"):
                     release.verify(self.output)
 
     def test_platform_entry_cannot_transitively_pull_universal_entry(self):

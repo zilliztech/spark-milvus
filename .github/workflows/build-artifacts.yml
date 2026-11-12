@@ -27,6 +27,7 @@ jobs:
     outputs:
       native: ${{ steps.plan.outputs.native }}
       jvm: ${{ steps.plan.outputs.jvm }}
+      jvm35: ${{ steps.plan.outputs.jvm35 }}
       assembly: ${{ steps.plan.outputs.assembly }}
     steps:
       - uses: actions/checkout@v5
@@ -64,7 +65,10 @@ jobs:
           if len(assembly) != len(platforms):
               raise SystemExit('Release plan must build every Linux native platform')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
-              for key, rows in (('native', plan['native']), ('jvm', plan['jvm']), ('assembly', assembly)):
+              for key, rows in (('native', plan['native']),
+                                ('jvm', [row for row in plan['jvm'] if row['line'] != '3.5']),
+                                ('jvm35', [row for row in plan['jvm'] if row['line'] == '3.5']),
+                                ('assembly', assembly)):
                   print(f'{key}={json.dumps({"include": rows}, separators=(",", ":"))}', file=out)
           PY
       - uses: actions/upload-artifact@v4
@@ -260,6 +264,10 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/spark-milvus/downloads
+          key: apache-arrow-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ci/arrow_cdata.py') }}
       - name: Build the pinned Arrow 12 JNI supplement
         run: |
           python3 scripts/ci/arrow_cdata.py build \
@@ -272,12 +280,21 @@ jobs:
           path: target/arrow-cdata-12-linux-aarch64.jar
           if-no-files-found: error
           retention-days: 14
+      - name: Preserve Arrow build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arrow-cdata-diagnostics
+          path: |
+            ${{ runner.temp }}/arrow-cdata/configure.log
+            ${{ runner.temp }}/arrow-cdata/build.log
+          if-no-files-found: warn
+          retention-days: 7
 
   jvm:
-    # Preserve the existing 4.0/4.2 required-check names. Only Spark 3.5 has
-    # multiple Scala variants that need distinct check names.
-    name: JVM (Spark ${{ matrix.line }}${{ matrix.line == '3.5' && format(', Scala {0}', matrix.scalaBinary) || '' }})
-    needs: [plan, arrow-cdata]
+    # Spark 4.x must not wait for the Arrow 12 build used only by Spark 3.5.
+    name: JVM (Spark ${{ matrix.line }})
+    needs: plan
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.jvm) }}
@@ -296,8 +313,44 @@ jobs:
           java-version: '${{ matrix.buildJava }}'
           cache: sbt
       - uses: sbt/setup-sbt@v1
+      - name: Build the JVM artifact without a Milvus native bundle
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          SPARK_LINE: ${{ matrix.line }}
+          SCALA_VERSION: ${{ matrix.scala }}
+        run: |
+          sbt "-DsparkVersion=$SPARK_LINE" "-DscalaVersion=$SCALA_VERSION" \
+            "-Drelease.version=$RELEASE_VERSION" spark/releaseJvmArtifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jvm-${{ matrix.line }}-${{ matrix.scalaBinary }}
+          path: target/release-jvm/${{ matrix.line }}/${{ matrix.scalaBinary }}/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  jvm35:
+    name: JVM (Spark ${{ matrix.line }}, Scala ${{ matrix.scalaBinary }})
+    needs: [plan, arrow-cdata]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.jvm35) }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: false
+      - name: Initialize public API sources
+        run: git submodule update --init --recursive milvus-proto milvus-storage
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '${{ matrix.buildJava }}'
+          cache: sbt
+      - uses: sbt/setup-sbt@v1
       - uses: actions/download-artifact@v4
-        if: matrix.line == '3.5'
         with:
           name: arrow-cdata-12-linux-aarch64
           path: arrow-cdata-input
@@ -307,12 +360,9 @@ jobs:
           SPARK_LINE: ${{ matrix.line }}
           SCALA_VERSION: ${{ matrix.scala }}
         run: |
-          extra=()
-          if [[ "$SPARK_LINE" == '3.5' ]]; then
-            extra+=("-Darrow.cdata.supplement=$GITHUB_WORKSPACE/arrow-cdata-input/arrow-cdata-12-linux-aarch64.jar")
-          fi
           sbt "-DsparkVersion=$SPARK_LINE" "-DscalaVersion=$SCALA_VERSION" \
-            "-Drelease.version=$RELEASE_VERSION" "${extra[@]}" spark/releaseJvmArtifacts
+            "-Drelease.version=$RELEASE_VERSION" "-Darrow.cdata.supplement=$GITHUB_WORKSPACE/arrow-cdata-input/arrow-cdata-12-linux-aarch64.jar" \
+            spark/releaseJvmArtifacts
       - uses: actions/upload-artifact@v4
         with:
           name: jvm-${{ matrix.line }}-${{ matrix.scalaBinary }}
@@ -320,6 +370,24 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+
+  jvm-gate:
+    name: JVM release gate
+    needs: [plan, arrow-cdata, jvm, jvm35]
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Require every JVM build to succeed
+        env:
+          BUILD_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY_GATE'
+          import json, os
+          results = json.loads(os.environ['BUILD_RESULTS'])
+          expected = {'plan', 'arrow-cdata', 'jvm', 'jvm35'}
+          if set(results) != expected or any(job['result'] != 'success' for job in results.values()):
+              raise SystemExit('Every JVM release build must succeed: ' + json.dumps(results, sort_keys=True))
+          PY_GATE
 
   assembly:
     name: Spark 4.0 assembly (${{ matrix.platform }})
@@ -359,7 +427,8 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version }}
           NATIVE_PLATFORM: ${{ matrix.platform }}
         run: |
-          sbt -DsparkVersion=4.0 -DscalaVersion=2.13.16 "-Drelease.version=$RELEASE_VERSION" \
+          scala_version="$(python3 scripts/ci/candidate_scala.py --plan release-inputs/plan.json --line 4.0 --scala-binary 2.13)"
+          sbt -DsparkVersion=4.0 "-DscalaVersion=$scala_version" "-Drelease.version=$RELEASE_VERSION" \
             "-Dmilvus.native.bundle=$GITHUB_WORKSPACE/native-input/milvus-native-$NATIVE_PLATFORM.jar" \
             spark/assembly
       - name: Stage the assembly with its release identity
@@ -450,7 +519,7 @@ jobs:
           retention-days: 7
 
   candidate:
-    needs: [native, darwin-reads, jvm]
+    needs: [native, darwin-reads, jvm-gate]
     if: inputs.build_native
     runs-on: ubuntu-22.04
     timeout-minutes: 20

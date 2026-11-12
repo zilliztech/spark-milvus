@@ -1,0 +1,38 @@
+{
+  "formatVersion": 1,
+  "requiredEntries": {
+    "native-runtime": [
+      "com/zilliz/milvus/jni/runtime/NativeLibraries.class"
+    ],
+    "native-storage": [
+      "com/zilliz/milvus/jni/storage/NativeStorageLibrary.class",
+      "io/milvus/storage/MilvusStorageReader.class",
+      "io/milvus/storage/NativeLibraryLoader.class",
+      "META-INF/milvus-native/requirements/storage.properties",
+      "META-INF/milvus-native/requirements.list"
+    ],
+    "core": [
+      "com/zilliz/milvus/storage/snapshot/Snapshot.class"
+    ],
+    "spark": [
+      "com/zilliz/spark/connector/sources/MilvusDataSource.class"
+    ]
+  },
+  "nativeResourcePattern": ".*\\.(?:so(?:\\..*)?|dylib|dll|jnilib)",
+  "allowedNativeResources": [
+    "(?:arrow_cdata_jni/)?(?:aarch_64|x86_64)/(?:libarrow_cdata_jni\\.(?:so|dylib)|arrow_cdata_jni\\.dll)",
+    "META-INF/native/(?:lib)?io_grpc_netty_shaded_netty_(?:tcnative|transport_native_epoll)_[A-Za-z0-9_]+\\.(?:so|dylib|dll)"
+  ],
+  "forbiddenPrefixes": [
+    "native/",
+    "org/apache/spark/",
+    "org/apache/hadoop/",
+    "io/milvus/client/",
+    "io/milvus/v2/",
+    "io/milvus/param/",
+    "io/milvus/response/"
+  ],
+  "forbiddenEntries": [
+    "META-INF/milvus-native/provenance.json"
+  ]
+}
