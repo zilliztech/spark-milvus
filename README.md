@@ -1,21 +1,22 @@
 # Spark-Milvus
 
-**Read and write Milvus data files in Apache Spark.** Spark-Milvus brings data
-from a Milvus **Snapshot** into Spark, so you can read, transform and update it
-with DataFrames.
+**Read and write Milvus Collection data in Apache Spark.** Spark-Milvus lets
+you use DataFrames to analyze Collection data and write back updated field
+values, bringing Milvus data into your Spark workflows.
 
-- **Read Snapshot data**: Read Milvus data files directly from object storage
-  into a DataFrame, then filter, join, analyze and process them with Spark SQL,
-  Scala or PySpark.
-- **Update Snapshot data**: Write Spark results to Milvus data files to replace
-  existing field values, for data cleaning and batch updates.
+- **Read Collection data**: Load data into a DataFrame, then filter, join,
+  analyze and process it with Spark SQL, Scala or PySpark.
+- **Write Collection data**: Write Spark results to Milvus data files to replace
+  existing field values, for data cleaning, field transformations and batch
+  updates.
 
-A **Snapshot** describes the collection's data at a fixed point in time. Provide
-its JSON file path and storage access settings; the connector discovers the
-schema and accesses the data files directly in object storage.
+The connector currently accesses Collection data through a **Snapshot**, which
+captures the Collection's data at a fixed point in time. Provide its JSON file
+path and storage access settings; Spark-Milvus discovers the schema and reads
+and writes data files directly in object storage.
 
 To get started, [add the dependency](#installing), follow the
-[read](#reading-snapshot-data) and [update](#updating-snapshot-data) examples,
+[read](#reading-collection-data) and [write](#writing-collection-data) examples,
 then [run your application](#running-your-application). For all supported
 options, defaults and limits, see the
 [Reference](docs/reference.md#2-milvus-format-parameters).
@@ -100,14 +101,15 @@ PySpark applications use these JVM artifacts too. Add them with `--packages`
 when submitting the Python script; there is no separate connector Python
 package to install.
 
-## Reading Snapshot data
+## Reading Collection data
 
-The connector is a Spark DataSource named `milvus`. It discovers the schema
-from the Snapshot and requires no session extension or plugin.
+The connector is a Spark DataSource named `milvus`. Provide a Snapshot of the
+Collection to select a fixed data state to read. The connector discovers the
+schema from that Snapshot and requires no session extension or plugin.
 
-Choose either the Scala or PySpark example below. Both print the schema and
-five rows from your Snapshot. Replace the S3 path, endpoint and region with
-your own values; the bucket is part of the `s3://` path.
+Choose either the Scala or PySpark example below. Both print the Collection's
+schema and five rows from the selected Snapshot. Replace the S3 path, endpoint
+and region with your own values; the bucket is part of the `s3://` path.
 
 These examples use `fs.use_iam=true`: the native storage library obtains AWS
 credentials from its credential chain, such as process environment credentials
@@ -125,7 +127,7 @@ import org.apache.spark.sql.SparkSession
 
 object ReadMilvus {
   def main(args: Array[String]): Unit = {
-    val spark = SparkSession.builder().appName("Read Milvus Snapshot").getOrCreate()
+    val spark = SparkSession.builder().appName("Read Milvus Collection").getOrCreate()
     try {
       val snapshotOptions = Map(
         "milvus.snapshot.path" -> "s3://example-bucket/snapshots/fixed.json",
@@ -153,7 +155,7 @@ Save this as `read_milvus.py`:
 ```python
 from pyspark.sql import SparkSession
 
-spark = SparkSession.builder.appName("Read Milvus Snapshot").getOrCreate()
+spark = SparkSession.builder.appName("Read Milvus Collection").getOrCreate()
 try:
     snapshot_options = {
         "milvus.snapshot.path": "s3://example-bucket/snapshots/fixed.json",
@@ -177,20 +179,21 @@ For example, if your collection has `id`, `category` and `embedding` fields,
 add this after `rows.show(5)` inside the `try` block (the syntax works in both):
 
 ```python
-rows.createOrReplaceTempView("milvus_snapshot")
-spark.sql("SELECT id, embedding FROM milvus_snapshot WHERE category = 1").show()
+rows.createOrReplaceTempView("milvus_collection")
+spark.sql("SELECT id, embedding FROM milvus_collection WHERE category = 1").show()
 ```
 
 Vector fields are available as column values; the default read converts most
 vector types into Spark arrays or maps. See
 [supported types](docs/reference.md#supported-data-types).
 
-## Updating Snapshot data
+## Writing Collection data
 
-Use a DataFrame to update existing fields in the data represented by a Snapshot.
-The connector takes the final column values, writes new Milvus column files,
-commits manifest revisions and publishes a write receipt. The `replace_columns`
-operation replaces field values while preserving row count and row identities.
+Use a DataFrame to update existing field values in a Collection. The write uses
+a Snapshot to identify the stored rows and columns to update. The connector takes
+the final column values, writes new Milvus column files, commits manifest
+revisions and publishes a write receipt. The `replace_columns` operation
+replaces field values while preserving row count and row identities.
 
 Read in physical mode when computing values to write back. This includes every
 stored row, even rows marked deleted. Set `milvus.read.include_row_id=true` to
@@ -242,9 +245,9 @@ Milvus-managed fields cannot be replaced; see the
 [column replacement guide](docs/column-replacement.md) for eligible fields,
 joining external updates, permissions and failure recovery.
 
-The receipt identifies the committed revisions. The original Snapshot keeps
-reading its original values; your application owns submission to Milvus and
-online visibility of the replacements.
+The receipt identifies the committed revisions. The connector does not create
+a Snapshot, and the original Snapshot keeps reading its original values. Your
+application owns submission to Milvus and online visibility of the replacements.
 
 ## Running your application
 
@@ -304,7 +307,7 @@ their declared JVM dependencies; see
 |---|---|
 | [Reference](docs/reference.md) | Supported options, defaults, storage credentials and data types |
 | [Column replacement](docs/column-replacement.md) | Physical reads, external updates, write results and recovery |
-| [Examples](demo/README.md) | More Python and Java snapshot reads and SQL |
+| [Examples](demo/README.md) | More Python and Java Collection reads and SQL |
 | [Cluster setup](docs/cluster-setup.md) | Driver and executor permissions, networking and native runtime |
 | [3.0 release notes](docs/release-notes/3.0.md) | Capabilities and migration from earlier versions |
 | [Release artifacts](docs/releasing.md#using-release-artifacts) | Maven coordinates and platform choices |
