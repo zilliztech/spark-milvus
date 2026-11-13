@@ -9,13 +9,13 @@ only the upstream repository can enter publication jobs.
 
 | Product | Modules | Profiles |
 |---|---|---|
-| Reader thin | native-runtime, native-storage, core, spark | Spark 3.5 with Scala 2.12/2.13; 4.0, 4.1, 4.2 with Scala 2.13 |
-| Reader bundled JVM | JVM dependency closure, without platform libraries | Spark 4.0 and 4.2 / Scala 2.13 |
+| Bundled JVM | native-runtime, native-storage, core, spark and their JVM dependencies, without Milvus platform libraries | Spark 3.5 with Scala 2.12/2.13; 4.0, 4.1, 4.2 with Scala 2.13 |
 | Native platform | Storage JNI and its dependency closure | Linux x86_64/aarch64; macOS aarch64 |
 
-All thin modules use one immutable candidate version. Shared artifacts exported
-by several Spark profiles must have identical POM metadata and bytes for a given
-Maven coordinate. The root project publishes nothing.
+All artifacts use one immutable candidate version. Each Spark and Scala
+combination has its own JVM, universal and platform-specific coordinates. Native
+platform artifacts are shared across those combinations. The four production
+modules remain internal build units; the root publishes nothing.
 
 A native bundle has `format.version=2` and `components=storage` under
 `native/milvus/2/<platform>/manifest.properties`. Binding modules contribute
@@ -27,29 +27,32 @@ Storage component.
 
 ## Using release artifacts
 
-The coordinates and URLs below describe the 3.0 delivery contract. Installation
-commands require a version published to Maven Central. Choose a
+The coordinates below describe the next release. The published 3.0.0 inventory
+is unchanged; consult its
+[artifact guide](https://github.com/zilliztech/spark-milvus/blob/v3.0.0/docs/releasing.md#using-release-artifacts)
+when using that version. Installation commands require a version published to
+Maven Central. Choose a
 published version from
 [GitHub Releases](https://github.com/zilliztech/spark-milvus/releases), then use
 that same version for every connector artifact. CI candidates are separate from
 public releases.
 
-All Maven artifacts use group `com.zilliz`. For the bundled distribution,
-`<line>` is `4.0` or `4.2`, and `<platform>` is `linux-x86_64`,
-`linux-aarch64` or `darwin-aarch64`.
+All Maven artifacts use group `com.zilliz`. `<line>` is `3.5`, `4.0`, `4.1`
+or `4.2`. `<scala-binary>` is `2.12` or `2.13` for Spark 3.5, and `2.13` for
+Spark 4.x. `<platform>` is `linux-x86_64`, `linux-aarch64` or `darwin-aarch64`.
 
 | Artifact ID | Use |
 |---|---|
-| `spark-milvus-<line>_2.13` | Universal dependency entry: resolves the JVM artifact and all released native platforms; the loader selects the current platform. |
-| `spark-milvus-<line>-<platform>_2.13` | Platform dependency entry: resolves the JVM artifact and one native platform. |
-| `spark-milvus-<line>-jvm_2.13` | Bundled JVM implementation, without the Milvus platform libraries; Spark dependencies are provided by the application or cluster. |
+| `spark-milvus-<line>_<scala-binary>` | Universal dependency entry: resolves the JVM artifact and all released native platforms; the loader selects the current platform. |
+| `spark-milvus-<line>-<platform>_<scala-binary>` | Platform dependency entry: resolves the JVM artifact and one native platform. |
+| `spark-milvus-<line>-jvm_<scala-binary>` | Bundled JVM implementation, without the Milvus platform libraries; Spark dependencies are provided by the application or cluster. |
 | `spark-milvus-native-<platform>` | Storage native libraries, dependencies, provenance and licenses for one platform. |
-| `spark-milvus-<line>-thin_<scala-binary>` | Unbundled connector classes with dependencies on `core`, `native-storage` and `native-runtime`; add a matching native platform separately. |
 
-Thin coordinates cover Spark `3.5` with Scala `2.12` or `2.13`, and Spark
-`4.0`, `4.1` and `4.2` with Scala `2.13`. They are useful for downstream
-libraries that manage their own dependencies. Do not combine thin modules with
-the bundled JVM or assembly JARs, which contain the same connector classes.
+Every supported Spark and Scala combination uses the same installation model.
+For example, Spark 3.5 / Scala 2.12 uses `spark-milvus-3.5_2.12`, while
+Spark 4.1 / Scala 2.13 uses `spark-milvus-4.1_2.13`. The native loader selects
+the matching platform when using a universal entry. Do not combine a bundled
+JVM JAR with an assembly JAR, which contains the same connector classes.
 Sources and Javadoc accompany the Maven artifacts.
 
 Resolve an entry with Maven, sbt or `spark-submit --packages`, as shown in
@@ -58,7 +61,6 @@ delivery documentation: `--jars` does not resolve their POM dependencies.
 For `--jars`, [build an assembly](../README.md#building), or explicitly supply
 the bundled JVM artifact and exactly one matching native platform JAR from
 [Maven Central](https://repo.maven.apache.org/maven2/com/zilliz/).
-Spark 3.5/4.1 thin deployments also need their declared JVM dependencies.
 
 Released native platforms target glibc Linux (Ubuntu 22.04 and 24.04 in the
 tested matrix, with a glibc 2.35 baseline) and Apple silicon on macOS 14 or later.
@@ -84,13 +86,21 @@ consumers bind the exact artifact ID and digest they accepted. Development
 snapshots remain isolated by branch and architecture.
 
 `project/public-packages.txt` declares package ownership for the four modules.
-Thin artifacts may contain only their owner's classes and sources; reader JVM
-bundles may contain the reader modules and their declared dependencies. Update
-a package's responsibility statement before changing this positive contract.
+JVM bundles may contain the four production modules and their declared
+dependencies. The exporter and final candidate verifier share
+[`project/release-jvm-contract.json`](../project/release-jvm-contract.json): it
+requires named entry points and binding metadata from all four modules, and
+permits native resources only at the declared Arrow and gRPC dependency paths.
+Unexpected native binaries, including a `.so` at the JAR root, are rejected.
+Update a package's responsibility statement before changing this contract.
 
 Use Java 21 and initialize `milvus-proto` and `milvus-storage`. The sbt
 `exportBuildMatrix` task is authoritative for source profiles, native platforms
 and deployment inputs. `scripts/release.py plan` derives the artifact inventory.
+On Linux, install `binutils` so `readelf` is available before building the Arrow
+supplement, exporting JVM artifacts, staging or verifying a candidate. These
+checks repeat the supplement's ELF and ABI audit; candidate consumers such as
+the Demo launcher also need this tool when they verify the complete candidate.
 
 ```bash
 sbt 'exportBuildMatrix target/build-matrix.json'
@@ -106,22 +116,60 @@ Native audits execute on each build; cached bundles must pass the same identity
 and checksum validation before reuse.
 
 Export JVM artifacts with the selected Spark/Scala profile and
-`-Drelease.version=<version>`. `spark/releaseThinArtifacts` exports the reader
-closure.
-The build workflow records each export in
-`target/release-thin/<spark-line>/<scala-binary>/<product>/thin-artifacts.json`.
+`-Drelease.version=<version>`. `spark/releaseJvmArtifacts` exports the JVM
+implementation, sources, API documentation and build metadata. Each selection
+emits `target/release-jvm/<spark-line>/<scala-binary>/artifact.json`; the Scala
+binary version keeps the two Spark 3.5 variants separate. Build with Java 21;
+consumer validation uses Java 17 for Spark 3.5 and Java 21 for Spark 4.x.
+Spark 3.5's Arrow 12 dependency omits its Linux ARM64 C Data JNI library. Before
+exporting either Scala variant, build the matching upstream library on a Linux
+ARM64 runner. Set `RELEASE_VERSION` to an unused candidate version:
+
+```bash
+python3 scripts/ci/arrow_cdata.py build \
+  --work-dir /tmp/arrow-cdata-build \
+  --output target/arrow-cdata-12-linux-aarch64.jar
+sbt -DsparkVersion=3.5 -DscalaVersion=2.12.20 \
+  "-Drelease.version=$RELEASE_VERSION" \
+  -Darrow.cdata.supplement=/absolute/path/to/arrow-cdata-12-linux-aarch64.jar \
+  spark/releaseJvmArtifacts
+```
+
+The build verifies the pinned Apache source archive, Linux ARM64 architecture
+and ABI baseline, and packages the library with its source inputs, licenses and
+provenance. The JVM export verifies and embeds those same bytes. The release
+workflow builds this supplement independently of the Milvus native bundle and
+requires real reads and writes on ARM64 before publication.
+
+Arrow sources and the Spark 3.5 / Scala 2.13 consumer distribution use fixed
+SHA-512 digests checked into their download scripts. Downloads retry transient
+network failures up to three attempts. Verified archives are cached by digest
+and rechecked before reuse; a checksum mismatch fails the download. Both
+`arrow_cdata.py build` and `consumer_smoke.py` accept `--download-cache PATH`.
+The default is `SPARK_MILVUS_DOWNLOAD_CACHE`, or
+`~/.cache/spark-milvus/downloads` when that variable is unset. Updating the Spark
+consumer runtime requires adding its official archive digest to `SPARK_ARCHIVES`
+in `scripts/ci/consumer_smoke.py`; an unpinned version is rejected.
+
+Export metadata lists Maven dependencies under `bundledDependencies` and the
+source-built Arrow JNI library under `bundledComponents`. The latter records
+its version, platform, binary digest, source archive identity, and paths to its
+embedded provenance, LICENSE and NOTICE; staging also preserves it in the
+candidate manifest. Dependency and license audits must inspect both inventories.
+
 Restart sbt and clean module outputs when changing profiles. Pass the collected
-native, JVM and thin inputs to `scripts/release.py stage`; its `--help` lists
+native and JVM inputs to `scripts/release.py stage`; its `--help` lists
 required paths. Then verify the complete inventory:
 
 ```bash
 python3 scripts/release.py verify --candidate target/release-candidate
 ```
 
-The verifier rejects missing or surplus modules, classes outside the public
-packages, wrong native components, incompatible POMs, changed shared GAVs, source
-mismatches and changed file bytes. Do not reuse a previously published version
-for the new graph.
+The verifier rejects missing required module entries, classes outside the public
+packages, undeclared native binaries, wrong native components, incompatible
+POMs, changed shared GAVs, source mismatches and changed file bytes. It also
+checks the source-built component inventory against the embedded provenance.
+Do not reuse a previously published version for the new graph.
 
 ## CI and acceptance
 
@@ -133,7 +181,11 @@ under a prefix-scoped identity. The write must commit revisions that read back;
 a mocked manifest is not runtime evidence.
 
 Candidate consumers resolve the selected artifacts in isolated projects and
-run with independent executors. All nine acceptance checks must pass: executor
+run with independent executors. Set `JAVA_HOME` to JDK 21 for compiling their
+fixtures. `CONSUMER_JAVA_HOME` selects the Spark runtime JDK: use JDK 17 for
+Spark 3.5 and JDK 21 for Spark 4.x. When unset, it defaults to `JAVA_HOME`.
+The consumer validates both JDK versions before installing Spark or compiling
+fixtures. All nine acceptance checks must pass: executor
 isolation, fixed V3 rows, projection and deletes, empty results, repeated actions,
 physical row identities, a column-replacement receipt, readback of the committed
 revisions, and an unchanged source snapshot. Readback compares fixed expected
@@ -238,11 +290,15 @@ Locally, the corresponding commands are:
 ```bash
 python3 scripts/release.py download-public --candidate target/release-candidate \
   --output target/public-candidate
+consumer_scala=$(python3 scripts/ci/candidate_scala.py \
+  --candidate target/public-candidate --line 4.0 --scala-binary 2.13)
 python3 scripts/ci/consumer_smoke.py --candidate target/public-candidate \
-  --line 4.0 --platform linux-x86_64 --central --output target/public-consumer
+  --line 4.0 --scala "$consumer_scala" --platform linux-x86_64 \
+  --central --output target/public-consumer
 ```
 
 After the public Central consumer succeeds, prepare the
 GitHub release announcement from [the 3.0 release notes](release-notes/3.0.md).
-Replace `{{VERSION}}` with the published version and link the release to its
-source tag. This announcement is a maintainer step outside the release workflow.
+Replace `{{VERSION}}` with the published version, remove the unreleased-template
+notice and link the release to its source tag. This announcement is a maintainer
+step outside the release workflow.

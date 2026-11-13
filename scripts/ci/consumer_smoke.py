@@ -3,7 +3,7 @@
 
 Production classes come exclusively from the candidate's published coordinates.
 The compiler and spark-submit use separate, fresh dependency caches. Entries
-and thin modules read fixed, checksummed data, replace stored columns and verify
+read fixed, checksummed data, replace stored columns and verify
 the resulting revisions with a worker JVM.
 """
 
@@ -18,12 +18,24 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
+_DOWNLOAD_SPEC = importlib.util.spec_from_file_location(
+    "consumer_pinned_download", Path(__file__).with_name("pinned_download.py"))
+downloads = importlib.util.module_from_spec(_DOWNLOAD_SPEC)
+_DOWNLOAD_SPEC.loader.exec_module(downloads)
+# Apache's official SHA-512 for this exact Scala 2.13 binary distribution.
+# Upgrade this immutable input explicitly when changing the consumer runtime.
+SPARK_ARCHIVES = {
+    ("3.5.5", "2.13"): (
+        "a462656d2a87afcf81f24e4dea9a99e6666ed5c8ff7ba0cc9c936188498c549cf8"
+        "52d0ebb475325761d6cf645d1184d527be9a609503d587bb47d5532b533aa1"),
+}
 FIXTURES = (
     "spark/src/test/scala/com/zilliz/spark/connector/read/ArtifactConsumerSmoke.scala",
     "core/src/test/scala/com/zilliz/milvus/storage/io/ReadFixtures.scala",
@@ -130,22 +142,12 @@ def main_jars(manifest):
     }
 
 
-def expected_artifacts(manifest, line, platform, entry):
-    if entry == "thin":
-        # Every line's thin module resolves the same shared modules below it.
-        entry_id = f"spark-milvus-{line}-thin_2.13"
-        names = {
-            "spark-milvus-native-runtime",
-            "spark-milvus-native-storage_2.13", "spark-milvus-core_2.13", entry_id,
-        }
-        available = main_jars(manifest)
-        missing = names - available.keys()
-        if missing:
-            raise ValueError("Candidate is missing thin artifacts: " + ", ".join(sorted(missing)))
-        return entry_id, {name: available[name] for name in names}
+def expected_artifacts(manifest, line, scala_binary, platform, entry):
+    if entry not in ("universal", "platform"):
+        raise ValueError("Unsupported consumer entry: " + entry)
     suffix = "" if entry == "universal" else "-" + platform
-    entry_id = f"spark-milvus-{line}{suffix}_2.13"
-    names = {entry_id, f"spark-milvus-{line}-jvm_2.13"}
+    entry_id = f"spark-milvus-{line}{suffix}_{scala_binary}"
+    names = {entry_id, f"spark-milvus-{line}-jvm_{scala_binary}"}
     platforms = (
         [row["platform"] for row in manifest["plan"]["native"]]
         if entry == "universal"
@@ -187,25 +189,6 @@ def check_resolved(ivy, expected):
     return found
 
 
-def thin_native_bundle(candidate, manifest, platform, requested=None):
-    """Choose a separate, validated OSS bundle; it is never a thin dependency."""
-    if requested is not None:
-        path = requested.resolve()
-    else:
-        name = "spark-milvus-native-" + platform
-        artifact = main_jars(manifest).get(name)
-        if artifact is None:
-            raise ValueError("Thin-only consumption needs --native-bundle")
-        path = candidate / "repository" / artifact["path"]
-        if digest(path) != artifact["sha256"]:
-            raise ValueError("Native bundle differs from the verified candidate")
-    spec = importlib.util.spec_from_file_location("release", ROOT / "scripts/release.py")
-    release = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(release)
-    release.verify_native(path, manifest["plan"], platform)
-    return path
-
-
 def ivy_settings(path, repository):
     """Do not consult a developer's Maven local repository during consumption."""
     settings = ET.Element("ivysettings")
@@ -237,7 +220,7 @@ def run(command, *, cwd, env, log=None):
 def collect_diagnostics(spark_home, work, output, previous_apps):
     """Copy only this entry's logs before its temporary Spark installation is removed."""
     # LocalSparkCluster bypasses WorkerArguments, so SPARK_WORKER_DIR does not
-    # apply. Both supported Spark lines use SPARK_HOME/work/<app>/<executor>.
+    # apply. Supported Spark lines use SPARK_HOME/work/<app>/<executor>.
     worker_root = spark_home / "work"
     copied = []
     for app in sorted(worker_root.glob("*")):
@@ -303,7 +286,7 @@ def compile_fixture(work, repository, version, row, entry_id, env):
         ["sbt", "-batch", f"-Dsbt.ivy.home={work / 'compile-ivy'}", "package"],
         cwd=project, env={**env, "COURSIER_CACHE": str(work / "compile-coursier")},
     )
-    jar = project / "target/scala-2.13/smoke.jar"
+    jar = project / f"target/scala-{row['scalaBinary']}/smoke.jar"
     verify_fixture_jar(jar, resources, FIXTURE_CLASSES)
     return jar
 
@@ -329,21 +312,80 @@ def jvm_launcher(root, java_home, signal):
     return home
 
 
-def smoke(candidate, line, platform, output, *, central=False, entry=None, native_bundle=None):
+def consumer_row(manifest, line, scala):
+    rows = [row for row in manifest["plan"]["jvm"]
+            if row["line"] == line and row["scala"] == scala]
+    if len(rows) != 1:
+        raise ValueError(f"Candidate must contain exactly one Spark {line} / Scala {scala} row")
+    row = rows[0]
+    if row["scalaBinary"] != ".".join(scala.split(".")[:2]):
+        raise ValueError("Candidate Scala version and binary version differ")
+    return row
+
+
+def java_major(home, env):
+    text = subprocess.check_output(
+        [str(home / "bin/java"), "-XshowSettings:properties", "-version"],
+        env=env, stderr=subprocess.STDOUT, text=True,
+    )
+    match = re.search(r"^\s*java\.specification\.version = (\d+)\s*$", text, re.MULTILINE)
+    if not match:
+        raise ValueError("Cannot determine Java version: " + str(home))
+    return match.group(1)
+
+
+def verify_spark_installation(home, row):
+    """Never run a 2.13 consumer against PySpark 3.5's default 2.12 distribution."""
+    libraries = list((home / "jars").glob("scala-library-*.jar"))
+    if len(libraries) != 1 or not libraries[0].name.startswith(f"scala-library-{row['scalaBinary']}."):
+        raise ValueError("Spark distribution has the wrong Scala binary version")
+    for module in ("spark-core", "spark-sql"):
+        expected = f"{module}_{row['scalaBinary']}-{row['spark']}.jar"
+        jars = list((home / "jars").glob(module + "_*.jar"))
+        if len(jars) != 1 or jars[0].name != expected:
+            raise ValueError("Spark distribution does not match the selected runtime: " + expected)
+    if not (home / "bin/spark-submit").is_file():
+        raise ValueError("Spark distribution is missing spark-submit")
+
+
+def install_spark(root, row, env, download_cache=None):
+    # Spark 3.5's PyPI distribution uses Scala 2.12. Apache publishes a separate
+    # Scala 2.13 distribution; check its SHA-512 before extracting any files.
+    if row["line"] == "3.5" and row["scalaBinary"] == "2.13":
+        identity = (row["spark"], row["scalaBinary"])
+        if identity not in SPARK_ARCHIVES:
+            raise ValueError("No pinned Apache Spark archive for " + str(identity) +
+                             "; update SPARK_ARCHIVES before changing the consumer runtime")
+        name = f"spark-{row['spark']}-bin-hadoop3-scala2.13"
+        url = f"https://archive.apache.org/dist/spark/spark-{row['spark']}/{name}.tgz"
+        archive = downloads.fetch(url, SPARK_ARCHIVES[identity], cache_dir=download_cache)
+        with tarfile.open(archive) as bundle:
+            bundle.extractall(root, filter="data")
+        home = root / name
+        python = sys.executable
+    else:
+        # pip's PySpark distribution contains the real spark-submit and Spark jars.
+        python_env = root / "python"
+        python = str(python_env / "bin/python")
+        run([sys.executable, "-m", "venv", str(python_env)], cwd=root, env=env)
+        run([python, "-m", "pip", "install", "--disable-pip-version-check",
+             f"pyspark=={row['spark']}"], cwd=root, env=env)
+        home = Path(subprocess.check_output(
+            [python, "-c", "import os,pyspark; print(os.path.dirname(pyspark.__file__))"],
+            env=env, text=True,
+        ).strip())
+    verify_spark_installation(home, row)
+    return home, python
+
+
+def smoke(candidate, line, scala, platform, output, *, central=False, entry=None, download_cache=None):
     manifest = json.loads((candidate / "release-manifest.json").read_text())
     version = manifest["version"]
-    row = next(row for row in manifest["plan"]["jvm"] if row["line"] == line)
+    row = consumer_row(manifest, line, scala)
     repository = CENTRAL if central else (candidate / "repository").as_uri()
-    if entry:
-        entries = (entry,)
-    elif manifest["plan"].get("distribution") == "thin":
-        entries = ("thin",)
-    else:
-        entries = ("universal", "platform")
-        if f"spark-milvus-{line}-thin_2.13" in main_jars(manifest):
-            entries += ("thin",)
-    if native_bundle is not None and entries != ("thin",):
-        raise ValueError("--native-bundle requires --entry thin or a thin-only candidate")
+    entries = (entry,) if entry else ("universal", "platform")
+    for kind in entries:
+        expected_artifacts(manifest, line, row["scalaBinary"], platform, kind)
     # Platform -> (sys.platform, uname machine) of a matching consumer host.
     if platform not in HOSTS or (sys.platform, os.uname().machine) != HOSTS[platform]:
         raise ValueError("Consumer runner does not match " + platform)
@@ -357,7 +399,12 @@ def smoke(candidate, line, platform, output, *, central=False, entry=None, nativ
                  "LD_PRELOAD", "DYLD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_FALLBACK_LIBRARY_PATH",
                  "PYSPARK_SUBMIT_ARGS"):
         env.pop(name, None)
-    java_home = Path(env["JAVA_HOME"])
+    build_java = Path(env["JAVA_HOME"])
+    java_home = Path(env.get("CONSUMER_JAVA_HOME", str(build_java)))
+    for home, wanted, label in ((build_java, row["buildJava"], "build"),
+                                (java_home, row["java"], "runtime")):
+        if java_major(home, env) != str(wanted):
+            raise ValueError(f"Consumer {label} requires Java {wanted}: {home}")
     # The running JDK's signal-chaining library, preloaded the platform's way.
     preload = "DYLD_INSERT_LIBRARIES" if darwin else "LD_PRELOAD"
     signal = java_home / ("lib/libjsig.dylib" if darwin else "lib/libjsig.so")
@@ -369,26 +416,15 @@ def smoke(candidate, line, platform, output, *, central=False, entry=None, nativ
         # Linux preloads libjsig into spark-submit and everything below it; macOS
         # only into the JVMs, through a launcher spark-submit selects as JAVA_HOME.
         launch = ({"JAVA_HOME": str(jvm_launcher(root, java_home, signal))} if darwin
-                  else {preload: str(signal)})
-        # pip's PySpark distribution contains the real bin/spark-submit and Spark jars.
-        python_env = root / "python"
-        run([sys.executable, "-m", "venv", str(python_env)], cwd=root, env=env)
-        run([str(python_env / "bin/python"), "-m", "pip", "install", "--disable-pip-version-check",
-             f"pyspark=={row['spark']}"], cwd=root, env=env)
-        result = subprocess.check_output(
-            [str(python_env / "bin/python"), "-c", "import os,pyspark; print(os.path.dirname(pyspark.__file__))"],
-            env=env, text=True,
-        ).strip()
-        spark_home = Path(result)
+                  else {"JAVA_HOME": str(java_home), preload: str(signal)})
+        spark_home, python = install_spark(root, row, env, download_cache)
         env["SPARK_HOME"] = str(spark_home)
-        env["PYSPARK_PYTHON"] = str(python_env / "bin/python")
+        env["PYSPARK_PYTHON"] = python
         reports = []
         for entry in entries:
             work = root / entry
             work.mkdir()
-            entry_id, expected = expected_artifacts(manifest, line, platform, entry)
-            native = thin_native_bundle(candidate, manifest, platform, native_bundle) if entry == "thin" else None
-            native_digest = digest(native) if native else None
+            entry_id, expected = expected_artifacts(manifest, line, row["scalaBinary"], platform, entry)
             fixture = compile_fixture(work, repository, version, row, entry_id, env)
             ivy = work / "runtime-ivy"
             settings = work / "ivysettings.xml"
@@ -418,8 +454,6 @@ def smoke(candidate, line, platform, output, *, central=False, entry=None, nativ
                 "--repositories", repository,
                 "--packages", f"{GROUP}:{entry_id}:{version}",
             ]
-            if native:
-                command += ["--jars", str(native)]
             command += ["--class", MAIN, str(fixture)]
             try:
                 run(command, cwd=work, env={**env, **launch}, log=log)
@@ -429,13 +463,11 @@ def smoke(candidate, line, platform, output, *, central=False, entry=None, nativ
             checks = completed_checks(text, REQUIRED_CHECKS)
             resolved = check_resolved(ivy, expected)
             report = {"entry": entry_id, "resolved": resolved, "result": "passed", **checks}
-            if native:
-                if digest(native) != native_digest:
-                    raise RuntimeError("Native bundle changed during thin consumption")
-                report["nativeBundle"] = {"sha256": native_digest, "platform": platform, "components": ["storage"]}
             reports.append(report)
         (output / "consumer-result.json").write_text(json.dumps({
             "version": version, "platform": platform, "line": line,
+            "scala": scala, "scalaBinary": row["scalaBinary"],
+            "java": row["java"], "buildJava": row["buildJava"], "spark": row["spark"],
             "manifest_sha256": digest(candidate / "release-manifest.json"), "entries": reports,
             "read_fixture_sha256": resources,
         }, indent=2) + "\n")
@@ -444,15 +476,17 @@ def smoke(candidate, line, platform, output, *, central=False, entry=None, nativ
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate", type=Path, required=True)
-    parser.add_argument("--line", choices=("4.0", "4.2"), required=True)
+    parser.add_argument("--line", choices=("3.5", "4.0", "4.1", "4.2"), required=True)
+    parser.add_argument("--scala", required=True, help="Exact Scala version from the candidate's JVM row")
     parser.add_argument("--platform", choices=sorted(HOSTS), required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--central", action="store_true", help="Resolve from public Maven Central")
-    parser.add_argument("--entry", choices=("universal", "platform", "thin"), help="Consume one delivery form")
-    parser.add_argument("--native-bundle", type=Path, help="Separate OSS platform JAR for a thin-only candidate")
+    parser.add_argument("--entry", choices=("universal", "platform"), help="Consume one delivery form")
+    parser.add_argument("--download-cache", type=Path,
+                        help="Verified download cache (default: SPARK_MILVUS_DOWNLOAD_CACHE or ~/.cache/spark-milvus/downloads)")
     args = parser.parse_args()
-    smoke(args.candidate.resolve(), args.line, args.platform, args.output.resolve(),
-          central=args.central, entry=args.entry, native_bundle=args.native_bundle)
+    smoke(args.candidate.resolve(), args.line, args.scala, args.platform, args.output.resolve(),
+          central=args.central, entry=args.entry, download_cache=args.download_cache)
 
 
 if __name__ == "__main__":

@@ -40,15 +40,19 @@ Before writing your application, prepare:
 
 | Spark | Scala binary version | Available dependency choices |
 |---|---|---|
-| 3.5 | 2.12, 2.13 | Thin modules plus a native platform |
-| 4.0 | 2.13 | Universal, platform-specific or thin |
-| 4.1 | 2.13 | Thin modules plus a native platform |
-| 4.2 | 2.13 | Universal, platform-specific or thin |
+| 3.5 | 2.12, 2.13 | Universal or platform-specific |
+| 4.0 | 2.13 | Universal or platform-specific |
+| 4.1 | 2.13 | Universal or platform-specific |
+| 4.2 | 2.13 | Universal or platform-specific |
+
+The unified package matrix above applies to the next release. For the published
+3.0.0 artifact inventory, see the
+[3.0.0 artifact guide](https://github.com/zilliztech/spark-milvus/blob/v3.0.0/docs/releasing.md#using-release-artifacts).
 
 Native platforms are glibc Linux x86_64 and ARM64, and macOS on Apple silicon.
 Linux requires glibc 2.35 or later; macOS requires version 14 or later. See
 [artifact selection](docs/releasing.md#using-release-artifacts) for the full
-runtime requirements and thin-module coordinates.
+runtime requirements and Maven coordinates.
 
 ## Installing
 
@@ -294,8 +298,7 @@ Keep the signal-library settings above and replace `--packages` with:
 
 Spark distributes the JARs to the driver and executors. The universal and
 platform-specific entry JARs rely on their Maven dependencies; passing only an
-entry JAR to `--jars` does not install the connector. Thin deployments also need
-their declared JVM dependencies; see
+entry JAR to `--jars` does not install the connector. See
 [artifact selection](docs/releasing.md#using-release-artifacts).
 
 ## Documents

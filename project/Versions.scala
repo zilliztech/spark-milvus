@@ -97,15 +97,29 @@ object Versions {
   val sharedJavaRelease = "11"
   val sharedScalas: Seq[String] = Seq(scala212, scala213)
 
-  /** Build checks cover every source combination. Publication remains a
-    * separate, smaller contract; a successful compile does not expand it.
+  /** Every supported Spark/Scala combination publishes the same bundled
+    * distribution. Consumers use the runtime versions below; compilation
+    * continues to target each line's compatibility floor with Java 21.
     */
   val buildJava = "21"
   val releaseConsumers: Map[String, String] =
-    Map("4.0" -> "4.0.1", "4.2" -> "4.2.0")
+    Map("3.5" -> "3.5.5", "4.0" -> "4.0.1", "4.1" -> "4.1.1", "4.2" -> "4.2.0")
 
   def buildMatrixJson: String = {
     import scala.util.parsing.json.{JSONArray, JSONObject}
+
+    // A new or removed supported line requires an explicit consumer runtime;
+    // never silently omit it or fail later with an unhelpful map lookup error.
+    val supported = lines.map(_.id).toSet
+    val missing = supported -- releaseConsumers.keySet
+    val unexpected = releaseConsumers.keySet -- supported
+    require(
+      missing.isEmpty && unexpected.isEmpty,
+      "Versions.releaseConsumers must match the supported Spark lines; " +
+        s"missing: ${missing.toSeq.sorted.mkString(", ")}; " +
+        s"unexpected: ${unexpected.toSeq.sorted.mkString(", ")}. " +
+        "Configure a release consumer runtime for every Versions.lines entry."
+    )
 
     def binary(scala: String): String = scala.split('.').take(2).mkString(".")
     val spark = for {
@@ -139,20 +153,21 @@ object Versions {
         )
       )
     }
-    val release =
-      lines.filter(current => releaseConsumers.contains(current.id)).map {
-        current =>
-          JSONObject(
-            Map(
-              "line" -> current.id,
-              "project" -> current.projectId,
-              "spark" -> releaseConsumers(current.id),
-              "compileSpark" -> current.spark,
-              "scala" -> scala213,
-              "java" -> buildJava
-            )
-          )
-      }
+    val release = for {
+      current <- lines
+      scala <- current.scalas
+    } yield JSONObject(
+      Map(
+        "line" -> current.id,
+        "project" -> current.projectId,
+        "spark" -> releaseConsumers(current.id),
+        "compileSpark" -> current.spark,
+        "scala" -> scala,
+        "scalaBinary" -> binary(scala),
+        "buildJava" -> buildJava,
+        "java" -> (if (current.id == "3.5") "17" else buildJava)
+      )
+    )
     JSONObject(
       Map(
         "schemaVersion" -> 1,

@@ -27,6 +27,15 @@ Restart sbt and clean module outputs between selections. Do not use interactive
 compilation and source JARs include only selected roots. The root publishes no
 artifact. Use `spark/assembly` for a local reader bundle.
 
+For Spark 3.5, both `spark/assembly` and `spark/releaseJvmArtifacts` require
+`-Darrow.cdata.supplement=/absolute/path/to/arrow-cdata-12-linux-aarch64.jar`.
+This supplies Arrow 12's missing Linux ARM64 JNI library in local assemblies as
+well as release bundles. Build or obtain the verified supplement as described
+in [the candidate build guide](releasing.md#build-a-candidate).
+Ordinary compilation and tests do not require this packaging property. On
+Linux, install `binutils` before packaging or verifying candidates: the Arrow
+supplement audit invokes `readelf`.
+
 ## Imports
 
 Import types and objects at the top of Scala and Java source files, then use
@@ -53,8 +62,8 @@ Follow the [sbt skill](../.agents/skills/spark-milvus-sbt/SKILL.md).
 `build.sbt` owns module wiring and exports; `project/Versions.scala` owns profiles;
 `Dependencies.scala` owns dependency declarations; `Modules.scala` enforces
 layering and tests. `NativeBundle.scala` validates component requirements and
-platform bundles. `ThinArtifacts.scala` exports the reader closure;
-`ReleaseArtifacts.scala` exports the reader JVM distribution.
+platform bundles. `ReleaseArtifacts.scala` exports the bundled JVM distribution
+for every supported Spark and Scala combination.
 
 ## Fixed inputs for read tests
 

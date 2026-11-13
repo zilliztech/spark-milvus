@@ -4,8 +4,8 @@ import java.security.MessageDigest
 import java.util.jar.JarFile
 import java.util.zip.{ZipEntry, ZipOutputStream}
 import scala.collection.JavaConverters._
-import scala.sys.process.Process
-import scala.util.parsing.json.{JSONArray, JSONObject}
+import scala.sys.process.{Process, ProcessLogger}
+import scala.util.parsing.json.{JSON, JSONArray, JSONObject}
 
 import sbt._
 import sbt.Keys._
@@ -15,6 +15,9 @@ import sbt.Keys._
   */
 object ReleaseArtifacts {
   val ReleaseJvm = config("releaseJvm")
+  val arrowCDataSupplement = taskKey[Classpath](
+    "Verified Arrow C Data platform supplement shared by local and release assemblies"
+  )
   val releaseJvmArtifacts = taskKey[Seq[File]](
     "Export a JVM implementation JAR, sources, API documentation and metadata"
   )
@@ -52,8 +55,13 @@ object ReleaseArtifacts {
   def artifactId(line: Versions.SparkLine, scalaBinary: String): String =
     s"spark-milvus-${line.id}-jvm_$scalaBinary"
 
-  def outputDirectory(root: File, line: Versions.SparkLine): File =
-    root / "target" / "release-jvm" / line.id
+  /** Spark 3.5 has two Scala variants; both must survive candidate staging. */
+  def outputDirectory(
+      root: File,
+      line: Versions.SparkLine,
+      scalaBinary: String
+  ): File =
+    root / "target" / "release-jvm" / line.id / scalaBinary
 
   /** These families are supplied by the Spark distribution. parquet-avro and
     * Arrow's C Data bridge are not supplied by Spark and remain in the JAR.
@@ -89,6 +97,59 @@ object ReleaseArtifacts {
     )
   }
 
+  /** Apache Arrow 12 does not publish its Linux ARM64 C Data JNI resource. The
+    * separately audited supplement preserves Arrow's own resource loader and
+    * must never change another Spark line's Arrow implementation.
+    */
+  def supplementClasspath(
+      root: File,
+      line: Versions.SparkLine,
+      log: Logger
+  ): Classpath = {
+    val configured = sys.props.get("arrow.cdata.supplement")
+    if (line.id == "3.5") {
+      val path = file(
+        configured.getOrElse(
+          sys.error(
+            "Spark 3.5 packaging requires -Darrow.cdata.supplement=/absolute/path/to/arrow-cdata-12-linux-aarch64.jar"
+          )
+        )
+      )
+      require(
+        path.isAbsolute && path.isFile,
+        "Arrow C Data supplement must be an existing absolute JAR path"
+      )
+      verifySupplement(root, path, embedded = false, log = log)
+      Seq(Attributed.blank(path))
+    } else {
+      require(
+        configured.isEmpty,
+        "The Arrow 12 supplement is only valid for Spark 3.5"
+      )
+      Seq.empty
+    }
+  }
+
+  private def verifySupplement(
+      root: File,
+      path: File,
+      embedded: Boolean,
+      log: Logger
+  ): Unit = {
+    val arguments = Seq(
+      "python3",
+      (root / "scripts" / "ci" / "arrow_cdata.py").getAbsolutePath,
+      "verify",
+      "--input",
+      path.getAbsolutePath
+    ) ++ (if (embedded) Seq("--embedded") else Seq.empty)
+    require(
+      Process(arguments, root, "LD_PRELOAD" -> "")
+        .!(ProcessLogger(log.info(_), log.error(_))) == 0,
+      "Arrow C Data supplement validation failed"
+    )
+  }
+
   def export(
       root: File,
       line: Versions.SparkLine,
@@ -104,11 +165,14 @@ object ReleaseArtifacts {
   ): Seq[File] = {
     val version = requireVersion()
     require(
-      scalaBinary == "2.13",
-      "The release matrix currently supports Scala 2.13"
+      line.scalas.contains(scalaVersion) &&
+        scalaBinary == scalaVersion.split('.').take(2).mkString("."),
+      s"Unsupported release combination: Spark ${line.id}, Scala $scalaVersion ($scalaBinary)"
     )
-    verifyBinary(binary)
-    val directory = outputDirectory(root, line)
+    verifyBinary(root, binary)
+    if (line.id == "3.5")
+      verifySupplement(root, binary, embedded = true, log = log)
+    val directory = outputDirectory(root, line, scalaBinary)
     IO.createDirectory(directory)
     val stem = s"${artifactId(line, scalaBinary)}-$version"
     require(
@@ -179,6 +243,9 @@ object ReleaseArtifacts {
         }.toList),
         "providedDependencies" -> dependencies(provided),
         "bundledDependencies" -> dependencies(bundledClasspath),
+        // Source-built native components have no Maven coordinates. Preserve
+        // their identity separately so dependency and license audits see them.
+        "bundledComponents" -> bundledComponents(binary, line),
         // Every non-provided JVM dependency is embedded by this assembly.
         "runtimeDependencies" -> JSONArray(Nil)
       )
@@ -209,35 +276,92 @@ object ReleaseArtifacts {
     }.toList)
   }
 
-  private def verifyBinary(file: File): Unit = {
+  private def jsonObject(
+      contents: String,
+      description: String
+  ): Map[String, Any] =
+    JSON.parseFull(contents) match {
+      case Some(value: Map[_, _]) => value.asInstanceOf[Map[String, Any]]
+      case _ => sys.error(s"Invalid JSON object: $description")
+    }
+
+  private def bundledComponents(
+      binary: File,
+      line: Versions.SparkLine
+  ): JSONArray = {
+    if (line.id != "3.5") JSONArray(Nil)
+    else {
+      val prefix = "META-INF/spark-milvus/arrow-cdata/12.0.1/"
+      val provenance = prefix + "linux-aarch64.json"
+      val jar = new JarFile(binary)
+      try {
+        val input = jar.getInputStream(jar.getJarEntry(provenance))
+        val contents =
+          try IO.readStream(input)
+          finally input.close()
+        val record = jsonObject(contents, provenance)
+        val source = record("source").asInstanceOf[Map[String, Any]]
+        val library = record("library").asInstanceOf[Map[String, Any]]
+        JSONArray(
+          List(
+            JSONObject(
+              Map(
+                "type" -> "source-built-native",
+                "name" -> "Apache Arrow C Data JNI",
+                "version" -> source("version"),
+                "platform" -> record("platform"),
+                "resource" -> library("path"),
+                "sha256" -> library("sha256"),
+                "size" -> library("size").asInstanceOf[Double].toLong,
+                "provenance" -> provenance,
+                "licenses" -> JSONArray(
+                  List(
+                    prefix + "source/LICENSE.txt",
+                    prefix + "source/NOTICE.txt"
+                  )
+                ),
+                "source" -> JSONObject(source)
+              )
+            )
+          )
+        )
+      } finally jar.close()
+    }
+  }
+
+  private def verifyBinary(root: File, file: File): Unit = {
+    // Export and final publication enforce the same four-module and native
+    // resource contract. A package prefix alone cannot prove a module exists.
+    val contractFile = root / "project" / "release-jvm-contract.json"
+    val contract = jsonObject(IO.read(contractFile), contractFile.getPath)
+    require(
+      contract("formatVersion") == 1.0,
+      "Unsupported JVM release contract"
+    )
+    val required =
+      contract("requiredEntries").asInstanceOf[Map[String, List[String]]]
+    val allowedNative =
+      contract("allowedNativeResources").asInstanceOf[List[String]]
+    val nativePattern = contract("nativeResourcePattern").asInstanceOf[String]
+    val forbiddenPrefixes =
+      contract("forbiddenPrefixes").asInstanceOf[List[String]]
+    val forbiddenEntries =
+      contract("forbiddenEntries").asInstanceOf[List[String]].toSet
     val jar = new JarFile(file)
     try {
-      val names = jar.entries.asScala.map(_.getName).toSet
-      Seq(
-        "io/milvus/storage/NativeLibraryLoader.class",
-        "com/zilliz/spark/connector/sources/MilvusDataSource.class",
-        "META-INF/milvus-native/requirements/storage.properties"
-      ).foreach(name =>
-        require(names(name), s"JVM release JAR is missing $name")
-      )
+      val names =
+        jar.entries.asScala.filterNot(_.isDirectory).map(_.getName).toSet
+      required.toSeq.sortBy(_._1).foreach { case (module, entries) =>
+        entries.foreach(name =>
+          require(
+            names(name),
+            s"JVM release JAR is missing $module entry: $name"
+          )
+        )
+      }
       val forbidden = names.filter { name =>
-        // These JVM dependencies carry portable upstream JNI resources. Keep
-        // them where their own loaders expect; neither is a Milvus platform bundle.
-        val arrowBridge = name.matches(
-          "arrow_cdata_jni/(aarch_64|x86_64)/(libarrow_cdata_jni\\.(so|dylib)|arrow_cdata_jni\\.dll)"
-        )
-        val grpcTransport = name.matches(
-          "META-INF/native/(?:lib)?io_grpc_netty_shaded_netty_(?:tcnative|transport_native_epoll)_[A-Za-z0-9_]+\\.(?:so|dylib|dll)"
-        )
-        val nativeLibrary = name.endsWith(".so") || name.contains(".so.") ||
-          name.endsWith(".dylib") || name.endsWith(".dll")
-        name.startsWith(
-          "native/"
-        ) || (nativeLibrary && !arrowBridge && !grpcTransport) ||
-        name.startsWith("org/apache/spark/") || name.startsWith(
-          "org/apache/hadoop/"
-        ) ||
-        name == "META-INF/milvus-native/provenance.json"
+        forbiddenPrefixes.exists(name.startsWith) || forbiddenEntries(name) ||
+        (name.matches(nativePattern) && !allowedNative.exists(name.matches))
       }
       require(
         forbidden.isEmpty,

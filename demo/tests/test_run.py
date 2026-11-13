@@ -1,6 +1,7 @@
 """Exercise demo setup and actual spark-submit arguments without starting Spark."""
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -394,7 +395,28 @@ class RunExamplesTest(unittest.TestCase):
         self.addCleanup(fixture.doCleanups)
         manifest = fixture.stage()
         candidate = fixture.output
-        result = self.run_python("01_read_snapshot.py", CONNECTOR_JAR=None, CANDIDATE=str(candidate))
+        # The launcher verifies the candidate in a separate Python process. Give
+        # that process the same synthetic Arrow source pins and ELF inspector as
+        # the release fixture; all candidate and resource checks still run.
+        fixture_config = self.root / "arrow-fixture.json"
+        fixture_config.write_text(json.dumps({
+            "sources": fixtures.release.arrow_cdata.SOURCE_SHA256, "abi": fixture.arrow_abi,
+        }))
+        verifier = self.bin / "fixture-python"
+        self.executable(verifier, f"#!{sys.executable}\n" + '''import json
+from pathlib import Path
+import sys
+
+sys.path.insert(0, sys.argv[2])
+import release
+fixture = json.loads(Path(''' + repr(str(fixture_config)) + ''').read_text())
+release.arrow_cdata.SOURCE_SHA256 = fixture["sources"]
+release.arrow_cdata.inspect_library = lambda path: fixture["abi"]
+sys.argv = sys.argv[1:]
+exec(compile(sys.stdin.read(), "<demo verifier>", "exec"), {"__name__": "__main__"})
+''')
+        result = self.run_python("01_read_snapshot.py", CONNECTOR_JAR=None, CANDIDATE=str(candidate),
+                                 PYTHON=str(verifier))
         self.assertEqual(result.returncode, 0, result.stderr)
         wanted = []
         for kind in ("jvm", "native"):
@@ -404,8 +426,8 @@ class RunExamplesTest(unittest.TestCase):
             wanted.append(str(candidate / "repository" / entry["path"]))
         self.assertEqual(self.arguments()[3], ",".join(wanted))
         Path(wanted[0]).write_bytes(b"changed candidate")
-        self.assert_failed(self.run_python("01_read_snapshot.py", CONNECTOR_JAR=None, CANDIDATE=str(candidate)),
-                           "Changed candidate")
+        self.assert_failed(self.run_python("01_read_snapshot.py", CONNECTOR_JAR=None, CANDIDATE=str(candidate),
+                                           PYTHON=str(verifier)), "Changed candidate")
 
 
 if __name__ == "__main__":

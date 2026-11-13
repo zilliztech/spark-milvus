@@ -31,6 +31,9 @@ Alternatively set `CANDIDATE` to a verified candidate directory and leave
 `CONNECTOR_JAR` unset. The launcher verifies the candidate before selecting its
 Spark JVM and platform JARs. It configures Java signal chaining on both driver
 and executors. Reading needs no Spark extension or plugin.
+On Linux, candidate verification requires `readelf` from `binutils`, even when
+the selected example uses Spark 4.0: verification audits the complete candidate,
+including its Spark 3.5 Arrow supplement.
 
 The default sample is local to this checkout and requires a local Spark master.
 For a cluster, use an existing snapshot with shared object-storage access:
