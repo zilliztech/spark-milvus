@@ -48,12 +48,12 @@ Before writing your application, prepare:
 - Storage access on both the Spark driver and executors. The dependency entries
   in [Installing](#installing) automatically bring in the native libraries.
 
-### Spark and Scala
+### Spark, Scala and Java
 
-| Spark | Scala binary version |
-|---|---|
-| 3.5 | 2.12, 2.13 |
-| 4.0, 4.1, 4.2 | 2.13 |
+| Spark | Scala binary version | Recommended Java runtime |
+|---|---|---|
+| 3.5 | 2.12, 2.13 | 17 |
+| 4.0, 4.1, 4.2 | 2.13 | 21 |
 
 **3.0.0** provides universal and platform-specific packages for all five
 combinations above. The installation examples below use Spark 4.0; see
@@ -80,14 +80,18 @@ for published Maven coordinates and version-specific availability.
 
 ## Installing
 
-The universal dependency resolves the connector JVM implementation and every
-released native platform; the loader selects the current platform. For a
-Linux x86_64 deployment, use `spark-milvus-4.0-linux-x86_64_2.13` to resolve
-only that platform. Use `linux-aarch64` for Linux ARM64 or `darwin-aarch64` for
-Apple silicon. Keep the same connector version across all artifacts.
+Start with the universal dependency shown below, using the example for your
+build tool. It automatically brings in the connector and native libraries for
+all supported platforms, then selects the libraries for your platform at runtime.
 
-PySpark applications use these JVM artifacts too. Add them with `--packages`
-when submitting the Python script; there is no separate connector Python
+To reduce downloads, you can choose a platform-specific dependency instead:
+`spark-milvus-4.0-linux-x86_64_2.13` for Linux x86_64, or replace `linux-x86_64`
+with `linux-aarch64` for Linux ARM64 or `darwin-aarch64` for Apple silicon.
+Keep the same connector version across all artifacts.
+
+For PySpark, start with the [Python read example](#pyspark) and follow the
+[submission instructions](docs/application-development.md#running-your-application)
+to add the connector with `--packages`. There is no separate connector Python
 package to install.
 
 ### Maven
@@ -243,11 +247,14 @@ vector types into Spark arrays or maps. See
 
 ## Writing Collection data
 
-Use a DataFrame to update existing field values in a Collection. The write uses
-a Snapshot to identify the stored rows and columns to update. The connector takes
-the final column values, writes new Milvus column files, commits manifest
-revisions and publishes a write receipt. The `replace_columns` operation
-replaces field values while preserving row count and row identities.
+Use a DataFrame to replace existing field values while preserving the
+Collection's rows. The `replace_columns` operation uses a Snapshot to identify
+the stored rows and columns to update.
+
+A successful write creates new data files and a write receipt describing the
+updates. Your application is responsible for submitting these updates to Milvus
+and making them visible to online queries. The original Snapshot continues to
+read the original values; the connector does not create a new Snapshot.
 
 Read in physical mode when computing values to write back. This includes every
 stored row, even rows marked deleted. Set `milvus.read.include_row_id=true` to
@@ -273,6 +280,7 @@ val prepared = source.select(
   trim(col("description")).as("description")
 )
 
+// Use a fresh directory for this write's records and receipt.
 val resultPath = "s3://example-bucket/column-writes/normalize-description-001"
 prepared.write
   .format("milvus")
@@ -281,6 +289,7 @@ prepared.write
   .mode("append")
   .save(resultPath)
 
+// Show one row per updated segment, with its new version and replaced fields.
 val receipt = spark.read
   .format("milvus")
   .options(snapshotOptions)
@@ -292,16 +301,13 @@ receipt.show(false)
 The required `.mode("append")` writes new result files and revisions; it does
 not append rows to the collection.
 
-Use a new result path for each write and grant the required storage write
-permissions. Preserve `_milvus_row_id` unchanged and keep every row, including
-rows whose values stay unchanged. Key fields, indexed fields and some
-Milvus-managed fields cannot be replaced; see the
+Updated data files are written alongside the existing segment data. Grant write
+access to those locations as well as the result directory. Preserve
+`_milvus_row_id` unchanged and keep every row, including rows whose values stay
+unchanged. Key fields, indexed fields and some Milvus-managed fields cannot be
+replaced; see the
 [column replacement guide](docs/column-replacement.md) for eligible fields,
 joining external updates, permissions and failure recovery.
-
-The receipt identifies the committed revisions. The connector does not create
-a Snapshot, and the original Snapshot keeps reading its original values. Your
-application owns submission to Milvus and online visibility of the replacements.
 
 ## Documents
 
