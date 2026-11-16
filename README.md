@@ -54,11 +54,10 @@ Before writing your application, prepare:
 | 3.5 | 2.12, 2.13 |
 | 4.0, 4.1, 4.2 | 2.13 |
 
-The next release will provide universal and platform-specific packages for all
-five combinations above. In the published **3.0.0**, these packages are available
-for **Spark 4.0 and 4.2** only; the installation examples below use Spark 4.0.
-See [artifact selection](docs/release-artifacts.md#published-300) for the
-published inventory and the upcoming packaging changes.
+**3.0.0** provides universal and platform-specific packages for all five
+combinations above. The installation examples below use Spark 4.0; see
+[artifact selection](docs/release-artifacts.md#published-300) for the matching
+Maven coordinates for your Spark and Scala versions.
 
 ### Operating systems and CPU architectures
 
@@ -74,11 +73,6 @@ Linux binaries are tested on Ubuntu 22.04 and 24.04. Native artifacts are not
 provided for Windows, musl-based Linux (including Alpine), or Intel Macs.
 Both the Spark driver and every executor must meet these requirements and have
 a matching native platform library on their classpaths.
-
-**3.0.0 limitation:** Spark 3.5 on Linux ARM64 is missing an Arrow JNI library,
-for both Scala variants. The Milvus ARM64 package alone does not supply it.
-The next-release build includes that library; see
-[version-specific platform support](docs/release-artifacts.md#published-300).
 
 See [cluster setup](docs/cluster-setup.md#prepare-every-driver-and-executor) for
 runtime requirements and [artifact selection](docs/release-artifacts.md)
@@ -317,7 +311,7 @@ application owns submission to Milvus and online visibility of the replacements.
 | [Reference](docs/reference.md) | Supported options, defaults, storage credentials and data types |
 | [Examples](demo/README.md) | Collection reads, SQL and column replacement |
 | [Cluster setup](docs/cluster-setup.md) | Driver and executor permissions, networking and native runtime |
-| [Release artifacts](docs/release-artifacts.md) | Published Maven coordinates, platform support and upcoming packaging |
+| [Release artifacts](docs/release-artifacts.md) | Published Maven coordinates, package choices and platform support |
 | [3.0.0 release notes](https://github.com/zilliztech/spark-milvus/releases/tag/v3.0.0) | Released capabilities and migration from earlier versions |
 
 ## License
