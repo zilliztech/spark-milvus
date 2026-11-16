@@ -119,17 +119,24 @@ class WorkflowGateTest(unittest.TestCase):
 
     def test_release_and_central_test_tags_are_disjoint(self):
         self.assertEqual(self.release_identity("v3.0.2"), {
-            "version": "3.0.2", "mode": "publish"})
+            "version": "3.0.2", "mode": "publish", "branch": "3.0"})
         self.assertEqual(self.release_identity("v3.0.2-rc.3"), {
-            "version": "3.0.2-rc.3", "mode": "publish"})
+            "version": "3.0.2-rc.3", "mode": "publish", "branch": "3.0"})
         self.assertEqual(self.release_identity("v3.0.2-central-test.7"), {
-            "version": "3.0.2-central-test.7", "mode": "test"})
+            "version": "3.0.2-central-test.7", "mode": "test", "branch": "3.0"})
         for tag in ("v3.0.2-central-test", "v3.0.2-central-test.preview",
                     "v3.0.2-central-test7", "v3.0.2-central-testing.1",
                     "v3.0.2-CENTRAL-TEST.7", "v3.0.2-central.test.7",
                     "v3.0.2-rc.central-test.7", "v2.1.2", "v2.1.2-central-test.7"):
             with self.subTest(tag=tag), self.assertRaises(SystemExit):
                 self.release_identity(tag)
+
+    def test_release_branch_follows_the_version_line(self):
+        for version, mode in (("3.1.0", "publish"), ("3.1.0-rc.2", "publish"),
+                              ("3.1.0-central-test.7", "test")):
+            with self.subTest(version=version):
+                self.assertEqual(self.release_identity("v" + version), {
+                    "version": version, "mode": mode, "branch": "3.1"})
 
     def test_release_requires_full_ci_and_its_candidate(self):
         release = workflow("release.yml")
@@ -186,24 +193,23 @@ class WorkflowGateTest(unittest.TestCase):
             "GH_TOKEN": "${{ github.token }}",
             "RELEASE_REPOSITORY": "${{ github.repository }}",
             "RELEASE_SHA": "${{ github.sha }}",
+            "RELEASE_BRANCH": "${{ steps.identity.outputs.branch }}",
         })
         script = source["run"]
         for fragment in (
                 "actions/workflows/ci.yml/runs", "event=push",
-                "status=success", 'head_sha="$RELEASE_SHA"',
+                "status=success", 'head_sha="$RELEASE_SHA"', 'branch="$RELEASE_BRANCH"',
                 "run.get('path') == '.github/workflows/ci.yml'",
-                "release_branch(run.get('head_branch'))",
-                "name == 'main' or re.fullmatch(r'\\d+\\.\\d+', str(name)) is not None",
+                "run.get('head_branch') == branch",
                 "run.get('head_sha') == sha", "run.get('status') == 'completed'",
                 "run.get('conclusion') == 'success'", "scripts/release-matrix.json",
                 "'native-' + row['platform'] for row in matrix['native']", "artifact.get('expired') is False",
-                "artifact.get('workflow_run', {}).get('id') == run_id"):
+                "artifact.get('workflow_run', {}).get('id') == run_id",
+                "artifact.get('workflow_run', {}).get('head_branch') == branch"):
             self.assertIn(fragment, script)
         self.assertNotIn("secrets.", str(source))
 
-    def test_release_native_source_resolver_accepts_only_matching_artifacts(self):
-        source = next(step for step in workflow("release.yml")["jobs"]["identity"]["steps"]
-                      if step.get("id") == "native-source")
+    def native_source_fixture(self):
         sha = "a" * 40
         repository = "example/spark-milvus"
         run_id = 12345
@@ -222,56 +228,79 @@ class WorkflowGateTest(unittest.TestCase):
         } for name in ("native-" + row["platform"] for row in
                        json.loads((ROOT / "scripts/release-matrix.json").read_text())["native"])]
         self.assertIn("native-darwin-aarch64", [artifact["name"] for artifact in artifacts])
+        return run, artifacts
+
+    def resolve_native_source(self, runs, artifacts, branch="3.0"):
+        source = next(step for step in workflow("release.yml")["jobs"]["identity"]["steps"]
+                      if step.get("id") == "native-source")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             runs_path = root / "runs.json"
             artifacts_path = root / "artifacts.json"
             output = root / "output"
-            runs_path.write_text(json.dumps({"workflow_runs": [run]}))
+            runs_path.write_text(json.dumps({"workflow_runs": runs}))
             artifacts_path.write_text(json.dumps({
                 "total_count": len(artifacts), "artifacts": artifacts}))
             fake_gh = root / "gh"
+            # Deliberately return all runs regardless of query filters: the
+            # resolver must itself reject a run from the wrong branch.
             fake_gh.write_text(
                 '#!/bin/sh\ncase "$*" in *"/artifacts"*) cat "$FAKE_ARTIFACTS";; '
                 '*) cat "$FAKE_RUNS";; esac\n')
             fake_gh.chmod(0o755)
             environment = dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"],
-                               GH_TOKEN="token", RELEASE_REPOSITORY=repository,
-                               RELEASE_SHA=sha, RUNNER_TEMP=str(root),
+                               GH_TOKEN="token", RELEASE_REPOSITORY="example/spark-milvus",
+                               RELEASE_SHA="a" * 40, RELEASE_BRANCH=branch, RUNNER_TEMP=str(root),
                                GITHUB_OUTPUT=str(output), FAKE_RUNS=str(runs_path),
                                FAKE_ARTIFACTS=str(artifacts_path))
             result = subprocess.run(["bash", "-c", source["run"]], cwd=ROOT,
                                     env=environment, text=True, capture_output=True)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(output.read_text(), f"run_id={run_id}\n")
+            return result, output.read_text() if output.exists() else None
 
-            run["head_sha"] = "b" * 40
-            runs_path.write_text(json.dumps({"workflow_runs": [run]}))
-            output.unlink()
-            result = subprocess.run(["bash", "-c", source["run"]], cwd=ROOT,
-                                    env=environment, text=True, capture_output=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertFalse(output.exists())
+    def test_release_native_source_resolver_accepts_only_matching_artifacts(self):
+        run, artifacts = self.native_source_fixture()
+        result, output = self.resolve_native_source([run], artifacts)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(output, f"run_id={run['id']}\n")
 
-            run["head_sha"] = sha
-            run["head_branch"] = artifact_run["head_branch"] = "release-3.0"
-            runs_path.write_text(json.dumps({"workflow_runs": [run]}))
-            artifacts_path.write_text(json.dumps({
-                "total_count": len(artifacts), "artifacts": artifacts}))
-            result = subprocess.run(["bash", "-c", source["run"]], cwd=ROOT,
-                                    env=environment, text=True, capture_output=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("main or a <major>.<minor> release branch", result.stderr)
-            self.assertFalse(output.exists())
+        run["head_sha"] = "b" * 40
+        result, output = self.resolve_native_source([run], artifacts)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNone(output)
 
-            run["head_branch"] = artifact_run["head_branch"] = "main"
-            runs_path.write_text(json.dumps({"workflow_runs": [run]}))
-            artifacts_path.write_text(json.dumps({
-                "total_count": len(artifacts), "artifacts": artifacts}))
-            result = subprocess.run(["bash", "-c", source["run"]], cwd=ROOT,
-                                    env=environment, text=True, capture_output=True)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(output.read_text(), f"run_id={run_id}\n")
+    def test_release_native_source_rejects_a_run_from_another_branch(self):
+        for branch in ("main", "3.1", "2.0", "release-3.0"):
+            with self.subTest(branch=branch):
+                run, artifacts = self.native_source_fixture()
+                run["head_branch"] = branch
+                result, output = self.resolve_native_source([run], artifacts)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Release requires a successful push CI run on 3.0 "
+                              "for the exact tag commit", result.stderr)
+                self.assertIsNone(output)
+
+    def test_release_native_source_rejects_an_artifact_from_another_branch(self):
+        for branch in ("main", "3.1"):
+            for index in range(len(self.native_source_fixture()[1])):
+                with self.subTest(branch=branch, artifact=index):
+                    run, artifacts = self.native_source_fixture()
+                    # Isolate one artifact without changing the valid run or
+                    # the other platforms' provenance.
+                    artifacts[index]["workflow_run"] = dict(
+                        artifacts[index]["workflow_run"], head_branch=branch)
+                    result, output = self.resolve_native_source([run], artifacts)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("Native source run lacks one unexpired " +
+                                  artifacts[index]["name"] + " artifact", result.stderr)
+                    self.assertIsNone(output)
+
+    def test_release_native_source_chooses_release_branch_over_newer_main_run(self):
+        run, artifacts = self.native_source_fixture()
+        main_run = dict(run, id=run["id"] + 1, head_branch="main",
+                        created_at="2026-10-17T00:00:00Z")
+        result, output = self.resolve_native_source([main_run, run], artifacts)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(output, f"run_id={run['id']}\n")
 
     def test_central_test_validates_downloads_and_drops_without_publishing(self):
         release = workflow("release.yml")

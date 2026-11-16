@@ -233,8 +233,17 @@ creation, replacement and deletion of `v3.*` tags and ensure releases point to
 reviewed commits. Restrict tag bypass and environment administration
 appropriately.
 
-Release accepts `v3.x.y` tags and prereleases such as `v3.0.0-rc.1`. It verifies
-that the candidate source commit is the tagged commit, then enters the
+Build every 3.0.x release from the `3.0` branch. Merge or backport the intended
+changes through a PR to `3.0`, wait for its complete push CI to pass, then tag
+that tested commit with an unused version. A successful `main` CI run does not
+qualify a commit for publication.
+
+Release accepts `v3.x.y` tags and prereleases such as `v3.0.1-rc.1`. The workflow
+derives the required branch from the version's major and minor numbers and
+requires a successful push CI run on that branch for the exact tagged commit.
+The native artifacts must belong to that same branch, commit and CI run. This
+also applies to Central test tags. The workflow verifies that the candidate
+source commit is the tagged commit, then enters the
 `maven-central` environment. Build and consumer jobs have no signing or Central
 credentials. The publication job imports the key into a temporary GPG home,
 requires exactly one primary secret key and explicitly selects its fingerprint
@@ -253,8 +262,11 @@ promotion endpoint, so it does not create a public Maven version. The test
 report records the deployment ID for manual cleanup if the runner stops before
 deletion.
 
-The equivalent Central commands, with the signing key already imported and
-credentials provided by a trusted environment, are:
+For manual publication, apply the same release-branch and successful push CI
+requirements before building the candidate. The low-level Central commands
+below verify the files but do not enforce branch provenance themselves. With
+the signing key already imported and credentials provided by a trusted
+environment, run:
 
 ```bash
 python3 scripts/release.py verify --candidate target/release-candidate
