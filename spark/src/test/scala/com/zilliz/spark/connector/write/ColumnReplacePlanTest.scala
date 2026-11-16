@@ -170,6 +170,7 @@ class ColumnReplacePlanTest extends AnyFunSuite with Matchers {
       serializedSize = 1L,
       indexVersion = 1L,
       currentIndexVersion = None,
+      currentScalarIndexVersion = None,
       indexStorePathVersion = None
     )
     def at(segments: Segment*) =

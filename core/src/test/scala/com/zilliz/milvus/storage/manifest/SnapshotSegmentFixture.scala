@@ -32,6 +32,7 @@ object SnapshotSegmentFixture {
       serializedSize = 4096L,
       indexVersion = 1L,
       currentIndexVersion = Some(2),
+      currentScalarIndexVersion = Some(3),
       indexStorePathVersion = Some(0)
     )
 
@@ -104,6 +105,10 @@ object SnapshotSegmentFixture {
         value.put(
           "current_index_version",
           index.currentIndexVersion.getOrElse(0)
+        )
+        value.put(
+          "current_scalar_index_version",
+          index.currentScalarIndexVersion.getOrElse(0)
         )
         value.put(
           "index_store_path_version",
