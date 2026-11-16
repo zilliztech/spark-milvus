@@ -8,26 +8,28 @@ Scala 2.13 and Java 21.
 
 ## Published 3.0.0
 
-The examples in this guide use artifacts already published to Maven Central.
-The available packaging differs by Spark line:
+All five combinations below are available from Maven Central at version
+**3.0.0**, with universal, platform-specific and bundled JVM artifacts.
 
-| Spark | Scala | Available in 3.0.0 |
+| Spark | Scala | Universal Maven coordinate |
 |---|---|---|
-| 3.5 | 2.12 or 2.13 | Legacy packaging; see the versioned guide below. Linux ARM64 is not supported. |
-| 4.0 | 2.13 | Universal, platform-specific and bundled JVM artifacts |
-| 4.1 | 2.13 | Legacy packaging; see the versioned guide below. |
-| 4.2 | 2.13 | Universal, platform-specific and bundled JVM artifacts |
+| 3.5 | 2.12 | [`com.zilliz:spark-milvus-3.5_2.12:3.0.0`](https://repo.maven.apache.org/maven2/com/zilliz/spark-milvus-3.5_2.12/3.0.0/) |
+| 3.5 | 2.13 | [`com.zilliz:spark-milvus-3.5_2.13:3.0.0`](https://repo.maven.apache.org/maven2/com/zilliz/spark-milvus-3.5_2.13/3.0.0/) |
+| 4.0 | 2.13 | [`com.zilliz:spark-milvus-4.0_2.13:3.0.0`](https://repo.maven.apache.org/maven2/com/zilliz/spark-milvus-4.0_2.13/3.0.0/) |
+| 4.1 | 2.13 | [`com.zilliz:spark-milvus-4.1_2.13:3.0.0`](https://repo.maven.apache.org/maven2/com/zilliz/spark-milvus-4.1_2.13/3.0.0/) |
+| 4.2 | 2.13 | [`com.zilliz:spark-milvus-4.2_2.13:3.0.0`](https://repo.maven.apache.org/maven2/com/zilliz/spark-milvus-4.2_2.13/3.0.0/) |
 
-For the existing Spark 3.5 and 4.1 artifacts, consult the
-[3.0.0 artifact guide](https://github.com/zilliztech/spark-milvus/blob/v3.0.0/docs/releasing.md#using-release-artifacts).
-Those published artifacts remain available. New releases will use the unified
-packaging described below instead of publishing Thin modules.
+Each combination supports Linux x86_64, Linux ARM64 and Apple silicon. The
+Spark 3.5 bundled JVM artifacts include the Arrow JNI supplement required on
+Linux ARM64 for both Scala variants; no separate Arrow supplement is needed
+when using these published packages.
 
-**Spark 3.5 on Linux ARM64:** both Scala variants in 3.0.0 depend on Arrow
-12.0.1, whose C Data JAR lacks the Linux ARM64 JNI library. Adding the Milvus
-ARM64 native package does not supply that Arrow library, so this combination
-cannot perform connector reads or writes. The next-release build supplements
-the missing library; this does not change the published 3.0.0 artifacts.
+Use these universal or platform-specific packages for new integrations. The
+previously published Thin artifacts remain available with their original
+contents; their historical setup is documented in the
+[original 3.0.0 guide](https://github.com/zilliztech/spark-milvus/blob/v3.0.0/docs/releasing.md#using-release-artifacts).
+Do not combine Thin modules with bundled JVM or assembly JARs: they contain
+overlapping connector classes.
 
 ## Choose a dependency entry or local JARs
 
@@ -40,9 +42,10 @@ These coordinates are for Spark 4.0 / Scala 2.13, connector version 3.0.0:
 | `com.zilliz:spark-milvus-4.0-jvm_2.13:3.0.0` | Bundled JVM implementation and its JVM dependencies, without Milvus native libraries or Spark. |
 | `com.zilliz:spark-milvus-native-linux-x86_64:3.0.0` | Milvus Storage native libraries for Linux x86_64; shared across Spark and Scala profiles. |
 
-For Spark 4.2, replace `4.0` with `4.2`. For a different platform, replace
-`linux-x86_64` with its platform ID from the table below. Use Maven, Gradle or
-sbt to resolve an entry and its dependencies, as shown in the README.
+Replace `4.0` with `3.5`, `4.1` or `4.2` for your Spark line. For Spark 3.5
+with Scala 2.12, also replace `_2.13` with `_2.12`. For a different platform,
+replace `linux-x86_64` with its platform ID from the table below. Use Maven,
+Gradle or sbt to resolve an entry and its dependencies, as shown in the README.
 
 An entry JAR does not contain the implementation: copying it alone cannot
 install the connector. For a deployment using local JARs, obtain the bundled
@@ -63,28 +66,24 @@ with resolved dependencies or local JARs, and for building from source.
 Linux requires `libstdc++` with `GLIBCXX_3.4.30` and `CXXABI_1.3.13`; this
 system library is not bundled. Linux binaries are tested on Ubuntu 22.04 and
 24.04. Prebuilt native packages do not cover Windows, musl/Alpine or Intel Macs.
-The Spark 3.5 / Linux ARM64 restriction above still applies to version 3.0.0.
 
 Every driver and executor must meet the platform requirements, load its own
 JRE's signal library and have a writable native extraction directory that
-permits shared-library loading. Match Java to your Spark distribution; the
-next-release consumer matrix uses Java 17 for Spark 3.5 and Java 21 for Spark
-4.x. See [cluster setup](cluster-setup.md) for runtime configuration.
+permits shared-library loading. Use Java 17 for Spark 3.5 and Java 21 for
+Spark 4.x in the configurations documented here. See
+[cluster setup](cluster-setup.md) for runtime configuration.
 
-## Next release: unified packaging (unreleased)
+## Build provenance
 
-The next release provides universal, platform-specific and bundled JVM
-artifacts for every supported combination:
+On November 16, 2026, the 3.0.0 inventory was extended with 15 new coordinates:
+a bundled JVM artifact, a universal entry and three platform entries for each
+of Spark 3.5 / Scala 2.12, Spark 3.5 / Scala 2.13 and Spark 4.1 / Scala 2.13.
+These artifacts were built from main commit
+[`a64a831`](https://github.com/zilliztech/spark-milvus/commit/a64a831c2d511dd32cbeed77804f4192fc04f69c),
+which their POM SCM metadata records.
 
-| Spark | Scala binary versions |
-|---|---|
-| 3.5 | 2.12, 2.13 |
-| 4.0, 4.1, 4.2 | 2.13 |
-
-The universal artifact naming pattern is
-`com.zilliz:spark-milvus-<spark-line>_<scala-binary>:<published-version>`;
-platform and JVM entries follow the patterns illustrated above. These new
-Spark 3.5 and 4.1 entries are **not available at version 3.0.0**. Select a version
-only after it appears in [GitHub Releases](https://github.com/zilliztech/spark-milvus/releases)
-and Maven Central. The next-release Spark 3.5 bundles also include the missing
-Linux ARM64 Arrow JNI library.
+The original `v3.0.0` tag and `3.0` release branch were not moved for this
+publication. The existing Spark 4.0 and 4.2 packages, all three Milvus native
+packages and the legacy Thin artifacts were not overwritten. Use each
+artifact's POM SCM metadata to identify its build source; the original tag
+does not contain the build changes for the 15 added coordinates.

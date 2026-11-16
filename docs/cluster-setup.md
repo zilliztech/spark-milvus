@@ -40,9 +40,10 @@ later, and Apple silicon with macOS 14 or later. Linux binaries are tested on
 Ubuntu 22.04 and 24.04 and require a system `libstdc++` providing
 `GLIBCXX_3.4.30` and `CXXABI_1.3.13` (GCC 12's runtime or newer); this library is
 not bundled. Windows, musl-based Linux (including Alpine) and Intel Macs have
-no released native artifacts. In connector 3.0.0, Spark 3.5 on Linux ARM64
-also lacks the required Arrow JNI library; see
-[version-specific support](release-artifacts.md#published-300).
+no released native artifacts. The Spark 3.5 bundled JVM artifacts include the
+Arrow JNI library needed on Linux ARM64 for both Scala variants; use the
+[universal or platform-specific dependency](release-artifacts.md#published-300)
+for your Spark and Scala versions.
 
 | Requirement | Configuration or permission |
 |---|---|

@@ -37,6 +37,20 @@ rules, environment reviewers or secrets.
 
 ## Produce and accept a candidate
 
+The 3.0.0 inventory includes 15 coordinates added on 2026-11-16 for Spark
+3.5 / Scala 2.12, Spark 3.5 / Scala 2.13 and Spark 4.1 / Scala 2.13. These
+bundled JVM, universal and platform entries were built from main commit
+`a64a831c2d511dd32cbeed77804f4192fc04f69c`; the Spark 3.5 bundles include the
+Arrow Linux ARM64 supplement. The original `v3.0.0` tag and `3.0` release base
+remain at `50ec8905fdf3edfebcf97ab57a0b7009feb3f0c5`. Existing Spark 4.0/4.2,
+native and Thin artifacts were not replaced. See the
+[published inventory](../../../docs/release-artifacts.md#published-300) and
+[build provenance](../../../docs/release-artifacts.md#build-provenance).
+Before preparing or verifying a candidate, establish its exact coordinate
+inventory and source commit from the candidate manifest and POM SCM metadata;
+do not infer the incremental packages' source from the original release tag.
+Use the build and verification scripts from that candidate's source revision.
+
 Use Java 21 and initialize `milvus-proto` and `milvus-storage`. The sbt
 `exportBuildMatrix` task is authoritative for the source profiles, native
 platforms and deployment inputs; `scripts/release.py plan` derives the inventory.
@@ -59,7 +73,7 @@ without a version override. Tagged releases use the pushed tag without `v`.
 The planner accepts final versions and numeric `alpha`, `beta` or `rc`
 qualifiers, plus the reserved Central-test form described below. Only a Central
 404 establishes that a coordinate is unused; authentication or network failure
-does not. Never reuse a published version for changed artifacts.
+does not. Never replace bytes at an already published Maven coordinate.
 
 Produce replacement CI candidates with a new dispatch or an all-jobs rerun.
 Consumers must use the artifact ID and digest from the producing attempt;
@@ -67,9 +81,8 @@ do not mix artifacts from a failed-jobs rerun with another attempt's candidate.
 All artifacts in a candidate use one version. Every supported Spark and Scala
 combination has its own bundled JVM, universal and platform-specific coordinates;
 native platform artifacts are shared. The four production modules remain
-internal build units and no Thin modules are published. The published 3.0.0
-inventory remains unchanged; use its tagged release scripts when inspecting or
-verifying that older artifact graph.
+internal build units, and this build graph no longer publishes Thin modules.
+Existing Thin artifacts remain available with their original bytes.
 
 For local reproduction, follow `build-artifacts.yml`: build native bundles on
 their declared architectures with `native/build/build.py`, package them with
@@ -239,9 +252,10 @@ python3 scripts/ci/consumer_smoke.py --candidate target/public-candidate \
 The workflow does not create the GitHub release announcement. Once public
 delivery succeeds, render `docs/release-notes/3.0.md` into a temporary Markdown
 body, replacing every `{{VERSION}}` with the published version without `v`.
-Remove the unreleased-template notice and ensure the capabilities and artifact
-inventory match that version. Do not apply next-release packaging changes to the
-published 3.0.0 announcement.
+Remove the template notice and ensure the capabilities, artifact inventory
+and build provenance match the published candidate. For 3.0.0, distinguish the
+original artifacts from the incremental packages built from main; the original
+tag alone does not describe the complete published inventory.
 Keep Maven coordinates, dependency XML, artifact choices and platform requirements
 in that body;
 do not replace it with a link-only announcement. Verify no placeholder remains
