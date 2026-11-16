@@ -10,7 +10,12 @@ package com.zilliz.spark.connector
   * row arrives exactly once; the driver commits every segment's manifest from
   * the snapshot's pinned revision and publishes the receipt. `WriteResult` owns
   * the records under the write result address, including the claim that gives
-  * an address to one write, and `WriteResultTable` reads a receipt back.
+  * an address to one write, and `WriteResultTable` reads a receipt back. A
+  * conditional create of `_operation.json` claims the address before tasks
+  * start, and `_result.json` is also published by conditional creation. An
+  * ambiguous create failure is resolved by reading the complete record back.
+  * Unsupported conditional writes fail without falling back to an existence
+  * check. Addresses claimed by the earlier manifest protocol remain occupied.
   *
   * Nothing here appends rows, calls a Milvus service, registers a revision or
   * creates a snapshot; callers own job registration and online visibility.

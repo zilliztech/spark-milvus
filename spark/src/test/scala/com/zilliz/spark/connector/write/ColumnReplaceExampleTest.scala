@@ -1,7 +1,9 @@
 package com.zilliz.spark.connector.write
 
 import java.nio.file.{Files, Path}
+import java.time.Instant
 import java.util.{Comparator, UUID}
+import java.util.concurrent.{Callable, CountDownLatch, Executors, TimeUnit}
 
 import com.fasterxml.jackson.databind.node.ObjectNode
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -156,9 +158,13 @@ class ColumnReplaceExampleTest extends AnyFunSuite with BeforeAndAfterAll {
   }
 
   /** The prefix-scoped identity of the isolated object store fixture, which may
-    * not list or probe the bucket outside its own prefix.
+    * not list or probe the bucket outside its own prefix. An explicit S3
+    * transport selection applies to fixture writes, claims and Spark options.
     */
-  private def objectStorage(body: Place => Unit): Unit = {
+  private def objectStorage(
+      body: Place => Unit,
+      useCrt: Option[Boolean] = None
+  ): Unit = {
     assume(
       available,
       "the native libraries and a compatible Arrow JVM are required"
@@ -193,7 +199,7 @@ class ColumnReplaceExampleTest extends AnyFunSuite with BeforeAndAfterAll {
         StorageProperties.AccessKeyValue -> env(
           "STORAGE_TEST_S3_TARGET_SECRET_KEY"
         )
-      )
+      ) ++ useCrt.map(enabled => "fs.s3.use_crt" -> enabled.toString)
     )
     val prefix = s"target/${UUID.randomUUID()}/"
     body(
@@ -415,6 +421,39 @@ class ColumnReplaceExampleTest extends AnyFunSuite with BeforeAndAfterAll {
           List("score", "embedding")
       )
     }
+    val operationBytes =
+      place.read("column-demo/run/write-result/_operation.json")
+    val operation = mapper.readTree(operationBytes)
+    assert(operation.get("record").asText() == "operation")
+    assert(
+      receipt.forall(
+        _.getAs[String]("operation_id") ==
+          operation.get("operation_id").asText()
+      )
+    )
+    assert(
+      !place.exists(
+        "column-demo/run/write-result/_claim/_metadata/manifest-1.avro"
+      )
+    )
+
+    val location = WriteResultLocation.resolve(result, place.storage)
+    val originalResult = WriteResultRecords.readResult(location)
+    val resultBytes = place.read("column-demo/run/write-result/_result.json")
+    intercept[Exception] {
+      WriteResultRecords.writeResult(
+        location,
+        originalResult.copy(applicationId =
+          originalResult.applicationId + "-changed"
+        )
+      )
+    }
+    assert(
+      place
+        .read("column-demo/run/write-result/_result.json")
+        .sameElements(resultBytes)
+    )
+    assert(WriteResultRecords.readResult(location) == originalResult)
 
     val after =
       mapper.readTree(place.read("snapshot.json")).asInstanceOf[ObjectNode]
@@ -467,6 +506,98 @@ class ColumnReplaceExampleTest extends AnyFunSuite with BeforeAndAfterAll {
         .save(result)
     )
     assert(messages(reuse).contains("already belongs to another column write"))
+    assert(
+      place
+        .read("column-demo/run/write-result/_operation.json")
+        .sameElements(operationBytes)
+    )
+  }
+
+  private def runConcurrentClaims(place: Place): Unit = {
+    val name = "column-demo/concurrent-claim"
+    val location = WriteResultLocation.resolve(place.path(name), place.storage)
+    val operationIds = Vector.fill(4)(UUID.randomUUID().toString)
+    val createdAt = Instant.now().toString
+    val applicationId = spark.sparkContext.applicationId
+    def claim(operationId: String): Unit =
+      WriteResultRecords.writeOperation(
+        location,
+        operationId,
+        MilvusOption.WriteOperationReplaceColumns,
+        createdAt,
+        applicationId,
+        SourceSnapshot(
+          place.path("snapshot.json"),
+          5L,
+          "before_update",
+          90L,
+          0
+        ),
+        Seq(TargetColumn("score", 101L), TargetColumn("embedding", 102L)),
+        segments.size
+      )
+
+    val ready = new CountDownLatch(operationIds.size)
+    val start = new CountDownLatch(1)
+    val pool = Executors.newFixedThreadPool(operationIds.size)
+    try {
+      val attempts = operationIds.map { operationId =>
+        pool.submit(new Callable[Either[Exception, String]] {
+          override def call(): Either[Exception, String] = {
+            ready.countDown()
+            assert(start.await(10, TimeUnit.SECONDS))
+            try {
+              claim(operationId)
+              Right(operationId)
+            } catch {
+              case failure: Exception => Left(failure)
+            }
+          }
+        })
+      }
+      assert(ready.await(10, TimeUnit.SECONDS))
+      start.countDown()
+      val outcomes = attempts.map(_.get(30, TimeUnit.SECONDS))
+      val winners = outcomes.collect { case Right(operationId) => operationId }
+      assert(
+        winners.size == 1,
+        s"expected one successful creator, got $outcomes"
+      )
+      val original = place.read(s"$name/_operation.json")
+      val operation = mapper.readTree(original)
+      assert(operation.get("operation_id").asText() == winners.head)
+      assert(operation.get("record").asText() == "operation")
+
+      operationIds.filterNot(winners.contains).foreach { operationId =>
+        val occupied = intercept[Exception](claim(operationId))
+        assert(
+          messages(occupied).contains("already belongs to another column write")
+        )
+        assert(place.read(s"$name/_operation.json").sameElements(original))
+      }
+      assert(!place.exists(s"$name/_result.json"))
+      assert(!place.exists(s"$name/_claim/_metadata/manifest-1.avro"))
+      val pending = intercept[IllegalArgumentException] {
+        WriteResultRecords.readResult(location)
+      }
+      assert(pending.getMessage.contains("has not completed"))
+    } finally {
+      start.countDown()
+      pool.shutdownNow()
+      pool.awaitTermination(10, TimeUnit.SECONDS)
+    }
+  }
+
+  test("concurrent local writes give the result address to one operation") {
+    local(runConcurrentClaims)
+  }
+
+  Seq(true, false).foreach { useCrt =>
+    test(
+      s"concurrent prefix-scoped writes with fs.s3.use_crt=$useCrt give the result address to one operation"
+    ) {
+      objectStorage(runConcurrentClaims, useCrt = Some(useCrt))
+    }
   }
 
   test(

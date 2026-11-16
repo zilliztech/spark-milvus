@@ -15,7 +15,7 @@ class VersionSelectionTest(unittest.TestCase):
 
     def validate(self, storage, component, *, conan_os="Linux", with_extension=False):
         return validate_upstream_versions(self.constraints, {
-            "storage": (storage, {"with_crt": False, "with_ut": False, "with_benchmark": False}),
+            "storage": (storage, {"with_ut": False, "with_benchmark": False}),
             "component": (component, {"with_extension": with_extension, "with_light": False,
                                       "with_ut": False, "with_benchmark": False})
         }, conan_os=conan_os)

@@ -15,9 +15,14 @@ and fresh JVM loads; diagnostic failures block bundle promotion.
 The Storage pin includes Tencent's OIDC assume-role chain. Its source graph
 requires Talon's C++ filesystem, Rust feature and generated CXX bridge; all
 three are compiled and provenance records `storage.talon=true`. Talon routing
-keeps the upstream default `fs.talon.mode=0`. Storage's C++ CRT transport remains
-disabled (`storage.crt=false`), excluding its optional `aws-c-s3` requirement.
-Changing the Storage gitlink requires a fresh native bundle.
+keeps the upstream default `fs.talon.mode=0`. Storage now requires the native
+AWS CRT transport (`storage.crt=true`), its SDK S3 CRT client and the shared
+`aws-c-io`, `aws-c-http` and `aws-c-s3` providers. The independent adapter owns
+the pinned SDK's header extension: it adds the upstream borrowed native-handle
+accessor in a build-local header overlay without changing the cached SDK or
+the class layout. An unexpected SDK header fails configuration. All Storage
+targets use the same overlay. Changing the Storage gitlink requires a fresh
+native bundle.
 
 ## Toolchain and dependency graph
 

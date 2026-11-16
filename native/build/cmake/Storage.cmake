@@ -22,9 +22,36 @@ function(milvus_add_storage)
   endif()
 
   foreach(dependency IN ITEMS Boost fmt folly glog prometheus-cpp Arrow Azure
-      Protobuf nlohmann_json opentelemetry-cpp google-cloud-cpp CURL AWSSDK milvus-common)
+      Protobuf nlohmann_json opentelemetry-cpp google-cloud-cpp CURL AWSSDK
+      aws-c-io aws-c-http aws-c-s3 milvus-common)
     find_package(${dependency} REQUIRED CONFIG)
   endforeach()
+  # The pinned Storage transport needs the upstream borrowed-handle accessor.
+  # Apply its header-only SDK extension in this build tree; never edit Conan's
+  # package or execute the upstream engine's CMake files.
+  unset(STORAGE_S3_CRT_INCLUDE_DIR CACHE)
+  find_path(STORAGE_S3_CRT_INCLUDE_DIR aws/s3-crt/S3CrtClient.h
+    HINTS ${AWSSDK_INCLUDE_DIRS} NO_DEFAULT_PATH REQUIRED)
+  set(storage_sdk_header "${STORAGE_S3_CRT_INCLUDE_DIR}/aws/s3-crt/S3CrtClient.h")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${storage_sdk_header}")
+  file(READ "${storage_sdk_header}" storage_sdk_content)
+  set(storage_native_member "  struct aws_s3_client* m_s3CrtClient = {};")
+  string(FIND "${storage_sdk_content}" "${storage_native_member}" storage_member_offset)
+  if(storage_member_offset EQUAL -1)
+    message(FATAL_ERROR "Unsupported S3CrtClient header: review the native handle extension for this SDK version")
+  endif()
+  string(REPLACE "${storage_native_member}"
+    "public:
+  // Borrowed handle. The S3CrtClient must outlive every submitted request.
+  struct aws_s3_client* GetUnderlyingS3Client() const noexcept { return m_s3CrtClient; }
+private:
+${storage_native_member}"
+    storage_sdk_content "${storage_sdk_content}")
+  set(storage_sdk_overlay "${CMAKE_CURRENT_BINARY_DIR}/sdk-extension")
+  file(MAKE_DIRECTORY "${storage_sdk_overlay}/aws/s3-crt")
+  file(CONFIGURE OUTPUT "${storage_sdk_overlay}/aws/s3-crt/S3CrtClient.h"
+    CONTENT "${storage_sdk_content}" @ONLY)
+  include_directories(BEFORE "${storage_sdk_overlay}")
   find_package(libavrocpp QUIET CONFIG)
   if(NOT libavrocpp_FOUND)
     find_package(avro-cpp REQUIRED CONFIG)
@@ -112,6 +139,10 @@ function(milvus_add_storage)
       protobuf::protobuf
       nlohmann_json::nlohmann_json
       AWS::aws-sdk-cpp-identity-management
+      AWS::aws-c-io
+      AWS::aws-c-http
+      AWS::aws-c-s3
+      AWS::aws-sdk-cpp-s3-crt
       google-cloud-cpp::storage
       ${storage_avro}
       Folly::folly

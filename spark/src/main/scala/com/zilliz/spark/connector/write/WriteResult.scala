@@ -5,21 +5,21 @@ import java.nio.file.Paths
 import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
-import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
+import com.fasterxml.jackson.databind.{
+  DeserializationFeature,
+  JsonNode,
+  ObjectMapper
+}
 import com.fasterxml.jackson.databind.node.{ArrayNode, ObjectNode}
 
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.io.{
   NativeObjectStore,
-  NativeWritableObjectStore
+  NativeWritableObjectStore,
+  WritableObjectStore
 }
-import com.zilliz.milvus.storage.manifest.V3ManifestReader
 import com.zilliz.milvus.storage.path.StoragePath
-import com.zilliz.milvus.storage.write.{
-  ColumnGroupFiles,
-  ManifestTransaction,
-  WriterResources
-}
+import com.zilliz.milvus.storage.write.{ColumnGroupFiles, WriterResources}
 
 /** The snapshot a column replacement read its rows from and replaced columns
   * of. The schema version is recorded as the snapshot states it, zero included;
@@ -105,15 +105,15 @@ final case class WriteResultLocation(
 ) {
   private def under(name: String): String = s"$key/$name"
 
-  /** The milvus-storage manifest whose first revision claims the path. */
-  def claimBasePath: String = under("_claim")
+  private[write] def legacyClaimKey: String =
+    under("_claim/_metadata/manifest-1.avro")
+
+  /** The conditionally created record that gives the path to one operation. */
   def operationKey: String = under("_operation.json")
   def commitPlanKey: String = under("_commit_plan.json")
   def resultKey: String = under("_result.json")
   def failureKey: String = under("_failure.json")
 
-  private[write] def bucket: String =
-    properties.getOrElse(StorageProperties.BucketName, "")
 }
 
 object WriteResultLocation {
@@ -175,91 +175,117 @@ object WriteResultLocation {
 /** The records a column replacement keeps under its write result address, and
   * the claim that makes the address one operation's.
   *
-  * The claim commits revision 1 of a milvus-storage manifest at `_claim`. That
-  * commit is a conditional create, exactly as atomic as the segment manifest
-  * commits the write itself makes, so a second operation cannot take the same
-  * address. Only the operation holding the claim writes the other records:
-  * `_operation.json` right after the claim, `_commit_plan.json` before any
-  * segment manifest changes, then either `_result.json` once every segment
-  * committed or `_failure.json`. Readers of a result read `_result.json` only.
+  * The claim conditionally creates `_operation.json` with the operation id. The
+  * backend must support atomic creation; an existence check cannot replace it.
+  * Only the operation holding the claim writes the other records:
+  * `_commit_plan.json` before any segment manifest changes, then either
+  * `_result.json` once every segment committed or `_failure.json`. The receipt
+  * is also conditionally created. Readers of a result read `_result.json` only.
   */
 object WriteResultRecords {
   val Format = "milvus-column-write"
   val FormatVersion = 1
 
-  private val ClaimStatistic = "column_write.operation"
-  private val ClaimOperationKey = "operation_id"
   private val mapper = new ObjectMapper()
+  private val recordReader =
+    mapper.reader().`with`(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
 
-  /** Takes the address for `operationId`, or fails if any operation took it
-    * before.
-    *
-    * A failed commit is followed by reading the claim back, because the
-    * conditional create may have succeeded with its response lost: the claim
-    * then names this operation and the address is ours.
+  /** Borrows the store to conditionally create an immutable record. A failed
+    * create may have succeeded with its response lost; only the complete
+    * expected record confirms success. Store cleanup is outside recovery.
     */
-  def claim(location: WriteResultLocation, operationId: String): Unit = {
-    try {
-      ManifestTransaction.createFirst(
-        location.claimBasePath,
-        location.properties,
-        Seq(
-          ManifestTransaction.Stat(
-            ClaimStatistic,
-            Seq(location.operationKey),
-            Map(ClaimOperationKey -> operationId)
-          )
+  private[write] def createRecord(
+      location: WriteResultLocation,
+      key: String,
+      record: ObjectNode,
+      store: WritableObjectStore
+  ): Unit = {
+    val recordType =
+      if (key == location.operationKey) "operation"
+      else {
+        require(
+          key == location.resultKey,
+          "only operation and result records are immutable"
         )
+        "result"
+      }
+    val operationId = recordOwner(record, recordType)
+    // The previous protocol used a different key. Refuse its persisted claims
+    // without interpreting or extending their manifest format.
+    if (key == location.operationKey && store.exists(location.legacyClaimKey)) {
+      throw new IllegalStateException(
+        s"The write result address ${location.path} already belongs to another column write; " +
+          "its claim was created by an earlier connector version"
       )
-      ()
+    }
+    val bytes = mapper.writeValueAsBytes(record)
+    // Parse both sides alike: small LongNode values become IntNodes in JSON.
+    val expected = mapper.readTree(bytes)
+    try {
+      store.create(key, bytes)
     } catch {
+      case unsupported: UnsupportedOperationException => throw unsupported
       case NonFatal(failure) =>
-        val holder =
-          try claimHolder(location)
-          catch {
+        val existing =
+          try {
+            if (!store.exists(key)) None
+            else {
+              val found = recordReader.readTree(store.readAll(key))
+              recordOwner(found, recordType)
+              Some(found)
+            }
+          } catch {
             case NonFatal(inspection) =>
-              failure.addSuppressed(inspection)
+              if (failure ne inspection) failure.addSuppressed(inspection)
               throw new IllegalStateException(
-                s"Cannot claim the write result address ${location.path}: ${failure.getMessage}",
+                s"Cannot create the $recordType record at $key: ${failure.getMessage}",
                 failure
               )
           }
-        holder match {
-          case Some(id) if id == operationId => ()
-          case Some(_) =>
+        existing match {
+          case Some(found) if found == expected => ()
+          case Some(found)
+              if found.path("operation_id").asText() != operationId =>
             throw new IllegalStateException(
               s"The write result address ${location.path} already belongs to another column write; " +
                 "give every independent write its own address",
               failure
             )
+          case Some(_) =>
+            throw new IllegalStateException(
+              s"Cannot create the $recordType record at $key: the existing record for " +
+                s"operation $operationId differs from the attempted publication",
+              failure
+            )
           case None =>
             throw new IllegalStateException(
-              s"Cannot claim the write result address ${location.path}: ${failure.getMessage}",
+              s"Cannot create the $recordType record at $key: ${failure.getMessage}",
               failure
             )
         }
     }
   }
 
-  /** The operation named by the claim's first revision, if there is one. */
-  private def claimHolder(location: WriteResultLocation): Option[String] =
-    withStore(location) { store =>
-      val latest = V3ManifestReader
-        .latestManifestVersion(location.claimBasePath, location.bucket, store)
-        .fold(throw _, identity)
-      if (latest <= 0L) None
-      else {
-        val statistics = V3ManifestReader
-          .loadStatistics(location.claimBasePath, 1L, location.bucket, store)
-          .fold(throw _, identity)
-        Some(
-          statistics
-            .get(ClaimStatistic)
-            .flatMap(_.metadata.get(ClaimOperationKey))
-            .getOrElse("")
-        )
-      }
-    }
+  private def recordOwner(node: JsonNode, recordType: String): String = {
+    require(
+      node != null && node.isObject,
+      "the write result record must be an object"
+    )
+    require(
+      node.path("format").asText() == Format &&
+        node.path("format_version").isIntegralNumber &&
+        node.path("format_version").canConvertToInt &&
+        node.path("format_version").asLong() == FormatVersion &&
+        node.path("record").asText() == recordType,
+      "the write result record has an unsupported record format"
+    )
+    val owner = node.path("operation_id")
+    require(
+      owner.isTextual && owner.asText().trim.nonEmpty,
+      "the write result record needs a nonempty operation id"
+    )
+    owner.asText()
+  }
 
   def writeOperation(
       location: WriteResultLocation,
@@ -278,7 +304,7 @@ object WriteResultRecords {
     node.set[JsonNode]("source_snapshot", snapshotNode(snapshot))
     node.set[JsonNode]("changed_fields", fieldsNode(changedFields))
     node.put("segment_count", segmentCount)
-    write(location, location.operationKey, node)
+    create(location, location.operationKey, node)
   }
 
   def writeCommitPlan(
@@ -297,7 +323,7 @@ object WriteResultRecords {
   }
 
   def writeResult(location: WriteResultLocation, result: WriteResult): Unit =
-    write(location, location.resultKey, resultNode(result))
+    create(location, location.resultKey, resultNode(result))
 
   def writeFailure(
       location: WriteResultLocation,
@@ -332,7 +358,11 @@ object WriteResultRecords {
         val reason =
           if (store.exists(location.failureKey))
             s"the write did not complete; its failure record is ${location.failureKey}"
-          else if (store.exists(location.operationKey))
+          else if (
+            store.exists(location.operationKey) || store.exists(
+              location.legacyClaimKey
+            )
+          )
             "the write has not completed, or stopped without recording why"
           else "no column write used this address"
         throw new IllegalArgumentException(
@@ -489,6 +519,17 @@ object WriteResultRecords {
       }
     }
     node
+  }
+
+  private def create(
+      location: WriteResultLocation,
+      key: String,
+      node: ObjectNode
+  ): Unit = {
+    val store = NativeWritableObjectStore.open(location.properties)
+    WriterResources.closing(store.close()) {
+      createRecord(location, key, node, store)
+    }
   }
 
   private def write(

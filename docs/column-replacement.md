@@ -159,17 +159,27 @@ with the snapshot's storage identity.
 
 | Record | Written | Contents |
 |---|---|---|
-| `_claim/` | Before any task starts | A milvus-storage manifest whose first revision holds the claim. Revision files are created with a conditional write, so of two writes only one claims the address. |
-| `_operation.json` | Right after the claim | Operation id, Spark application id, source snapshot, replaced fields |
+| `_operation.json` | Before any task starts | Operation id, Spark application id, source snapshot, replaced fields. Conditional creation gives the address to one write. |
 | `_commit_plan.json` | Before any manifest changes | For every segment: manifest location, pinned revision, row count and the new files |
-| `_result.json` | After every segment committed | The receipt |
+| `_result.json` | After every segment committed | The receipt, published by conditional creation so it cannot replace an existing receipt |
 | `_failure.json` | When the write fails after the claim | The failed stage and every segment as `committed`, `not_committed` or `unknown` |
 
-The claim is exactly as atomic as the manifest commits it protects: on a store
-without conditional writes, milvus-storage falls back to an existence check for
-both. Moving the claim to a direct conditional create once the storage JNI
-supports it is tracked in
-[zilliztech/spark-milvus#202](https://github.com/zilliztech/spark-milvus/issues/202).
+The operation record uses the storage backend's atomic create-if-absent
+operation through the native filesystem. A backend without conditional writes rejects the write
+before any task starts; there is no existence-check fallback. Creating the
+record succeeds only after its writer closes successfully. If creating either
+the operation record or the receipt fails with an uncertain outcome, the driver
+reads the record back: the complete expected content confirms success, another
+operation id rejects reuse, and a missing, unreadable or different record
+preserves the failure. Records must have the expected format and a nonempty
+operation id. The local filesystem provides exclusion only within one process
+and is intended for tests.
+
+Addresses containing the earlier `_claim/_metadata/manifest-1.avro` claim are
+already occupied and are rejected without changing them. Older and newer
+connector versions use different claim keys, so they must not run concurrently
+against the same result address. Every independent write still needs its own
+address.
 
 A segment is `unknown` only when its commit failed and its manifest could not be
 inspected afterwards. A commit pinned to revision `v` can only produce revision
