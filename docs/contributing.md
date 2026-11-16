@@ -31,7 +31,7 @@ For Spark 3.5, both `spark/assembly` and `spark/releaseJvmArtifacts` require
 `-Darrow.cdata.supplement=/absolute/path/to/arrow-cdata-12-linux-aarch64.jar`.
 This supplies Arrow 12's missing Linux ARM64 JNI library in local assemblies as
 well as release bundles. Build or obtain the verified supplement as described
-in [the candidate build guide](releasing.md#build-a-candidate).
+in [the candidate build guide](../.agents/skills/spark-milvus-release/SKILL.md#produce-and-accept-a-candidate).
 Ordinary compilation and tests do not require this packaging property. On
 Linux, install `binutils` before packaging or verifying candidates: the Arrow
 supplement audit invokes `readelf`.
@@ -64,6 +64,9 @@ Follow the [sbt skill](../.agents/skills/spark-milvus-sbt/SKILL.md).
 layering and tests. `NativeBundle.scala` validates component requirements and
 platform bundles. `ReleaseArtifacts.scala` exports the bundled JVM distribution
 for every supported Spark and Scala combination.
+
+For candidate acceptance, Maven Central publication and GitHub release notes,
+use the [release skill](../.agents/skills/spark-milvus-release/SKILL.md).
 
 ## Fixed inputs for read tests
 
@@ -271,9 +274,9 @@ repository, say so in the message and fix the document in the same commit.
 
 Public documents are English Markdown files in `docs/`, including this
 guide, [reference.md](reference.md), and the
-[release guide](releasing.md). They describe the connector, its use, build and
-release process. Contributions may include design proposals, decisions and the
-rationale needed to review a change in the same pull request.
+[release notes](release-notes/3.0.md). They describe the connector, its use,
+build and released capabilities. Contributions may include design proposals,
+decisions and the rationale needed to review a change in the same pull request.
 
 ### Repository-local document references
 
