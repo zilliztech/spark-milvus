@@ -1,27 +1,28 @@
 # Spark-Milvus
 
-**Read and write Milvus Collection data in Apache Spark.** Spark-Milvus lets
-you use DataFrames to analyze Collection data and write back updated field
-values, bringing Milvus data into your Spark workflows.
+**Read and write Milvus Collection data with Apache Spark.**
 
-- **Read Collection data**: Load data into a DataFrame, then filter, join,
-  analyze and process it with Spark SQL, Scala or PySpark.
-- **Write Collection data**: Write Spark results to Milvus data files to replace
-  existing field values, for data cleaning, field transformations and batch
-  updates.
+Spark-Milvus brings Milvus Collection data into Spark DataFrames for
+analysis, data cleaning and batch updates using Spark SQL, Scala or PySpark.
 
 ## Why Spark-Milvus
 
-Milvus serves online vector search, while Spark provides distributed computing
-for data preparation and analysis. Spark-Milvus connects these workflows around
-the same Collection data, so applications can combine online retrieval with
-offline processing.
+Milvus powers online vector search. Spark-Milvus makes the same Collection
+data available to Spark for offline processing, connecting retrieval and
+data preparation workflows.
 
-For example, a product Collection can power similar-product search in Milvus.
-In Spark, you can join its data with a product catalog, check data quality and
-[update eligible fields in batches](docs/column-replacement.md). Your application
-controls when the resulting updates are submitted to Milvus and become visible
-online.
+With Spark-Milvus, you can:
+
+- **Analyze Collection data**: Join it with other data sources, inspect
+  field values and measure data quality using familiar Spark operations.
+- **Update existing fields in batches**: Clean text, standardize metadata
+  or compute replacement values, then write the results to Milvus data files.
+
+For example, Milvus can serve similar-product searches from a product
+Collection. Spark can read that Collection, join it with a product catalog
+to identify inconsistent descriptions, and write back corrected values.
+Your application controls when those updates are submitted to Milvus
+and become visible to online queries.
 
 To get started, [add the dependency](#installing), follow the
 [read](#reading-collection-data) and [write](#writing-collection-data) examples,
@@ -39,20 +40,21 @@ for capabilities and migration guidance.
 
 Before writing your application, prepare:
 
-- An existing **Snapshot** of the target Milvus 3.0 Collection. Provide its JSON
-  path and object-storage access settings. The Snapshot identifies a fixed data
-  state; keep it and all referenced files available until the job finishes.
+- An existing **Snapshot** of the target Milvus 3.0 Collection. Provide its
+  [JSON path](demo/README.md#resolve-an-existing-snapshot-path) and
+  object-storage access settings. The Snapshot identifies a fixed data state;
+  keep it and all referenced files available until the job finishes.
 - A Spark distribution and a connector artifact with matching Spark and Scala
   versions. The examples below use Spark 4.0, Scala 2.13 and Java 21.
-- Storage access on both the Spark driver and executors, plus a matching native
-  platform library on their classpaths.
+- Storage access on both the Spark driver and executors. The dependency entries
+  in [Installing](#installing) automatically bring in the native libraries.
 
-### Spark and Scala
+### Spark, Scala and Java
 
-| Spark | Scala binary version |
-|---|---|
-| 3.5 | 2.12, 2.13 |
-| 4.0, 4.1, 4.2 | 2.13 |
+| Spark | Scala binary version | Recommended Java runtime |
+|---|---|---|
+| 3.5 | 2.12, 2.13 | 17 |
+| 4.0, 4.1, 4.2 | 2.13 | 21 |
 
 **3.0.0** provides universal and platform-specific packages for all five
 combinations above. The installation examples below use Spark 4.0; see
@@ -71,14 +73,27 @@ Published native libraries support the following platforms:
 
 Linux binaries are tested on Ubuntu 22.04 and 24.04. Native artifacts are not
 provided for Windows, musl-based Linux (including Alpine), or Intel Macs.
-Both the Spark driver and every executor must meet these requirements and have
-a matching native platform library on their classpaths.
+Both the Spark driver and every executor must meet these requirements.
 
 See [cluster setup](docs/cluster-setup.md#prepare-every-driver-and-executor) for
 runtime requirements and [artifact selection](docs/release-artifacts.md)
 for published Maven coordinates and version-specific availability.
 
 ## Installing
+
+Start with the universal dependency shown below, using the example for your
+build tool. It automatically brings in the connector and native libraries for
+all supported platforms, then selects the libraries for your platform at runtime.
+
+To reduce downloads, you can choose a platform-specific dependency instead:
+`spark-milvus-4.0-linux-x86_64_2.13` for Linux x86_64, or replace `linux-x86_64`
+with `linux-aarch64` for Linux ARM64 or `darwin-aarch64` for Apple silicon.
+Keep the same connector version across all artifacts.
+
+For PySpark, start with the [Python read example](#pyspark) and follow the
+[submission instructions](docs/application-development.md#running-your-application)
+to add the connector with `--packages`. There is no separate connector Python
+package to install.
 
 ### Maven
 
@@ -144,16 +159,6 @@ libraryDependencies ++= Seq(
   "org.apache.spark" %% "spark-sql" % "4.0.1" % Provided
 )
 ```
-
-The universal dependency resolves the connector JVM implementation and every
-released native platform; the loader selects the current platform. For a
-Linux x86_64 deployment, use `spark-milvus-4.0-linux-x86_64_2.13` to resolve
-only that platform. Use `linux-aarch64` for Linux ARM64 or `darwin-aarch64` for
-Apple silicon. Keep the same connector version across all artifacts.
-
-PySpark applications use these JVM artifacts too. Add them with `--packages`
-when submitting the Python script; there is no separate connector Python
-package to install.
 
 ## Reading Collection data
 
@@ -243,11 +248,14 @@ vector types into Spark arrays or maps. See
 
 ## Writing Collection data
 
-Use a DataFrame to update existing field values in a Collection. The write uses
-a Snapshot to identify the stored rows and columns to update. The connector takes
-the final column values, writes new Milvus column files, commits manifest
-revisions and publishes a write receipt. The `replace_columns` operation
-replaces field values while preserving row count and row identities.
+Use a DataFrame to replace existing field values while preserving the
+Collection's rows. The `replace_columns` operation uses a Snapshot to identify
+the stored rows and columns to update.
+
+A successful write creates new data files and a write receipt describing the
+updates. Your application is responsible for submitting these updates to Milvus
+and making them visible to online queries. The original Snapshot continues to
+read the original values; the connector does not create a new Snapshot.
 
 Read in physical mode when computing values to write back. This includes every
 stored row, even rows marked deleted. Set `milvus.read.include_row_id=true` to
@@ -273,6 +281,7 @@ val prepared = source.select(
   trim(col("description")).as("description")
 )
 
+// Use a fresh directory for this write's records and receipt.
 val resultPath = "s3://example-bucket/column-writes/normalize-description-001"
 prepared.write
   .format("milvus")
@@ -281,6 +290,7 @@ prepared.write
   .mode("append")
   .save(resultPath)
 
+// Show one row per updated segment, with its new version and replaced fields.
 val receipt = spark.read
   .format("milvus")
   .options(snapshotOptions)
@@ -292,16 +302,13 @@ receipt.show(false)
 The required `.mode("append")` writes new result files and revisions; it does
 not append rows to the collection.
 
-Use a new result path for each write and grant the required storage write
-permissions. Preserve `_milvus_row_id` unchanged and keep every row, including
-rows whose values stay unchanged. Key fields, indexed fields and some
-Milvus-managed fields cannot be replaced; see the
+Updated data files are written alongside the existing segment data. Grant write
+access to those locations as well as the result directory. Preserve
+`_milvus_row_id` unchanged and keep every row, including rows whose values stay
+unchanged. Key fields, indexed fields and some Milvus-managed fields cannot be
+replaced; see the
 [column replacement guide](docs/column-replacement.md) for eligible fields,
 joining external updates, permissions and failure recovery.
-
-The receipt identifies the committed revisions. The connector does not create
-a Snapshot, and the original Snapshot keeps reading its original values. Your
-application owns submission to Milvus and online visibility of the replacements.
 
 ## Documents
 
