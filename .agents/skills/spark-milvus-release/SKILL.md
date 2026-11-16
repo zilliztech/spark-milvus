@@ -177,26 +177,24 @@ acceptance also runs Python and Java reads on the host Spark runtime.
 
 ## Publish from a protected tag
 
-Release runs only upstream. Every subsequent **3.0.x release must come from
-`3.0`**. Merge or backport the intended changes through a PR to `3.0`, wait for
-the complete **push** run of `.github/workflows/ci.yml` to succeed for that exact
-commit, then tag that tested commit with an unused release version. Successful
-CI on `main`, another release branch, a PR or a manual dispatch does not satisfy
-this release-source requirement, even when the source SHA is identical. The
-historical 3.0.0 additions from main do not change this policy.
+Release runs only upstream, from **`main`**. Merge the intended changes through
+a PR to `main`, wait for the complete **push** run of `.github/workflows/ci.yml`
+to succeed for that exact commit, then tag that tested commit with an unused
+release version. Release branches are not part of this publication procedure.
+CI from another branch, a PR or a manual dispatch does not satisfy the
+release-source requirement, even when the source SHA is identical.
 
-Before tagging, confirm that the release workflow enforces the matching-branch
-gate. The required branch is the version's `<major>.<minor>`: `v3.0.x`, its
-prereleases and its Central-test tags all require `3.0`. A workflow that still
-accepts `main` must be updated before another 3.0.x release.
+Before tagging, confirm that the release workflow requires successful `main`
+push CI. Normal release tags, prereleases and Central-test tags all use this
+same source requirement, regardless of their version line.
 
 The source gate must validate both the successful CI run and its native
 artifacts. The run must belong to the upstream repository, use
-`.github/workflows/ci.yml`, have event `push`, and match the required branch and
+`.github/workflows/ci.yml`, have event `push`, and match `main` and the
 exact tagged commit. It must provide exactly one unexpired, nonempty
 `native-<platform>` artifact for every platform in `scripts/release-matrix.json`.
 Each artifact's workflow metadata must match that same branch, commit and
-selected CI run ID. Recover missing branch CI or artifacts before tagging.
+selected CI run ID. Recover missing `main` CI or artifacts before tagging.
 
 The normal tag form is `v3.x.y`, optionally with the planner's numeric
 alpha/beta/rc qualifier. Protect creation, replacement and deletion of `v3.*`
@@ -230,7 +228,7 @@ Portal credentials. It uploads a `USER_MANAGED` deployment, waits for
 `VALIDATED`, promotes that deployment and waits for `PUBLISHED`. It does not
 rebuild the candidate.
 
-For manual publication, apply the same release-branch and successful push-CI
+For manual publication, apply the same `main` branch and successful push-CI
 requirements before building the candidate. The low-level commands below
 verify candidate files and publish them, but do not enforce branch provenance
 themselves. Passing `verify` does not establish release-source eligibility.
