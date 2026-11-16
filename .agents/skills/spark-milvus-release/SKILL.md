@@ -19,9 +19,10 @@ Use the current repository contracts:
 - [The release workflow](../../../.github/workflows/release.yml) owns protected
   publication; [scripts/release.py](../../../scripts/release.py) owns planning,
   verification, signing and Central operations.
-- [Release notes](../../../docs/release-notes/3.0.md) own user-facing Maven
-  coordinates, dependency XML, artifact choices and supported platforms. Keep
-  that material there and in the corresponding GitHub release announcement.
+- [Release artifacts](../../../docs/release-artifacts.md) owns current user-facing
+  coordinates and platform availability. Keep published and unreleased versions
+  distinct. [Release notes](../../../docs/release-notes/3.0.md) is the template
+  for the next announcement; render its placeholders before publication.
 - [Application development](../../../docs/application-development.md) owns
   application launch commands, including `--packages` and `--jars` usage. Link
   to that guide instead of repeating those instructions in release notes.

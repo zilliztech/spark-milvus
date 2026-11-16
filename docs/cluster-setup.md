@@ -4,7 +4,7 @@ Use this guide when integrating the connector into an existing Spark cluster.
 Its examples target Linux, Spark 4.0.1, Scala 2.13 and Java 21. The
 [Python and Java demos](../demo/README.md) can verify the same configuration.
 The connector's other Spark lines use their own
-[release artifacts](release-notes/3.0.md#maven-dependencies).
+[release artifacts](release-artifacts.md).
 
 Creating the compute environment, submitting a Spark application and reading a
 Milvus snapshot require different permissions. The Spark driver and executors read
@@ -40,7 +40,9 @@ later, and Apple silicon with macOS 14 or later. Linux binaries are tested on
 Ubuntu 22.04 and 24.04 and require a system `libstdc++` providing
 `GLIBCXX_3.4.30` and `CXXABI_1.3.13` (GCC 12's runtime or newer); this library is
 not bundled. Windows, musl-based Linux (including Alpine) and Intel Macs have
-no released native artifacts.
+no released native artifacts. In connector 3.0.0, Spark 3.5 on Linux ARM64
+also lacks the required Arrow JNI library; see
+[version-specific support](release-artifacts.md#published-300).
 
 | Requirement | Configuration or permission |
 |---|---|
