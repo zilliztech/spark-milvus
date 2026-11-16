@@ -218,6 +218,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
       assert(actual.parameters == index.parameters)
       assert(actual.indexVersion == 1L)
       assert(actual.currentIndexVersion.contains(2))
+      assert(actual.currentScalarIndexVersion.contains(3))
       assert(actual.indexStorePathVersion.contains(0))
       val plan = ReadPlan.of(
         snapshot,

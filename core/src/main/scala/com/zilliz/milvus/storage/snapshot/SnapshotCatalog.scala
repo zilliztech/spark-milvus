@@ -354,6 +354,7 @@ object SnapshotCatalog extends Logging {
               serializedSize = index.serializedSize,
               indexVersion = index.indexVersion,
               currentIndexVersion = index.currentIndexVersion,
+              currentScalarIndexVersion = index.currentScalarIndexVersion,
               indexStorePathVersion = index.indexStorePathVersion
             )
           }

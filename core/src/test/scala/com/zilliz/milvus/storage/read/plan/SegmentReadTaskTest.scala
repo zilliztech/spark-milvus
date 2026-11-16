@@ -156,6 +156,7 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
       4096L,
       1L,
       Some(2),
+      None,
       None
     )
     val task = physicalTask.copy(
@@ -192,6 +193,7 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
               serializedSize = 1L,
               indexVersion = 1L,
               currentIndexVersion = None,
+              currentScalarIndexVersion = None,
               indexStorePathVersion = None
             )
           )

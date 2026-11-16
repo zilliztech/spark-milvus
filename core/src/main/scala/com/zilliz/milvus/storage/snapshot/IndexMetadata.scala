@@ -16,8 +16,9 @@ final case class CollectionIndex(
 /** One persisted index build pinned by a segment's snapshot Avro record. Paths
   * are exact object keys in the snapshot bucket. `indexVersion` is the
   * build/path version, `currentIndexVersion` is the vector serialization
-  * version, and `indexStorePathVersion` describes the path layout. An absent
-  * version remains absent; none of these versions can substitute for another.
+  * version, `currentScalarIndexVersion` the scalar index serialization version,
+  * and `indexStorePathVersion` describes the path layout. An absent version
+  * remains absent; none of these versions can substitute for another.
   */
 final case class SegmentIndex(
     collectionId: Long,
@@ -33,6 +34,7 @@ final case class SegmentIndex(
     serializedSize: Long,
     indexVersion: Long,
     currentIndexVersion: Option[Int],
+    currentScalarIndexVersion: Option[Int],
     indexStorePathVersion: Option[Int]
 ) extends Serializable {
   def indexType: Option[String] = parameters.get("index_type")
