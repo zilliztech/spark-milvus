@@ -9,10 +9,15 @@ not a read-only credentials check.
 
 The reserved tag form `v3.x.y-central-test.<digits>` selects the mutually
 exclusive test path in `.github/workflows/release.yml`. For example,
-`v3.0.0-central-test.2026111001` is a test tag, not a public prerelease. It has
-the same exact-commit branch-CI prerequisite, full candidate acceptance,
-protected environment and signing requirements as a real release. Do not push
-a tag merely to edit documentation or inspect existing release state.
+`v3.0.1-central-test.2026111601` is an example test tag, not a public prerelease;
+choose an unused test version. Its required branch is derived from the version:
+a `v3.0.x-central-test.<digits>` tag requires successful full push CI on `3.0`
+for the exact tagged commit, with native artifacts from that same branch,
+commit and CI run. Main, PR and manual-dispatch CI runs do not qualify. It has
+the same candidate acceptance, protected environment and signing requirements
+as a real release. Follow the [release-source checks](../SKILL.md#publish-from-a-protected-tag)
+before an authorized tag push; do not push a tag merely to edit documentation
+or inspect existing release state.
 
 The workflow uploads a signed `USER_MANAGED` deployment and waits for
 `VALIDATED`. It downloads every candidate file through that deployment's
@@ -21,8 +26,10 @@ It never calls the promotion endpoint. The Spark 4.0 Linux x86_64 universal
 and platform-specific consumers subsequently use the downloaded repository
 with fresh caches; no public Maven version is created.
 
-For an authorized local equivalent, first verify and sign the candidate as
-described in the main skill. Before uploading, prepare a Linux x86_64 host with
+For an authorized local equivalent, first apply the same branch and successful
+push-CI requirements, then verify and sign the candidate as described in the
+main skill. The low-level `test-publish` command does not enforce branch
+provenance itself. Before uploading, prepare a Linux x86_64 host with
 Python 3.12, `binutils` (for `readelf`), sbt, and `JAVA_HOME` pointing to JDK 21 containing
 `lib/libjsig.so`. The consumer launcher configures signal-library preloading;
 it rejects a different host architecture. With Portal credentials securely
