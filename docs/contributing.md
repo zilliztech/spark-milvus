@@ -254,11 +254,11 @@ which throws the same way from the other direction.
 
 ## Pull requests
 
-Changes reach `main` and the release branches only through pull requests, and
-pull requests come from a fork: a repository ruleset reserves branch creation on
-`zilliztech/spark-milvus` for maintainers, who use it for the `{major}.{minor}`
-release branches. Push your branch to your fork and open the pull request
-against `main`, or against a release branch for a fix that ships on that line.
+Changes reach `main` only through pull requests, and pull requests come from a
+fork: a repository ruleset reserves branch creation on
+`zilliztech/spark-milvus` for maintainers. Push your branch to your fork and open
+the pull request against `main`. Releases use tags on `main` after full push CI
+succeeds for the tagged commit; no release branch is required.
 The ordinary CI checks run for a fork pull request without repository secrets;
 the native builds and consumers run once the change is pushed to the protected
 branch. A pull request needs one approving review and the required checks, and

@@ -10,12 +10,12 @@ not a read-only credentials check.
 The reserved tag form `v3.x.y-central-test.<digits>` selects the mutually
 exclusive test path in `.github/workflows/release.yml`. For example,
 `v3.0.1-central-test.2026111601` is an example test tag, not a public prerelease;
-choose an unused test version. Its required branch is derived from the version:
-a `v3.0.x-central-test.<digits>` tag requires successful full push CI on `3.0`
-for the exact tagged commit, with native artifacts from that same branch,
-commit and CI run. Main, PR and manual-dispatch CI runs do not qualify. It has
-the same candidate acceptance, protected environment and signing requirements
-as a real release. Follow the [release-source checks](../SKILL.md#publish-from-a-protected-tag)
+choose an unused test version. Every Central-test tag requires successful full
+push CI on `main` for the exact tagged commit, with native artifacts from that
+same branch, commit and CI run. Other branches, PR and manual-dispatch CI runs
+do not qualify. It has the same candidate acceptance, protected environment and
+signing requirements as a real release. Follow the
+[release-source checks](../SKILL.md#publish-from-a-protected-tag)
 before an authorized tag push; do not push a tag merely to edit documentation
 or inspect existing release state.
 
