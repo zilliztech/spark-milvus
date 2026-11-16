@@ -39,13 +39,14 @@ for capabilities and migration guidance.
 
 Before writing your application, prepare:
 
-- An existing **Snapshot** of the target Milvus 3.0 Collection. Provide its JSON
-  path and object-storage access settings. The Snapshot identifies a fixed data
-  state; keep it and all referenced files available until the job finishes.
+- An existing **Snapshot** of the target Milvus 3.0 Collection. Provide its
+  [JSON path](demo/README.md#resolve-an-existing-snapshot-path) and
+  object-storage access settings. The Snapshot identifies a fixed data state;
+  keep it and all referenced files available until the job finishes.
 - A Spark distribution and a connector artifact with matching Spark and Scala
   versions. The examples below use Spark 4.0, Scala 2.13 and Java 21.
-- Storage access on both the Spark driver and executors, plus a matching native
-  platform library on their classpaths.
+- Storage access on both the Spark driver and executors. The dependency entries
+  in [Installing](#installing) automatically bring in the native libraries.
 
 ### Spark and Scala
 
@@ -71,14 +72,23 @@ Published native libraries support the following platforms:
 
 Linux binaries are tested on Ubuntu 22.04 and 24.04. Native artifacts are not
 provided for Windows, musl-based Linux (including Alpine), or Intel Macs.
-Both the Spark driver and every executor must meet these requirements and have
-a matching native platform library on their classpaths.
+Both the Spark driver and every executor must meet these requirements.
 
 See [cluster setup](docs/cluster-setup.md#prepare-every-driver-and-executor) for
 runtime requirements and [artifact selection](docs/release-artifacts.md)
 for published Maven coordinates and version-specific availability.
 
 ## Installing
+
+The universal dependency resolves the connector JVM implementation and every
+released native platform; the loader selects the current platform. For a
+Linux x86_64 deployment, use `spark-milvus-4.0-linux-x86_64_2.13` to resolve
+only that platform. Use `linux-aarch64` for Linux ARM64 or `darwin-aarch64` for
+Apple silicon. Keep the same connector version across all artifacts.
+
+PySpark applications use these JVM artifacts too. Add them with `--packages`
+when submitting the Python script; there is no separate connector Python
+package to install.
 
 ### Maven
 
@@ -144,16 +154,6 @@ libraryDependencies ++= Seq(
   "org.apache.spark" %% "spark-sql" % "4.0.1" % Provided
 )
 ```
-
-The universal dependency resolves the connector JVM implementation and every
-released native platform; the loader selects the current platform. For a
-Linux x86_64 deployment, use `spark-milvus-4.0-linux-x86_64_2.13` to resolve
-only that platform. Use `linux-aarch64` for Linux ARM64 or `darwin-aarch64` for
-Apple silicon. Keep the same connector version across all artifacts.
-
-PySpark applications use these JVM artifacts too. Add them with `--packages`
-when submitting the Python script; there is no separate connector Python
-package to install.
 
 ## Reading Collection data
 
