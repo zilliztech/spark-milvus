@@ -1,27 +1,28 @@
 # Spark-Milvus
 
-**Read and write Milvus Collection data in Apache Spark.** Spark-Milvus lets
-you use DataFrames to analyze Collection data and write back updated field
-values, bringing Milvus data into your Spark workflows.
+**Read and write Milvus Collection data with Apache Spark.**
 
-- **Read Collection data**: Load data into a DataFrame, then filter, join,
-  analyze and process it with Spark SQL, Scala or PySpark.
-- **Write Collection data**: Write Spark results to Milvus data files to replace
-  existing field values, for data cleaning, field transformations and batch
-  updates.
+Spark-Milvus brings Milvus Collection data into Spark DataFrames for
+analysis, data cleaning and batch updates using Spark SQL, Scala or PySpark.
 
 ## Why Spark-Milvus
 
-Milvus serves online vector search, while Spark provides distributed computing
-for data preparation and analysis. Spark-Milvus connects these workflows around
-the same Collection data, so applications can combine online retrieval with
-offline processing.
+Milvus powers online vector search. Spark-Milvus makes the same Collection
+data available to Spark for offline processing, connecting retrieval and
+data preparation workflows.
 
-For example, a product Collection can power similar-product search in Milvus.
-In Spark, you can join its data with a product catalog, check data quality and
-[update eligible fields in batches](docs/column-replacement.md). Your application
-controls when the resulting updates are submitted to Milvus and become visible
-online.
+With Spark-Milvus, you can:
+
+- **Analyze Collection data**: Join it with other data sources, inspect
+  field values and measure data quality using familiar Spark operations.
+- **Update existing fields in batches**: Clean text, standardize metadata
+  or compute replacement values, then write the results to Milvus data files.
+
+For example, Milvus can serve similar-product searches from a product
+Collection. Spark can read that Collection, join it with a product catalog
+to identify inconsistent descriptions, and write back corrected values.
+Your application controls when those updates are submitted to Milvus
+and become visible to online queries.
 
 To get started, [add the dependency](#installing), follow the
 [read](#reading-collection-data) and [write](#writing-collection-data) examples,
