@@ -10,23 +10,6 @@ values, bringing Milvus data into your Spark workflows.
   existing field values, for data cleaning, field transformations and batch
   updates.
 
-The connector currently accesses Collection data through a **Snapshot**, which
-captures the Collection's data at a fixed point in time. Provide its JSON file
-path and storage access settings; Spark-Milvus discovers the schema and reads
-and writes data files directly in object storage.
-
-To get started, [add the dependency](#installing), follow the
-[read](#reading-collection-data) and [write](#writing-collection-data) examples,
-then [run your application](docs/application-development.md#running-your-application).
-For all supported options, defaults and limits, see the
-[Reference](docs/reference.md#2-milvus-format-parameters).
-
-This guide uses **Spark-Milvus 3.0.0** for Milvus 3.0, available from
-[Maven Central](https://repo.maven.apache.org/maven2/com/zilliz/spark-milvus-4.0_2.13/3.0.0/).
-Earlier releases do not provide this API. See the
-[3.0.0 release notes](https://github.com/zilliztech/spark-milvus/releases/tag/v3.0.0)
-for capabilities and migration guidance.
-
 ## Why Spark-Milvus
 
 Milvus serves online vector search, while Spark provides distributed computing
@@ -40,13 +23,25 @@ In Spark, you can join its data with a product catalog, check data quality and
 controls when the resulting updates are submitted to Milvus and become visible
 online.
 
+To get started, [add the dependency](#installing), follow the
+[read](#reading-collection-data) and [write](#writing-collection-data) examples,
+then [run your application](docs/application-development.md#running-your-application).
+For all supported options, defaults and limits, see the
+[Reference](docs/reference.md#2-milvus-format-parameters).
+
+This guide uses **Spark-Milvus 3.0.0** for Milvus 3.0, available from
+[Maven Central](https://repo.maven.apache.org/maven2/com/zilliz/spark-milvus-4.0_2.13/3.0.0/).
+Earlier releases do not provide this API. See the
+[3.0.0 release notes](https://github.com/zilliztech/spark-milvus/releases/tag/v3.0.0)
+for capabilities and migration guidance.
+
 ## Requirements and compatibility
 
 Before writing your application, prepare:
 
-- An existing Milvus 3.0 Snapshot path and access to its object storage. The
-  connector reads that fixed data state; your application must keep the
-  Snapshot and all referenced files available until the job finishes.
+- An existing **Snapshot** of the target Milvus 3.0 Collection. Provide its JSON
+  path and object-storage access settings. The Snapshot identifies a fixed data
+  state; keep it and all referenced files available until the job finishes.
 - A Spark distribution and a connector artifact with matching Spark and Scala
   versions. The examples below use Spark 4.0, Scala 2.13 and Java 21.
 - Storage access on both the Spark driver and executors, plus a matching native
@@ -54,16 +49,16 @@ Before writing your application, prepare:
 
 ### Spark and Scala
 
-| Spark | Scala binary version | Available dependency choices |
-|---|---|---|
-| 3.5 | 2.12, 2.13 | Universal or platform-specific |
-| 4.0 | 2.13 | Universal or platform-specific |
-| 4.1 | 2.13 | Universal or platform-specific |
-| 4.2 | 2.13 | Universal or platform-specific |
+| Spark | Scala binary version |
+|---|---|
+| 3.5 | 2.12, 2.13 |
+| 4.0, 4.1, 4.2 | 2.13 |
 
-The unified package matrix above applies to the next release. For the published
-3.0.0 artifact inventory, see the
-[3.0.0 artifact guide](https://github.com/zilliztech/spark-milvus/blob/v3.0.0/docs/releasing.md#using-release-artifacts).
+The next release will provide universal and platform-specific packages for all
+five combinations above. In the published **3.0.0**, these packages are available
+for **Spark 4.0 and 4.2** only; the installation examples below use Spark 4.0.
+See [artifact selection](docs/release-artifacts.md#published-300) for the
+published inventory and the upcoming packaging changes.
 
 ### Operating systems and CPU architectures
 
@@ -79,6 +74,11 @@ Linux binaries are tested on Ubuntu 22.04 and 24.04. Native artifacts are not
 provided for Windows, musl-based Linux (including Alpine), or Intel Macs.
 Both the Spark driver and every executor must meet these requirements and have
 a matching native platform library on their classpaths.
+
+**3.0.0 limitation:** Spark 3.5 on Linux ARM64 is missing an Arrow JNI library,
+for both Scala variants. The Milvus ARM64 package alone does not supply it.
+The next-release build includes that library; see
+[version-specific platform support](docs/release-artifacts.md#published-300).
 
 See [cluster setup](docs/cluster-setup.md#prepare-every-driver-and-executor) for
 runtime requirements and [artifact selection](docs/release-artifacts.md)
@@ -163,9 +163,9 @@ package to install.
 
 ## Reading Collection data
 
-The connector is a Spark DataSource named `milvus`. Provide a Snapshot of the
-Collection to select a fixed data state to read. The connector discovers the
-schema from that Snapshot and requires no session extension or plugin.
+The connector is a Spark DataSource named `milvus`. It discovers the schema
+from the supplied Snapshot and reads the Collection data files directly from
+object storage. No session extension or plugin is required.
 
 Choose either the Scala or PySpark example below. Both print the Collection's
 schema and five rows from the selected Snapshot. Replace the S3 path, endpoint
@@ -317,7 +317,8 @@ application owns submission to Milvus and online visibility of the replacements.
 | [Reference](docs/reference.md) | Supported options, defaults, storage credentials and data types |
 | [Examples](demo/README.md) | Collection reads, SQL and column replacement |
 | [Cluster setup](docs/cluster-setup.md) | Driver and executor permissions, networking and native runtime |
-| [3.0 release notes](docs/release-notes/3.0.md) | Capabilities, Maven coordinates, platform choices and migration from earlier versions |
+| [Release artifacts](docs/release-artifacts.md) | Published Maven coordinates, platform support and upcoming packaging |
+| [3.0.0 release notes](https://github.com/zilliztech/spark-milvus/releases/tag/v3.0.0) | Released capabilities and migration from earlier versions |
 
 ## License
 

@@ -56,9 +56,9 @@ Keep the signal-library settings above and replace `--packages` with:
 
 Spark distributes the JARs to the driver and executors. The universal and
 platform-specific entry JARs rely on their Maven dependencies; passing only an
-entry JAR to `--jars` does not install the connector. Thin deployments using
-`--jars` also need their declared JVM dependencies; see
-[artifact selection](release-notes/3.0.md#maven-dependencies).
+entry JAR to `--jars` does not install the connector. For version-specific
+artifact availability, see
+[artifact selection](release-artifacts.md).
 
 ## Building the connector from source
 
