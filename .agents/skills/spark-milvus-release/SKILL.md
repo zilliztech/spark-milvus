@@ -41,9 +41,10 @@ The 3.0.0 inventory includes 15 coordinates added on 2026-11-16 for Spark
 3.5 / Scala 2.12, Spark 3.5 / Scala 2.13 and Spark 4.1 / Scala 2.13. These
 bundled JVM, universal and platform entries were built from main commit
 `a64a831c2d511dd32cbeed77804f4192fc04f69c`; the Spark 3.5 bundles include the
-Arrow Linux ARM64 supplement. The original `v3.0.0` tag and `3.0` release base
-remain at `50ec8905fdf3edfebcf97ab57a0b7009feb3f0c5`. Existing Spark 4.0/4.2,
-native and Thin artifacts were not replaced. See the
+Arrow Linux ARM64 supplement. At that publication, the original `v3.0.0`
+tag and `3.0` release branch both pointed to
+`50ec8905fdf3edfebcf97ab57a0b7009feb3f0c5`; neither was moved. Existing Spark
+4.0/4.2, native and Thin artifacts were not replaced. See the
 [published inventory](../../../docs/release-artifacts.md#published-300) and
 [build provenance](../../../docs/release-artifacts.md#build-provenance).
 Before preparing or verifying a candidate, establish its exact coordinate
@@ -123,12 +124,26 @@ acceptance also runs Python and Java reads on the host Spark runtime.
 
 ## Publish from a protected tag
 
-Release runs only upstream. Before an authorized tag push, confirm a successful
-**push** run of `.github/workflows/ci.yml` for the exact source commit on `main`
-or a numeric `<major>.<minor>` release branch. That run must have one unexpired,
-nonempty `native-<platform>` artifact for each platform in
-`scripts/release-matrix.json`. A successful PR or manual-dispatch run does not
-satisfy this source gate. Recover missing branch CI or artifacts before tagging.
+Release runs only upstream. Every subsequent **3.0.x release must come from
+`3.0`**. Merge or backport the intended changes through a PR to `3.0`, wait for
+the complete **push** run of `.github/workflows/ci.yml` to succeed for that exact
+commit, then tag that tested commit with an unused release version. Successful
+CI on `main`, another release branch, a PR or a manual dispatch does not satisfy
+this release-source requirement, even when the source SHA is identical. The
+historical 3.0.0 additions from main do not change this policy.
+
+Before tagging, confirm that the release workflow enforces the matching-branch
+gate. The required branch is the version's `<major>.<minor>`: `v3.0.x`, its
+prereleases and its Central-test tags all require `3.0`. A workflow that still
+accepts `main` must be updated before another 3.0.x release.
+
+The source gate must validate both the successful CI run and its native
+artifacts. The run must belong to the upstream repository, use
+`.github/workflows/ci.yml`, have event `push`, and match the required branch and
+exact tagged commit. It must provide exactly one unexpired, nonempty
+`native-<platform>` artifact for every platform in `scripts/release-matrix.json`.
+Each artifact's workflow metadata must match that same branch, commit and
+selected CI run ID. Recover missing branch CI or artifacts before tagging.
 
 The normal tag form is `v3.x.y`, optionally with the planner's numeric
 alpha/beta/rc qualifier. Protect creation, replacement and deletion of `v3.*`
@@ -160,8 +175,14 @@ The workflow verifies the candidate before accessing credentials. Signing uses
 a temporary GPG home removed on exit; the separate Central step receives only
 Portal credentials. It uploads a `USER_MANAGED` deployment, waits for
 `VALIDATED`, promotes that deployment and waits for `PUBLISHED`. It does not
-rebuild the candidate. Equivalent commands, with the expected key already
-imported into an isolated GPG home and credentials securely supplied, are:
+rebuild the candidate.
+
+For manual publication, apply the same release-branch and successful push-CI
+requirements before building the candidate. The low-level commands below
+verify candidate files and publish them, but do not enforce branch provenance
+themselves. Passing `verify` does not establish release-source eligibility.
+With the expected key already imported into an isolated GPG home and
+credentials securely supplied, run:
 
 ```bash
 python3 scripts/release.py verify --candidate target/release-candidate
