@@ -29,6 +29,7 @@ import com.zilliz.milvus.storage.io.NativeWritableObjectStore
 import com.zilliz.milvus.storage.manifest.SnapshotSegmentFixture
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.write.{
+  ColumnGroupFiles,
   ManifestTransaction,
   V3SegmentWriter,
   WriterResources
@@ -431,16 +432,16 @@ class ColumnReplaceExampleTest extends AnyFunSuite with BeforeAndAfterAll {
           operation.get("operation_id").asText()
       )
     )
-    assert(
-      !place.exists(
-        "column-demo/run/write-result/_claim/_metadata/manifest-1.avro"
-      )
+    assertGuard(
+      place,
+      "column-demo/run/write-result",
+      operation.get("operation_id").asText()
     )
 
     val location = WriteResultLocation.resolve(result, place.storage)
     val originalResult = WriteResultRecords.readResult(location)
     val resultBytes = place.read("column-demo/run/write-result/_result.json")
-    intercept[Exception] {
+    val republished = intercept[IllegalStateException] {
       WriteResultRecords.writeResult(
         location,
         originalResult.copy(applicationId =
@@ -448,6 +449,7 @@ class ColumnReplaceExampleTest extends AnyFunSuite with BeforeAndAfterAll {
         )
       )
     }
+    assert(messages(republished).contains("differs"))
     assert(
       place
         .read("column-demo/run/write-result/_result.json")
@@ -576,7 +578,7 @@ class ColumnReplaceExampleTest extends AnyFunSuite with BeforeAndAfterAll {
         assert(place.read(s"$name/_operation.json").sameElements(original))
       }
       assert(!place.exists(s"$name/_result.json"))
-      assert(!place.exists(s"$name/_claim/_metadata/manifest-1.avro"))
+      assertGuard(place, name, winners.head)
       val pending = intercept[IllegalArgumentException] {
         WriteResultRecords.readResult(location)
       }
@@ -620,6 +622,92 @@ class ColumnReplaceExampleTest extends AnyFunSuite with BeforeAndAfterAll {
       .takeWhile(_ != null)
       .map(e => Option(e.getMessage).getOrElse(""))
       .mkString(" | ")
+
+  /** Connectors on the earlier claim protocol find the address occupied: its
+    * claim key holds a guard naming the operation that claimed the address.
+    */
+  private def assertGuard(
+      place: Place,
+      name: String,
+      operationId: String
+  ): Unit = {
+    val guard =
+      mapper.readTree(place.read(s"$name/_claim/_metadata/manifest-1.avro"))
+    assert(guard.get("record").asText() == "legacy_claim_guard")
+    assert(guard.get("operation_id").asText() == operationId)
+  }
+
+  /** A receipt larger than one default upload part, as a write of tens of
+    * thousands of segments publishes, is still one conditional create.
+    */
+  private def runLargeReceipt(place: Place): Unit = {
+    val name = "column-demo/large-receipt"
+    val location = WriteResultLocation.resolve(place.path(name), place.storage)
+    val padding = "p" * 120
+    val result = WriteResult(
+      operationId = UUID.randomUUID().toString,
+      operation = MilvusOption.WriteOperationReplaceColumns,
+      createdAt = Instant.now().toString,
+      committedAt = Instant.now().toString,
+      applicationId = spark.sparkContext.applicationId,
+      snapshot = SourceSnapshot(
+        place.path("snapshot.json"),
+        5L,
+        "before_update",
+        90L,
+        0
+      ),
+      changedFields = Seq(TargetColumn("score", 101L)),
+      segments = (1L to 40000L).map { id =>
+        CommittedSegment(
+          PlannedCommit(
+            segmentId = id,
+            partitionId = 1L,
+            manifestBasePath = s"$padding/$id",
+            sourceVersion = 1L,
+            rowCount = 2L,
+            columnGroups = Seq(
+              ColumnGroupFiles(
+                Seq("score"),
+                Seq(s"$padding/$id/score"),
+                Seq(2L),
+                ColumnGroupFiles.Parquet
+              )
+            )
+          ),
+          version = 2L
+        )
+      }
+    )
+    WriteResultRecords.writeResult(location, result)
+    val published = place.read(s"$name/_result.json")
+    assert(
+      published.length > 10 * 1024 * 1024,
+      s"the receipt has ${published.length} bytes"
+    )
+    assert(WriteResultRecords.readResult(location) == result)
+
+    val republished = intercept[IllegalStateException] {
+      WriteResultRecords.writeResult(
+        location,
+        result.copy(applicationId = result.applicationId + "-changed")
+      )
+    }
+    assert(messages(republished).contains("differs"))
+    assert(place.read(s"$name/_result.json").sameElements(published))
+  }
+
+  test("a receipt larger than one upload part is created locally") {
+    local(runLargeReceipt)
+  }
+
+  Seq(true, false).foreach { useCrt =>
+    test(
+      s"a receipt larger than one upload part is one conditional request with fs.s3.use_crt=$useCrt"
+    ) {
+      objectStorage(runLargeReceipt, useCrt = Some(useCrt))
+    }
+  }
 
   test("a NULL in a required vector field and a wrong dimension are refused") {
     local { place =>

@@ -9,6 +9,8 @@ package com.zilliz.milvus.storage
   * creation delegates to the native writer and succeeds only after its close
   * completes. Existing objects and unsupported conditional writes fail without
   * an existence-check fallback; native failures retain their type and details.
+  * The binding has no writer abort, so a failed write can still be finalized;
+  * callers needing all-or-nothing objects keep them within one upload request.
   * The local backend's conditional exclusion is limited to one process. File
   * writes create parent directories only for the local backend; remote object
   * writes do not request bucket or directory creation. Explicit createDir

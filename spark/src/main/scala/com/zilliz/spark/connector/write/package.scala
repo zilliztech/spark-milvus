@@ -15,7 +15,10 @@ package com.zilliz.spark.connector
   * start, and `_result.json` is also published by conditional creation. An
   * ambiguous create failure is resolved by reading the complete record back.
   * Unsupported conditional writes fail without falling back to an existence
-  * check. Addresses claimed by the earlier manifest protocol remain occupied.
+  * check. Every record is uploaded by one request, so a failed upload leaves no
+  * partial record. Addresses claimed by the earlier manifest protocol remain
+  * occupied, and a claim also creates a guard record at that protocol's claim
+  * key so that connectors using it reject the address in turn.
   *
   * Nothing here appends rows, calls a Milvus service, registers a revision or
   * creates a snapshot; callers own job registration and online visibility.

@@ -20,20 +20,28 @@ AWS CRT transport (`storage.crt=true`), its SDK S3 CRT client and the shared
 `aws-c-io`, `aws-c-http` and `aws-c-s3` providers. The independent adapter owns
 the pinned SDK's header extension: it adds the upstream borrowed native-handle
 accessor in a build-local header overlay without changing the cached SDK or
-the class layout. An unexpected SDK header fails configuration. All Storage
-targets use the same overlay. Changing the Storage gitlink requires a fresh
-native bundle.
+the class layout. An unexpected SDK header fails configuration. The overlay is
+added with `include_directories(BEFORE)` in the adapter's directory, so every
+target defined after it there, including the component CMake, compiles against
+the extended header. The adapter reimplements the pinned Storage's
+`cpp/ExtendS3CrtClient.cmake` instead of including it, and
+`test_storage_cmake.py` requires both to apply the same extension. Changing the
+Storage gitlink requires a fresh native bundle.
 
 ## Toolchain and dependency graph
 
-`dependencies.json` pins exact upstream recipe revisions. Its
-`transitive_references` records Folly's reviewed double-conversion, fast_float
-and libevent recipes and the AWS CRT recipe family validated with the
-pinned Milvus AWS SDK recipe. Conan Center can publish a different recipe for the
-same version with incompatible dependency requirements; an empty cache must
-resolve the same reviewed family as an existing cache. The driver supplies these
-revisions through a partial seed lock, without adding direct dependencies or
-forcing different upstream versions. The resulting complete lock must retain
+`dependencies.json` pins exact upstream recipe revisions. Its `references` are
+direct requirements, which `conanfile.py` adds with `force=True`; they include
+`aws-crt-cpp`, `aws-c-io`, `aws-c-http` and `aws-c-s3`, which the Storage CRT
+transport links directly, so their versions must match those the pinned
+Storage requires. Its `transitive_references` records Folly's reviewed
+double-conversion, fast_float and libevent recipes and the remaining AWS CRT
+recipes validated with the pinned Milvus AWS SDK recipe. Conan Center can
+publish a different recipe for the same version with incompatible dependency
+requirements; an empty cache must resolve the same reviewed family as an
+existing cache. The driver supplies these transitive revisions through a
+partial seed lock, without adding direct dependencies or forcing different
+upstream versions. The resulting complete lock must retain
 every selected recipe revision. The build consumes
 those recipes without patching them or exporting project-owned replacements.
 `profiles/` and `platforms.py` supply the Conan profile and platform adapter;

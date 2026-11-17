@@ -156,7 +156,7 @@ The default Spark pattern does not match the underscore spelling of these keys.
 | `fs.address` | Explicit option or Hadoop endpoint; no fallback | Storage endpoint. Required for remote storage after configuration is resolved. |
 | `fs.bucket_name` | Snapshot URI or explicit configuration | Bucket bound to the input. Required for a bucket-relative remote key; a bucket that conflicts with the URI fails. |
 | `fs.root_path` | `files` | Storage root, including the local filesystem root. It is not automatically prepended to remote Snapshot keys: include the full bucket-relative key in the path. |
-| `fs.cloud_provider` | Hadoop translation or native default `aws` | Backend recognized by the bundled native library: `aws`, `gcp`, `aliyun`, `azure`, `tencent`, `huawei` or `volcengine`. Backend-specific credentials may require additional native properties. |
+| `fs.cloud_provider` | Hadoop translation or native default `aws` | Backend recognized by the bundled native library: `aws`, `gcp`, `aliyun`, `azure`, `tencent`, `huawei` or `volcengine`. Backend-specific credentials may require additional native properties. Column replacement needs conditional creation, which `huawei` does not provide. |
 | `fs.region` | Hadoop region or fallback `us-west-2` | Region used by storage requests. Set your actual region explicitly. |
 | `fs.use_ssl` | Resolved from explicit option, endpoint scheme or Hadoop SSL configuration | Whether storage requests use TLS. Set explicitly to match your endpoint; resolution details follow below. |
 | `fs.use_iam` | `true` for remote storage when no explicit setting, complete static-key pair or role is resolved | Use the native credential chain. Explicit `false` disables that fallback and requires static keys unless a role is selected. |
@@ -170,6 +170,27 @@ process, such as an AWS role or AWS environment variables. For explicit
 long-term keys, replace it with `fs.use_iam=false` and provide both
 `fs.access_key_id` and `fs.access_key_value`. There is no `fs.session_token`
 option; use the native credential chain for temporary AWS credentials.
+
+On `aws`, the native credential chain reads the `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` environment variables, then a web identity token such
+as IRSA provides, and the EC2 instance profile only when the process
+environment sets `AWS_EC2_METADATA_ENABLE=true`. It does not use ECS task
+roles, EKS Pod Identity, keys stored in shared credential or configuration
+profiles, credential processes or SSO. When none of its sources yields
+credentials, requests are sent unsigned and a bucket that requires
+authentication refuses them. To use an instance profile, for example on EMR,
+set the variable for the
+driver and for every executor: `spark.executorEnv.AWS_EC2_METADATA_ENABLE=true`
+for executors, and for the driver the environment that launches it in client
+mode, `spark.yarn.appMasterEnv.AWS_EC2_METADATA_ENABLE=true` on YARN in cluster
+mode, or `spark.kubernetes.driverEnv.AWS_EC2_METADATA_ENABLE=true` on
+Kubernetes. Other identities need IRSA, `fs.role_arn` or static keys.
+
+`fs.s3.use_crt` defaults to `true` in the bundled native library: S3-compatible
+backends other than `gcp` stream every upload, including small files, as a
+multipart upload. With `false`, an upload smaller than
+`fs.multi_part_upload_size` (10 MiB by default) is sent as one request. Column
+replacement records are always sent as one request.
 
 Additional native `fs.*` properties, such as `fs.ssl_ca_cert`, and
 `extfs.<name>.*` groups pass to milvus-storage for validation and interpretation.

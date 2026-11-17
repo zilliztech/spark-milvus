@@ -160,26 +160,41 @@ with the snapshot's storage identity.
 | Record | Written | Contents |
 |---|---|---|
 | `_operation.json` | Before any task starts | Operation id, Spark application id, source snapshot, replaced fields. Conditional creation gives the address to one write. |
+| `_claim/_metadata/manifest-1.avro` | Right after `_operation.json` | A guard naming the operation, created conditionally where the earlier claim protocol claimed an address |
 | `_commit_plan.json` | Before any manifest changes | For every segment: manifest location, pinned revision, row count and the new files |
 | `_result.json` | After every segment committed | The receipt, published by conditional creation so it cannot replace an existing receipt |
 | `_failure.json` | When the write fails after the claim | The failed stage and every segment as `committed`, `not_committed` or `unknown` |
 
 The operation record uses the storage backend's atomic create-if-absent
 operation through the native filesystem. A backend without conditional writes rejects the write
-before any task starts; there is no existence-check fallback. Creating the
-record succeeds only after its writer closes successfully. If creating either
-the operation record or the receipt fails with an uncertain outcome, the driver
-reads the record back: the complete expected content confirms success, another
-operation id rejects reuse, and a missing, unreadable or different record
-preserves the failure. Records must have the expected format and a nonempty
-operation id. The local filesystem provides exclusion only within one process
-and is intended for tests.
+before any task starts; there is no existence-check fallback. The bundled
+native library supports conditional creation on `aws`, `gcp`, `azure`,
+`aliyun`, `tencent` and `volcengine`, and on local storage; `huawei` does not
+support it, so column replacement is unavailable there. Creating the
+record succeeds only after its writer closes successfully. If creating the
+operation record, its guard or the receipt fails with an uncertain outcome, the
+driver reads the record back: the complete expected content confirms success,
+another operation id rejects reuse, and a missing, unreadable or different
+record preserves the failure. Records must have the expected format and a
+nonempty operation id. The local filesystem provides exclusion only within one
+process and is intended for tests; a local record synchronizes directories only
+up to the write result address.
 
-Addresses containing the earlier `_claim/_metadata/manifest-1.avro` claim are
-already occupied and are rejected without changing them. Older and newer
-connector versions use different claim keys, so they must not run concurrently
-against the same result address. Every independent write still needs its own
-address.
+Every record on object storage is uploaded by one request, whatever
+`fs.s3.use_crt` selects for other uploads, so a failed upload leaves no partial
+record and the backend decides a conditional create in that request. A record
+must be smaller than 5 GiB. On `azure`, the native writer creates an empty blob
+when a conditional create starts and fills it when the create completes, so an
+interrupted create can leave an empty `_operation.json` that keeps the address
+occupied, or an empty `_result.json`; give the retried write a new address.
+
+The earlier claim protocol committed `_claim/_metadata/manifest-1.avro` as a
+manifest. Addresses holding such a claim are occupied and are rejected without
+changing them. A write also creates that key, holding its guard, once its own
+record exists, and proceeds only if both creates succeed: a connector using the
+earlier protocol then finds the address occupied, and a write that loses the
+guard to one stops before any task starts. Every independent write still needs
+its own address.
 
 A segment is `unknown` only when its commit failed and its manifest could not be
 inspected afterwards. A commit pinned to revision `v` can only produce revision

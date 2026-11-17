@@ -105,6 +105,10 @@ final case class WriteResultLocation(
 ) {
   private def under(name: String): String = s"$key/$name"
 
+  /** The first manifest revision that claimed an address under the earlier
+    * protocol. An operation also creates it, holding a guard record, so that
+    * connectors still using that protocol find the address occupied.
+    */
   private[write] def legacyClaimKey: String =
     under("_claim/_metadata/manifest-1.avro")
 
@@ -114,6 +118,30 @@ final case class WriteResultLocation(
   def resultKey: String = under("_result.json")
   def failureKey: String = under("_failure.json")
 
+  /** The properties of a store that writes one record of `size` bytes.
+    *
+    * Remote records are uploaded by one request: a write smaller than one part
+    * is buffered and sent when its writer closes, so a failed upload leaves no
+    * partial object and the backend decides a conditional create in that one
+    * request. The CRT transport would stream every upload as a multipart upload
+    * instead. Local records synchronize directories up to the write result
+    * address, not up to the root of its namespace.
+    */
+  private[write] def recordProperties(size: Long): Map[String, String] =
+    if (
+      properties
+        .get(StorageProperties.StorageType)
+        .exists(_.equalsIgnoreCase(StorageProperties.StorageTypeLocal))
+    )
+      properties + (StorageProperties.LocalDurabilityRoot -> Paths
+        .get(properties.getOrElse(StorageProperties.RootPath, ""), key)
+        .toString)
+    else
+      properties ++ Map(
+        StorageProperties.S3UseCrt -> "false",
+        StorageProperties.MultiPartUploadSize ->
+          WriteResultLocation.singleRequestPartSize(size).toString
+      )
 }
 
 object WriteResultLocation {
@@ -170,6 +198,25 @@ object WriteResultLocation {
       )
     }
   }
+
+  // The native layer accepts part sizes from 10 MiB to 5 GiB.
+  private val MinPartSize = 10L * 1024 * 1024
+  private val MaxPartSize = 5L * 1024 * 1024 * 1024
+
+  /** The part size that sends `size` bytes as one request: a writer whose
+    * buffered bytes reach a part starts a multipart upload. Doubling from the
+    * minimum keeps the number of distinct native configurations, and so of
+    * cached filesystems, small.
+    */
+  private[write] def singleRequestPartSize(size: Long): Long = {
+    require(
+      size >= 0 && size < MaxPartSize,
+      s"a column write record of $size bytes does not fit in one upload request"
+    )
+    var part = MinPartSize
+    while (part <= size) part *= 2
+    math.min(part, MaxPartSize)
+  }
 }
 
 /** The records a column replacement keeps under its write result address, and
@@ -177,14 +224,18 @@ object WriteResultLocation {
   *
   * The claim conditionally creates `_operation.json` with the operation id. The
   * backend must support atomic creation; an existence check cannot replace it.
-  * Only the operation holding the claim writes the other records:
-  * `_commit_plan.json` before any segment manifest changes, then either
-  * `_result.json` once every segment committed or `_failure.json`. The receipt
-  * is also conditionally created. Readers of a result read `_result.json` only.
+  * The claimant then conditionally creates a guard record at the earlier
+  * protocol's claim key, so that connectors still using that protocol find the
+  * address occupied. Only the operation holding the claim writes the other
+  * records: `_commit_plan.json` before any segment manifest changes, then
+  * either `_result.json` once every segment committed or `_failure.json`. The
+  * receipt is also conditionally created. Every record is uploaded by one
+  * request. Readers of a result read `_result.json` only.
   */
 object WriteResultRecords {
   val Format = "milvus-column-write"
   val FormatVersion = 1
+  private val LegacyClaimGuard = "legacy_claim_guard"
 
   private val mapper = new ObjectMapper()
   private val recordReader =
@@ -199,26 +250,27 @@ object WriteResultRecords {
       key: String,
       record: ObjectNode,
       store: WritableObjectStore
+  ): Unit = createRecord(location, key, record, encode(record), store)
+
+  private def createRecord(
+      location: WriteResultLocation,
+      key: String,
+      record: ObjectNode,
+      bytes: Array[Byte],
+      store: WritableObjectStore
   ): Unit = {
     val recordType =
       if (key == location.operationKey) "operation"
+      else if (key == location.resultKey) "result"
       else {
         require(
-          key == location.resultKey,
-          "only operation and result records are immutable"
+          key == location.legacyClaimKey,
+          "only operation, claim guard and result records are immutable"
         )
-        "result"
+        LegacyClaimGuard
       }
     val operationId = recordOwner(record, recordType)
-    // The previous protocol used a different key. Refuse its persisted claims
-    // without interpreting or extending their manifest format.
-    if (key == location.operationKey && store.exists(location.legacyClaimKey)) {
-      throw new IllegalStateException(
-        s"The write result address ${location.path} already belongs to another column write; " +
-          "its claim was created by an earlier connector version"
-      )
-    }
-    val bytes = mapper.writeValueAsBytes(record)
+    if (key == location.operationKey) rejectEarlierClaim(location, store)
     // Parse both sides alike: small LongNode values become IntNodes in JSON.
     val expected = mapper.readTree(bytes)
     try {
@@ -226,15 +278,9 @@ object WriteResultRecords {
     } catch {
       case unsupported: UnsupportedOperationException => throw unsupported
       case NonFatal(failure) =>
-        val existing =
-          try {
-            if (!store.exists(key)) None
-            else {
-              val found = recordReader.readTree(store.readAll(key))
-              recordOwner(found, recordType)
-              Some(found)
-            }
-          } catch {
+        val stored =
+          try if (store.exists(key)) Some(store.readAll(key)) else None
+          catch {
             case NonFatal(inspection) =>
               if (failure ne inspection) failure.addSuppressed(inspection)
               throw new IllegalStateException(
@@ -242,19 +288,29 @@ object WriteResultRecords {
                 failure
               )
           }
-        existing match {
-          case Some(found) if found == expected => ()
-          case Some(found)
+        stored.map(parseRecord(_, recordType)) match {
+          case Some(Right(found)) if found == expected => ()
+          case Some(Right(found))
               if found.path("operation_id").asText() != operationId =>
             throw new IllegalStateException(
               s"The write result address ${location.path} already belongs to another column write; " +
                 "give every independent write its own address",
               failure
             )
-          case Some(_) =>
+          case Some(Right(_)) =>
             throw new IllegalStateException(
               s"Cannot create the $recordType record at $key: the existing record for " +
                 s"operation $operationId differs from the attempted publication",
+              failure
+            )
+          case Some(Left(_)) if key == location.legacyClaimKey =>
+            // An earlier connector claimed the address between our claim and
+            // this guard. Its manifest is neither interpreted nor extended.
+            throw earlierClaim(location, failure)
+          case Some(Left(invalid)) =>
+            failure.addSuppressed(invalid)
+            throw new IllegalStateException(
+              s"Cannot create the $recordType record at $key: ${failure.getMessage}",
               failure
             )
           case None =>
@@ -266,18 +322,70 @@ object WriteResultRecords {
     }
   }
 
+  /** An address claimed under the earlier protocol stays that operation's: an
+    * object other than a guard record at its claim key rejects the address,
+    * without interpreting or extending its manifest. A guard belongs to an
+    * operation of this protocol, whose own record then decides the claim.
+    */
+  private def rejectEarlierClaim(
+      location: WriteResultLocation,
+      store: WritableObjectStore
+  ): Unit =
+    if (
+      store.exists(location.legacyClaimKey) &&
+      parseRecord(
+        store.readAll(location.legacyClaimKey),
+        LegacyClaimGuard
+      ).isLeft
+    ) throw earlierClaim(location, null)
+
+  private def earlierClaim(
+      location: WriteResultLocation,
+      cause: Throwable
+  ): IllegalStateException =
+    new IllegalStateException(
+      s"The write result address ${location.path} already belongs to another column write; " +
+        "its claim was created by an earlier connector version",
+      cause
+    )
+
+  private def parseRecord(
+      bytes: Array[Byte],
+      recordType: String
+  ): Either[Throwable, JsonNode] =
+    try {
+      val node = recordReader.readTree(bytes)
+      recordOwner(node, recordType)
+      Right(node)
+    } catch { case NonFatal(invalid) => Left(invalid) }
+
+  /** Validates the header that every record has and returns its operation id.
+    * Recovery and readers apply the same rules, so a record that one of them
+    * rejects is never served by the other.
+    */
   private def recordOwner(node: JsonNode, recordType: String): String = {
     require(
       node != null && node.isObject,
       "the write result record must be an object"
     )
+    val format = node.path("format")
     require(
-      node.path("format").asText() == Format &&
-        node.path("format_version").isIntegralNumber &&
-        node.path("format_version").canConvertToInt &&
-        node.path("format_version").asLong() == FormatVersion &&
-        node.path("record").asText() == recordType,
-      "the write result record has an unsupported record format"
+      format.isTextual && format.asText() == Format,
+      s"not a column write record: format '${format.asText()}'"
+    )
+    val version = node.path("format_version")
+    require(
+      version.isIntegralNumber && version.canConvertToInt &&
+        version.asInt() == FormatVersion,
+      s"unsupported column write record version ${version.asText()}"
+    )
+    val kind = node.path("record")
+    val label =
+      if (recordType == "result") "write result"
+      else recordType.replace('_', ' ')
+    require(
+      kind.isTextual && kind.asText() == recordType,
+      s"not a $label record: ${kind.asText()}"
     )
     val owner = node.path("operation_id")
     require(
@@ -305,6 +413,11 @@ object WriteResultRecords {
     node.set[JsonNode]("changed_fields", fieldsNode(changedFields))
     node.put("segment_count", segmentCount)
     create(location, location.operationKey, node)
+    create(
+      location,
+      location.legacyClaimKey,
+      header(LegacyClaimGuard, operationId)
+    )
   }
 
   def writeCommitPlan(
@@ -392,7 +505,8 @@ object WriteResultRecords {
   }
 
   private[write] def parseResult(json: String): WriteResult = {
-    val node = mapper.readTree(json)
+    val node = recordReader.readTree(json)
+    val operationId = recordOwner(node, "result")
     def text(at: JsonNode, name: String): String = {
       val value = at.get(name)
       require(
@@ -419,22 +533,10 @@ object WriteResultRecords {
       // Java iterator, and the receipt's rows are serialized into tasks.
       value.elements().asScala.toVector
     }
-    require(
-      text(node, "format") == Format,
-      s"not a column write record: format '${text(node, "format")}'"
-    )
-    require(
-      long(node, "format_version") == FormatVersion,
-      s"unsupported column write record version ${long(node, "format_version")}"
-    )
-    require(
-      text(node, "record") == "result",
-      s"not a write result record: ${text(node, "record")}"
-    )
     val snapshot = node.get("source_snapshot")
     require(snapshot != null, "write result has no source_snapshot")
     WriteResult(
-      operationId = text(node, "operation_id"),
+      operationId = operationId,
       operation = text(node, "operation"),
       createdAt = text(node, "created_at"),
       committedAt = text(node, "committed_at"),
@@ -521,15 +623,21 @@ object WriteResultRecords {
     node
   }
 
+  /** Every record has one encoding; recovery and readers compare parsed JSON,
+    * never bytes.
+    */
+  private def encode(node: JsonNode): Array[Byte] =
+    mapper.writeValueAsBytes(node)
+
   private def create(
       location: WriteResultLocation,
       key: String,
       node: ObjectNode
   ): Unit = {
-    val store = NativeWritableObjectStore.open(location.properties)
-    WriterResources.closing(store.close()) {
-      createRecord(location, key, node, store)
-    }
+    val bytes = encode(node)
+    withWritableStore(location, bytes.length)(
+      createRecord(location, key, node, bytes, _)
+    )
   }
 
   private def write(
@@ -537,12 +645,15 @@ object WriteResultRecords {
       key: String,
       node: JsonNode
   ): Unit = {
-    val bytes = mapper
-      .writerWithDefaultPrettyPrinter()
-      .writeValueAsString(node)
-      .getBytes(StandardCharsets.UTF_8)
-    val store = NativeWritableObjectStore.open(location.properties)
-    WriterResources.closing(store.close())(store.write(key, bytes))
+    val bytes = encode(node)
+    withWritableStore(location, bytes.length)(_.write(key, bytes))
+  }
+
+  private def withWritableStore[A](location: WriteResultLocation, size: Long)(
+      use: WritableObjectStore => A
+  ): A = {
+    val store = NativeWritableObjectStore.open(location.recordProperties(size))
+    WriterResources.closing(store.close())(use(store))
   }
 
   private def withStore[A](location: WriteResultLocation)(

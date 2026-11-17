@@ -20,6 +20,7 @@ SPARK_SUITES = (
 )
 CONNECT_SUITE = "com.zilliz.spark.connector.connect.ConnectReadSessionTest"
 CORE_SUITES = (
+    "com.zilliz.milvus.storage.io.NativeConditionalCreateTest",
     "com.zilliz.milvus.storage.io.NativeSegmentReadTest",
     "com.zilliz.milvus.storage.io.NativeStorageFixtureTest",
     "com.zilliz.milvus.storage.io.NativeSegmentFixtureTest",

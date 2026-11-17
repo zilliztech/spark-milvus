@@ -609,14 +609,18 @@ object HadoopStorageKeys extends Logging {
   ): Map[String, String] =
     StorageProperties.from(properties ++ iamFallback(properties))
 
-  /** A deployment that injects no static keys expects the instance role to be
-    * used — IRSA on EKS, RRSA on ACK, an instance profile elsewhere. Hadoop
+  /** A deployment that injects no static keys expects the machine's identity to
+    * be used — IRSA on EKS, RRSA on ACK, an instance profile elsewhere. Hadoop
     * spells that as the absence of `access.key`, so there is no key to
     * translate; the C layer spells it `fs.use_iam`, which has to be set
     * explicitly or its provider chain is never consulted.
     *
-    * The fallback is logged with the bucket it applies to: the identity then
-    * comes from the machine, not from the options or the Hadoop keys.
+    * On AWS that chain reads environment variables, then a web identity token,
+    * and the instance profile only when the process environment sets
+    * `AWS_EC2_METADATA_ENABLE=true`; container credentials, profile keys,
+    * credential processes and SSO are not part of it. The fallback is logged
+    * with the bucket it applies to and that condition: the identity then comes
+    * from the machine, not from the options or the Hadoop keys.
     */
   private def iamFallback(
       properties: Map[String, String]
@@ -635,8 +639,10 @@ object HadoopStorageKeys extends Logging {
         .map(name => s" for bucket '$name'")
         .getOrElse("")
       logInfo(
-        s"No static keys or role are set$bucket; the native storage layer uses its " +
-          "default credential chain (environment variables, web identity or instance role)."
+        s"No static keys or role are set$bucket; the native storage layer uses the " +
+          "backend's IAM credential chain. On AWS it reads environment variables and " +
+          "web identity, and the instance profile only when AWS_EC2_METADATA_ENABLE=true " +
+          "is set for the driver and every executor."
       )
       Map(StorageProperties.UseIam -> "true")
     }
@@ -725,7 +731,8 @@ object HadoopStorageKeys extends Logging {
             s"$tokenKey is set, so the key pair for bucket '$trimmedBucket' is a temporary " +
               "credential, and the native storage layer takes no session token. Set " +
               s"${StorageProperties.UseIam}=true to use the default credential chain " +
-              "(environment variables, web identity or instance role), or pass long-term keys as " +
+              "(environment variables, web identity, or the instance profile when " +
+              "AWS_EC2_METADATA_ENABLE=true), or pass long-term keys as " +
               s"${StorageProperties.AccessKeyId} and ${StorageProperties.AccessKeyValue}."
           )
         }

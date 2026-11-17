@@ -30,6 +30,21 @@ object StorageProperties {
   val ExternalId = "fs.external_id"
   val UseVirtualHost = "fs.use_virtual_host"
 
+  /** Part size of native uploads; a write smaller than one part is sent as a
+    * single request when its writer closes.
+    */
+  val MultiPartUploadSize = "fs.multi_part_upload_size"
+
+  /** Whether S3-compatible backends upload through the CRT transport, which
+    * streams every upload as a multipart upload.
+    */
+  val S3UseCrt = "fs.s3.use_crt"
+
+  /** The highest directory a local write synchronizes after it completes;
+    * defaults to `fs.root_path`.
+    */
+  val LocalDurabilityRoot = "fs.local_durability_root"
+
   /** Value of `fs.storage_type` that reads the local filesystem, where bucket,
     * endpoint and credentials do not apply.
     */
