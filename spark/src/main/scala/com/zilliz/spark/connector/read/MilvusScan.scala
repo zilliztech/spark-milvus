@@ -274,7 +274,7 @@ class MilvusScan(
   }
 
   /** The plan, `core.read.plan.ReadPlan.of`, wrapped into Spark input
-    * partitions with the Milvus filter already parsed on the driver.
+    * partitions.
     */
   private[read] def inputPartitions(
       snapshot: Snapshot,
@@ -300,11 +300,7 @@ class MilvusScan(
       neededFieldIds = MilvusOption.readerFieldIds(options),
       limits = milvusOption.readLimits
     )
-    plan.specs
-      .map(task =>
-        MilvusInputPartition(task, milvusOption.milvusFilter): InputPartition
-      )
-      .toArray
+    plan.specs.map(task => MilvusInputPartition(task): InputPartition).toArray
   }
 
   override def createReaderFactory(): PartitionReaderFactory =

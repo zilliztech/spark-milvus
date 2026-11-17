@@ -36,7 +36,7 @@ def read_options(path):
     if not isinstance(options, dict) or not options.get("milvus.snapshot.path"):
         raise ValueError("Options must contain a fixed milvus.snapshot.path")
     allowed = {
-        "milvus.snapshot.path", "milvus.filter",
+        "milvus.snapshot.path",
         "milvus.partitions", "milvus.segments", "fieldIDs", "milvus.extra.columns",
         "milvus.read.apply.deletes", "milvus.read.vector.raw", "milvus.read.columnar",
         "milvus.read.batch.max.rows", "milvus.read.batch.max.bytes", "milvus.read.arrow.max.bytes",

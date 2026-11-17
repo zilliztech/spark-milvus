@@ -20,20 +20,10 @@ def main():
         missing_rows = bounded_rows(missing, args)
         missing.show(20, truncate=False)
 
-        # A Milvus scalar expression can also be bound to the read itself.
-        # Spark predicates and snapshot deletes are combined with this filter.
-        native_filter = options.get("milvus.filter", "category == 1")
-        filtered_read = (spark.read.format("milvus").options(**options)
-                         .option("milvus.filter", native_filter).load()
-                         .select("id", "category"))
-        filtered_rows = bounded_rows(filtered_read, args)
-        filtered_read.orderBy("id").show(20, truncate=False)
-
         if args.fixture:
             wanted = {row["id"] for row in args.expected_rows if row["category"] == 1}
             if args.where is None:
                 assert {row.id for row in rows} == wanted
-            assert {row.id for row in filtered_rows} == wanted
             assert [row.id for row in missing_rows] == [3001]
 
 

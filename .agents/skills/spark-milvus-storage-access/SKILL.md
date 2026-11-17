@@ -118,9 +118,9 @@ only `VortexFormatReader` overrides it and Vortex is out of scope, so a
 predicate over parquet column groups silently does nothing. That is a defect in
 the C layer — the base should return `NotImplemented` — and it is worth
 reporting upstream, but fixing it would not change this design: `core.expr`
-evaluates predicates because the connector replicates Milvus's own `Plan.g4`
-semantics, which the C layer does not carry. I/O is saved by statistics-based
-pruning, not by this entry point.
+evaluates predicates because pushed Spark predicates keep Spark SQL semantics,
+which the C layer does not carry. I/O is saved by statistics-based pruning, not
+by this entry point.
 
 ## Row-group pruning can only happen in C
 

@@ -4,15 +4,13 @@ import scala.collection.Map
 
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-import com.zilliz.milvus.storage.expr.{FilterExpr, PlanParser}
 import com.zilliz.milvus.storage.read.plan.ReadLimits
 
 case class MilvusOption(
     fieldIDs: String = "",
     extraColumns: Seq[String] = Seq.empty,
     options: Map[String, String] = Map.empty,
-    readLimits: ReadLimits = ReadLimits.Default,
-    milvusFilter: Option[FilterExpr] = None
+    readLimits: ReadLimits = ReadLimits.Default
 )
 
 object MilvusOption {
@@ -22,7 +20,12 @@ object MilvusOption {
   val ReadBatchMaxRows = "milvus.read.batch.max.rows"
   val ReadBatchMaxBytes = "milvus.read.batch.max.bytes"
   val ReadArrowMaxBytes = "milvus.read.arrow.max.bytes"
-  val MilvusFilter = "milvus.filter"
+
+  /** A removed option that took a Milvus scalar expression; Spark SQL and
+    * DataFrame filters replace it. Spark passes unknown options through, so a
+    * read that still sets this one fails instead of returning unfiltered rows.
+    */
+  private val RemovedMilvusFilter = "milvus.filter"
 
   val MilvusExtraColumns = "milvus.extra.columns"
   val MilvusExtraColumnSegmentID = "_segment_id"
@@ -394,14 +397,26 @@ object MilvusOption {
   /** Parse public read options. */
   def apply(options: CaseInsensitiveStringMap): MilvusOption = {
     import scala.jdk.CollectionConverters._
+    rejectRemovedOptions(options)
     MilvusOption(
       fieldIDs = options.getOrDefault(ReaderFieldIDs, ""),
       extraColumns = extraColumns(options),
       options = options.asScala.toMap,
-      readLimits = readLimits(options),
-      milvusFilter = parseMilvusFilter(options)
+      readLimits = readLimits(options)
     )
   }
+
+  /** Fails if `options` sets an option the connector has removed; any value
+    * counts, a blank one included. `apply` calls it first. A reader that parses
+    * these options one by one instead of through `apply` calls it itself.
+    */
+  def rejectRemovedOptions(options: CaseInsensitiveStringMap): Unit =
+    if (options.containsKey(RemovedMilvusFilter)) {
+      throw new IllegalArgumentException(
+        s"Option '$RemovedMilvusFilter' was removed; use DataFrame where/filter or SQL WHERE instead, " +
+          "which the connector pushes down to the scan"
+      )
+    }
 
   /** Resource limits shared by public and private storage readers. */
   def readLimits(options: CaseInsensitiveStringMap): ReadLimits = {
@@ -424,28 +439,6 @@ object MilvusOption {
         ReadLimits.DefaultArrowMaxBytes
       )
     )
-  }
-
-  def parseMilvusFilter(
-      options: CaseInsensitiveStringMap
-  ): Option[FilterExpr] = {
-    if (!options.containsKey(MilvusFilter)) return None
-
-    val text = Option(options.get(MilvusFilter)).map(_.trim).getOrElse("")
-    if (text.isEmpty) {
-      throw new IllegalArgumentException(
-        s"Option '$MilvusFilter' must not be empty"
-      )
-    }
-
-    try Some(PlanParser.parse(text))
-    catch {
-      case e: IllegalArgumentException =>
-        throw new IllegalArgumentException(
-          s"Option '$MilvusFilter' is invalid: ${e.getMessage}",
-          e
-        )
-    }
   }
 
   /** Helper method to convert Map to CaseInsensitiveStringMap and create

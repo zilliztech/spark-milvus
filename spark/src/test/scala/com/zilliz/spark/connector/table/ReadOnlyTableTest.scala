@@ -49,6 +49,24 @@ class ReadOnlyTableTest extends AnyFunSuite {
     assert(table.schema().fieldNames.toSeq == Seq("id"))
   }
 
+  test("a read that sets the removed milvus.filter option fails planning") {
+    val source = MilvusDataSource()
+    val schema =
+      source.inferSchema(new CaseInsensitiveStringMap(options.asJava))
+    val withFilter = (options + ("milvus.filter" -> "id == 1")).asJava
+    val failures = Seq(
+      intercept[IllegalArgumentException] {
+        source.inferSchema(new CaseInsensitiveStringMap(withFilter))
+      },
+      intercept[IllegalArgumentException] {
+        source.getTable(schema, Array.empty, withFilter)
+      }
+    )
+    failures.foreach { failure =>
+      assert(failure.getMessage.contains("'milvus.filter' was removed"))
+    }
+  }
+
   test("empty options cannot fall back to an online collection source") {
     val failure = intercept[IllegalArgumentException] {
       MilvusDataSource().inferSchema(

@@ -124,7 +124,7 @@ class SnapshotPathTest(unittest.TestCase):
                 snapshot_path.describe_snapshot("http://localhost", "default", "pages", "fixed", timeout)
         with tempfile.TemporaryDirectory() as directory:
             storage = Path(directory) / "storage.json"
-            storage.write_text('{"milvus.filter": "id > 0"}')
+            storage.write_text('{"milvus.partitions": "20"}')
             with self.assertRaisesRegex(ValueError, "only fs"):
                 snapshot_path.storage_options(storage)
 

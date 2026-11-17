@@ -2,24 +2,18 @@ package com.zilliz.spark.connector.read
 
 import org.apache.spark.sql.connector.read.InputPartition
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
-import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.types.SparkTypes
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
 
 /** Scan statistics Spark uses to pick a join strategy. */
 class MilvusScanStatisticsTest extends AnyFunSuite with Matchers {
-
-  private val options = MilvusOption(
-    new CaseInsensitiveStringMap(new java.util.HashMap[String, String]())
-  )
 
   private def vector(
       name: String,
@@ -47,8 +41,7 @@ class MilvusScanStatisticsTest extends AnyFunSuite with Matchers {
         snapshotRows = Some(rows),
         schemaBytes = Array.emptyByteArray,
         properties = Map("fs.storage_type" -> "local")
-      ),
-      options.milvusFilter
+      )
     )
 
   test(
@@ -128,8 +121,7 @@ class MilvusScanStatisticsTest extends AnyFunSuite with Matchers {
         layout = SegmentLayout.Manifest("files/seg"),
         schemaBytes = Array.emptyByteArray,
         properties = Map("fs.storage_type" -> "local")
-      ),
-      options.milvusFilter
+      )
     )
     val stats = MilvusScan.statisticsFor(Array(counted(10L), v3), schema)
     stats.numRows().isPresent shouldBe false

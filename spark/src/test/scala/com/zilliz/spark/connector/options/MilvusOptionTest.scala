@@ -1,18 +1,12 @@
 package com.zilliz.spark.connector.options
 
-import java.io.{
-  ByteArrayInputStream,
-  ByteArrayOutputStream,
-  ObjectInputStream,
-  ObjectOutputStream
-}
+import java.util.Collections
 
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.credential.StorageProperties
-import com.zilliz.milvus.storage.expr.PlanParser
 import com.zilliz.milvus.storage.read.plan.ReadLimits
 
 /** Unit tests for MilvusOption parsing and validation
@@ -96,66 +90,25 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
     milvusOption.options("custom.option") shouldBe "custom_value"
   }
 
-  test("milvus.filter parses a trimmed expression through the Map entry") {
-    val parsed = MilvusOption(
-      Map(MilvusOption.MilvusFilter -> "  price >= 10 and active == true  ")
-    )
-
-    parsed.milvusFilter shouldBe Some(
-      PlanParser.parse("price >= 10 and active == true")
-    )
-  }
-
-  test("milvus.filter is absent when the option is not set") {
-    MilvusOption(Map.empty[String, String]).milvusFilter shouldBe None
-  }
-
-  test("milvus.filter key is case insensitive") {
-    val values = new java.util.HashMap[String, String]()
-    values.put(MilvusOption.MilvusFilter.toUpperCase, "id in [1, 2]")
-
-    val parsed = MilvusOption(new CaseInsensitiveStringMap(values))
-
-    parsed.milvusFilter shouldBe Some(PlanParser.parse("id in [1, 2]"))
-  }
-
-  test("milvus.filter rejects an explicitly blank value") {
-    Seq("", " \t ").foreach { value =>
+  // Spark passes unknown options through. A read that still sets the removed
+  // option would otherwise return unfiltered rows without a warning.
+  test("the removed milvus.filter option fails instead of being ignored") {
+    for {
+      key <- Seq("milvus.filter", "MILVUS.FILTER")
+      value <- Seq("category == 1", "", " \t ")
+    } {
       val error = intercept[IllegalArgumentException] {
-        MilvusOption(Map(MilvusOption.MilvusFilter -> value))
+        MilvusOption(Map(key -> value))
       }
-      error.getMessage should include(MilvusOption.MilvusFilter)
-      error.getMessage should include("empty")
+      error.getMessage should include("'milvus.filter' was removed")
+      error.getMessage should include("DataFrame where/filter or SQL WHERE")
+      val direct = intercept[IllegalArgumentException] {
+        MilvusOption.rejectRemovedOptions(
+          new CaseInsensitiveStringMap(Collections.singletonMap(key, value))
+        )
+      }
+      direct.getMessage shouldBe error.getMessage
     }
-  }
-
-  test("milvus.filter reports the parser failure with the option key") {
-    val error = intercept[IllegalArgumentException] {
-      MilvusOption(Map(MilvusOption.MilvusFilter -> "id = 1"))
-    }
-
-    error.getMessage should include(MilvusOption.MilvusFilter)
-    error.getMessage should include("Unsupported comparison")
-    error.getCause shouldBe a[IllegalArgumentException]
-  }
-
-  test("milvus.filter expression survives Java serialization") {
-    val expected = MilvusOption(
-      Map(MilvusOption.MilvusFilter -> "id >= 7 or id is null")
-    )
-    val bytes = new ByteArrayOutputStream()
-    val output = new ObjectOutputStream(bytes)
-    try output.writeObject(expected)
-    finally output.close()
-
-    val input = new ObjectInputStream(
-      new ByteArrayInputStream(bytes.toByteArray)
-    )
-    val restored =
-      try input.readObject().asInstanceOf[MilvusOption]
-      finally input.close()
-
-    restored.milvusFilter shouldBe expected.milvusFilter
   }
 
   test("isSnapshotMode accepts explicit snapshot mode") {

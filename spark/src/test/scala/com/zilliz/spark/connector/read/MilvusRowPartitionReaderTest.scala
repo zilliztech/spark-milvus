@@ -11,7 +11,6 @@ import com.zilliz.milvus.storage.expr.{
   Comparison,
   ComparisonOperator,
   FieldRef,
-  FilterExpr,
   PredicateExpr
 }
 import com.zilliz.milvus.storage.expr.Literal.IntegerValue
@@ -82,8 +81,8 @@ class MilvusRowPartitionReaderTest extends AnyFunSuite with Matchers {
       readIds(
         root(allocator),
         task(),
-        milvusFilter = Some(FilterExpr.Compare("id", ">=", 12L)),
-        allocator = allocator
+        allocator,
+        Some(idComparison(ComparisonOperator.GreaterThanOrEqual, 12L))
       ) shouldBe Vector(12L, 13L)
 
       val taskWithDelete = task(
@@ -91,22 +90,22 @@ class MilvusRowPartitionReaderTest extends AnyFunSuite with Matchers {
           DeletePlan.fromLongPks(Map(11L -> 200L))
         )
       )
-      val sparkPredicate = Comparison(
-        FieldRef(100L, DataType.Int64),
-        ComparisonOperator.LessThanOrEqual,
-        IntegerValue(12L)
-      )
       readIds(
         root(allocator),
         taskWithDelete,
-        milvusFilter = Some(FilterExpr.Compare("id", ">=", 11L)),
-        allocator = allocator,
-        pushedExpression = Some(sparkPredicate)
-      ) shouldBe Vector(12L)
+        allocator,
+        Some(idComparison(ComparisonOperator.LessThanOrEqual, 12L))
+      ) shouldBe Vector(10L, 12L)
 
       allocator.getAllocatedMemory shouldBe 0L
     } finally allocator.close()
   }
+
+  private def idComparison(
+      operator: ComparisonOperator,
+      value: Long
+  ): PredicateExpr =
+    Comparison(FieldRef(100L, DataType.Int64), operator, IntegerValue(value))
 
   private def root(allocator: RootAllocator): VectorSchemaRoot = {
     val arrowSchema =
@@ -140,9 +139,8 @@ class MilvusRowPartitionReaderTest extends AnyFunSuite with Matchers {
   private def readIds(
       root: VectorSchemaRoot,
       task: SegmentReadTask,
-      milvusFilter: Option[FilterExpr],
       allocator: RootAllocator,
-      pushedExpression: Option[PredicateExpr] = None
+      pushedExpression: Option[PredicateExpr]
   ): Vector[Long] = {
     val partition = MilvusInputPartition(task)
     val binding = ColumnBinding(partition, sparkSchema)
@@ -152,8 +150,7 @@ class MilvusRowPartitionReaderTest extends AnyFunSuite with Matchers {
       setup = binding,
       pushedExpression = pushedExpression,
       allocator = allocator,
-      preopenedSegmentReader = Some(fake),
-      milvusFilter = milvusFilter
+      preopenedSegmentReader = Some(fake)
     )
     val ids = Vector.newBuilder[Long]
     try {
