@@ -13,7 +13,12 @@ import com.zilliz.milvus.storage.expr.{
   PredicateExpr
 }
 import com.zilliz.milvus.storage.read.exec.{ReadMetrics, SegmentReader}
-import com.zilliz.spark.connector.metrics.ScanMetrics
+import com.zilliz.spark.connector.metrics.{
+  ReadEndReason,
+  ReadFailurePhase,
+  ReadProgress,
+  ScanMetrics
+}
 import com.zilliz.spark.connector.types.{ArrowAllocator, ArrowConverter}
 
 /** The one row reader for both storage lines: Arrow batches from
@@ -32,7 +37,8 @@ class MilvusRowPartitionReader(
     pushedExpression: Option[PredicateExpr] = None,
     allocator: BufferAllocator = ArrowAllocator.get,
     taskAllocatorOwner: Option[AutoCloseable] = None,
-    private[read] val preopenedSegmentReader: Option[SegmentReader] = None
+    private[read] val preopenedSegmentReader: Option[SegmentReader] = None,
+    private[read] val progress: ReadProgress = new ReadProgress
 ) extends RowOffsetReader
     with Logging {
 
@@ -45,6 +51,9 @@ class MilvusRowPartitionReader(
   private var currentBatch: VectorSchemaRoot = null
   private var currentFilterBitmap: ExclusionBitmap = null
   private var currentRowIndex: Int = 0
+  private var selectedRowIndex: Int = -1
+  private var returnedRow: InternalRow = null
+  private var closed = false
   private var currentBatchStartRowOffset: Long = 0L
   private var _lastReturnedRowOffset: Long = -1L
 
@@ -59,35 +68,64 @@ class MilvusRowPartitionReader(
   def lastReturnedRowOffset: Long = _lastReturnedRowOffset
 
   try {
-    segmentReader = preopenedSegmentReader.getOrElse(setup.open(allocator))
+    segmentReader = progress.inPhase(ReadFailurePhase.Open) {
+      preopenedSegmentReader.getOrElse {
+        progress.inPhase(ReadFailurePhase.DeleteLoad)(setup.deletePlan)
+        setup.open(allocator)
+      }
+    }
     loadNextBatch()
   } catch {
     case e: Throwable =>
-      releaseAll()
+      try releaseAll()
+      catch {
+        case closeFailure: Throwable =>
+          progress.failed(ReadFailurePhase.Close, closeFailure)
+          if (closeFailure ne e) e.addSuppressed(closeFailure)
+      }
+      progress.close()
       throw e
   }
 
   private def pullNextBatch(): VectorSchemaRoot =
-    if (segmentReader == null) null else segmentReader.next().orNull
+    if (segmentReader == null) null
+    else progress.inPhase(ReadFailurePhase.Read)(segmentReader.next().orNull)
 
   private def loadNextBatch(): Unit = {
     currentBatch = pullNextBatch()
+    if (currentBatch == null) progress.end(ReadEndReason.Exhausted)
+    else progress.decodedRows(currentBatch.getRowCount.toLong)
     currentFilterBitmap =
       if (currentBatch == null) null
       else
-        pushedExpression
-          .map(
-            PredicateEvaluator.evaluate(_, currentBatch, setup.columnNameFor)
-          )
-          .orNull
+        progress.inPhase(ReadFailurePhase.Filter) {
+          pushedExpression
+            .map(
+              PredicateEvaluator.evaluate(_, currentBatch, setup.columnNameFor)
+            )
+            .orNull
+        }
   }
 
   private def isExcluded(batch: VectorSchemaRoot, rowIndex: Int): Boolean =
-    setup.isDeleted(batch, rowIndex) ||
-      (currentFilterBitmap != null &&
-        currentFilterBitmap.isExcluded(rowIndex))
+    progress.inPhase(ReadFailurePhase.Filter) {
+      if (setup.isDeleted(batch, rowIndex)) {
+        progress.excludedRows(1L, 0L)
+        true
+      } else if (
+        currentFilterBitmap != null && currentFilterBitmap.isExcluded(rowIndex)
+      ) {
+        progress.excludedRows(0L, 1L)
+        true
+      } else false
+    }
 
-  override def next(): Boolean = nextRow()
+  override def next(): Boolean = {
+    if (closed) return false
+    selectedRowIndex = -1
+    returnedRow = null
+    nextRow()
+  }
 
   private def nextRow(): Boolean = {
     while (true) {
@@ -99,16 +137,17 @@ class MilvusRowPartitionReader(
         currentBatch = null
         currentFilterBitmap = null
         currentBatchStartRowOffset += exhausted.getRowCount.toLong
-        exhausted.close()
+        progress.inPhase(ReadFailurePhase.Close)(exhausted.close())
         loadNextBatch()
         currentRowIndex = 0
       }
       if (currentBatch == null) {
         return false
       }
-      if (isExcluded(currentBatch, currentRowIndex)) {
-        currentRowIndex += 1
-      } else {
+      val candidate = currentRowIndex
+      currentRowIndex += 1
+      if (!isExcluded(currentBatch, candidate)) {
+        selectedRowIndex = candidate
         return true
       }
     }
@@ -116,54 +155,67 @@ class MilvusRowPartitionReader(
   }
 
   override def get(): InternalRow = {
-    if (currentBatch == null) {
-      throw new IllegalStateException("No batch loaded")
+    if (closed || currentBatch == null || selectedRowIndex < 0) {
+      throw new IllegalStateException(
+        "No current row; call next() before get()"
+      )
     }
-    _lastReturnedRowOffset = currentBatchStartRowOffset + currentRowIndex
-    val row = ArrowConverter.arrowToInternalRow(
-      currentBatch,
-      currentRowIndex,
-      schema,
-      arrowColumnNames
-    )
-    currentRowIndex += 1
+    if (returnedRow != null) return returnedRow
+    _lastReturnedRowOffset = currentBatchStartRowOffset + selectedRowIndex
+    returnedRow = progress.inPhase(ReadFailurePhase.Convert) {
+      ArrowConverter.arrowToInternalRow(
+        currentBatch,
+        selectedRowIndex,
+        schema,
+        arrowColumnNames
+      )
+    }
     materialized += 1L
-    row
+    returnedRow
   }
 
-  override def close(): Unit = releaseAll()
+  override def close(): Unit = {
+    if (!closed) {
+      closed = true
+      try progress.inPhase(ReadFailurePhase.Close)(releaseAll())
+      finally progress.close()
+    }
+  }
 
   override def currentMetricsValues(): Array[CustomTaskMetric] = {
     val metrics =
       if (segmentReader != null) segmentReader.metrics else finalMetrics
-    ScanMetrics.taskValues(metrics, materialized)
+    ScanMetrics.taskValues(metrics, materialized) ++ progress.taskValues
   }
 
   // Each handle is released on its own so one failure does not strand the
   // rest; the null sentinels make a second close a no-op.
   private def releaseAll(): Unit = {
+    var failure: Throwable = null
+    def closeResource(action: => Unit): Unit =
+      try action
+      catch {
+        case next: Throwable =>
+          progress.failed(ReadFailurePhase.Close, next)
+          if (failure == null) failure = next
+          else if (failure ne next) failure.addSuppressed(next)
+      }
     if (currentBatch != null) {
-      try currentBatch.close()
-      catch { case e: Throwable => logWarning("close currentBatch failed", e) }
+      closeResource(currentBatch.close())
       currentBatch = null
       currentFilterBitmap = null
     }
     if (segmentReader != null) {
       val owned = segmentReader
       segmentReader = null
-      try owned.close()
-      catch { case e: Throwable => logWarning("close segmentReader failed", e) }
-      try finalMetrics = owned.metrics
-      catch { case e: Throwable => logWarning("read final metrics failed", e) }
+      closeResource(owned.close())
+      closeResource { finalMetrics = owned.metrics }
     }
     if (allocatorOwner != null) {
       val owned = allocatorOwner
-      try {
-        owned.close()
-        allocatorOwner = null
-      } catch {
-        case e: Throwable => logWarning("close task allocator failed", e)
-      }
+      allocatorOwner = null
+      closeResource(owned.close())
     }
+    if (failure != null) throw failure
   }
 }

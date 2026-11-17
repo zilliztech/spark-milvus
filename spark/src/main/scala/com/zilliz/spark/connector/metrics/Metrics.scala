@@ -96,7 +96,7 @@ object ScanMetrics {
     new CopiedBytesMetric,
     new RowsMaterializedMetric,
     new ArrowAllocatedMaxMetric
-  )
+  ) ++ ReadOperationalMetrics.supported
 
   def taskValues(
       metrics: ReadMetrics,

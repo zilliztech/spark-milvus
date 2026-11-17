@@ -12,6 +12,12 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 
 import com.zilliz.milvus.storage.expr.PredicateExpr
 import com.zilliz.milvus.storage.read.exec.SegmentReader
+import com.zilliz.spark.connector.metrics.{
+  OperationToken,
+  OperationalMetrics,
+  ReadFailurePhase,
+  ReadProgress
+}
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.types.ArrowAllocator
 import io.milvus.grpc.schema.CollectionSchema
@@ -48,12 +54,14 @@ object MilvusPartitionReaderFactory {
 
   private[read] def closeAfterFailure(
       resource: AutoCloseable,
-      failure: Throwable
+      failure: Throwable,
+      progress: Option[ReadProgress] = None
   ): Unit =
     if (resource != null) {
       try resource.close()
       catch {
         case closeFailure: Throwable =>
+          progress.foreach(_.failed(ReadFailurePhase.Close, closeFailure))
           if (closeFailure ne failure) failure.addSuppressed(closeFailure)
       }
     }
@@ -69,7 +77,8 @@ class MilvusPartitionReaderFactory(
     limit: Option[Int] = None,
     // The snapshot's Milvus id, which `_milvus_row_id` carries; zero when the
     // read does not request it.
-    snapshotId: Long = 0L
+    snapshotId: Long = 0L,
+    operationToken: Option[OperationToken] = None
 ) extends PartitionReaderFactory
     with Logging {
 
@@ -99,11 +108,29 @@ class MilvusPartitionReaderFactory(
   override def createColumnarReader(
       partition: InputPartition
   ): PartitionReader[ColumnarBatch] = {
-    val reader = batchReaderFor(partition)
-    try limit.fold(reader)(n => new LimitedBatchReader(reader, n))
-    catch {
+    val progress = taskProgress(partition)
+    var reader: PartitionReader[ColumnarBatch] = null
+    try {
+      reader = progress.inPhase(ReadFailurePhase.Open)(
+        batchReaderFor(partition, progress)
+      )
+      val limited = limit.fold(reader)(n =>
+        new LimitedBatchReader(reader, n, Some(progress))
+      )
+      observe(
+        limited,
+        progress,
+        (batch: ColumnarBatch) => batch.numRows().toLong
+      )
+    } catch {
       case failure: Throwable =>
-        MilvusPartitionReaderFactory.closeAfterFailure(reader, failure)
+        progress.failed(ReadFailurePhase.Open, failure)
+        MilvusPartitionReaderFactory.closeAfterFailure(
+          reader,
+          failure,
+          Some(progress)
+        )
+        progress.close()
         throw failure
     }
   }
@@ -111,17 +138,51 @@ class MilvusPartitionReaderFactory(
   override def createReader(
       partition: InputPartition
   ): PartitionReader[InternalRow] = {
-    val reader = rowReaderFor(partition)
-    try limit.fold(reader)(n => new LimitedRowReader(reader, n))
-    catch {
+    val progress = taskProgress(partition)
+    var reader: PartitionReader[InternalRow] = null
+    try {
+      reader = progress.inPhase(ReadFailurePhase.Open)(
+        rowReaderFor(partition, progress)
+      )
+      val limited =
+        limit.fold(reader)(n => new LimitedRowReader(reader, n, Some(progress)))
+      observe(limited, progress, (_: InternalRow) => 1L)
+    } catch {
       case failure: Throwable =>
-        MilvusPartitionReaderFactory.closeAfterFailure(reader, failure)
+        progress.failed(ReadFailurePhase.Open, failure)
+        MilvusPartitionReaderFactory.closeAfterFailure(
+          reader,
+          failure,
+          Some(progress)
+        )
+        progress.close()
         throw failure
     }
   }
 
+  private def taskProgress(partition: InputPartition): ReadProgress = {
+    val logicalPartition = partition match {
+      case input: MilvusInputPartition => Some(input.task.segmentId.toString)
+      case _                           => None
+    }
+    new ReadProgress(
+      operationToken.map(token =>
+        OperationalMetrics.task(token, "reading", logicalPartition)
+      )
+    )
+  }
+
+  private def observe[T](
+      reader: PartitionReader[T],
+      progress: ReadProgress,
+      rows: T => Long
+  ): PartitionReader[T] = {
+    new ObservedPartitionReader(reader, progress, rows)
+  }
+
   private def batchReaderFor(
-      partition: InputPartition
+      partition: InputPartition,
+      progress: ReadProgress
   ): PartitionReader[ColumnarBatch] = partition match {
     case p: MilvusInputPartition =>
       val dataSchema = StructType(schema.fields.filterNot { field =>
@@ -135,6 +196,7 @@ class MilvusPartitionReaderFactory(
       )
       var segmentReader: SegmentReader = null
       try {
+        progress.inPhase(ReadFailurePhase.DeleteLoad)(setup.deletePlan)
         segmentReader = setup.open(taskAllocator.allocator)
         new MilvusColumnarPartitionReader(
           schema = schema,
@@ -148,17 +210,20 @@ class MilvusPartitionReaderFactory(
           snapshotId = snapshotId,
           pushedExpression = pushedExpression,
           columnNameFor = setup.columnNameFor,
-          taskAllocatorOwner = Some(taskAllocator)
+          taskAllocatorOwner = Some(taskAllocator),
+          progress = progress
         )
       } catch {
         case failure: Throwable =>
           MilvusPartitionReaderFactory.closeAfterFailure(
             segmentReader,
-            failure
+            failure,
+            Some(progress)
           )
           MilvusPartitionReaderFactory.closeAfterFailure(
             taskAllocator,
-            failure
+            failure,
+            Some(progress)
           )
           throw failure
       }
@@ -169,7 +234,8 @@ class MilvusPartitionReaderFactory(
   }
 
   private def rowReaderFor(
-      partition: InputPartition
+      partition: InputPartition,
+      progress: ReadProgress
   ): PartitionReader[InternalRow] = partition match {
     case p: MilvusInputPartition =>
       logInfo(s"Creating row reader for segment ${p.task.segmentId}")
@@ -188,7 +254,8 @@ class MilvusPartitionReaderFactory(
           setup = setup,
           pushedExpression = pushedExpression,
           allocator = taskAllocator.allocator,
-          taskAllocatorOwner = Some(taskAllocator)
+          taskAllocatorOwner = Some(taskAllocator),
+          progress = progress
         )
         MetadataColumns.wrapRows(
           rowReader,
@@ -199,10 +266,15 @@ class MilvusPartitionReaderFactory(
         )
       } catch {
         case failure: Throwable =>
-          MilvusPartitionReaderFactory.closeAfterFailure(rowReader, failure)
+          MilvusPartitionReaderFactory.closeAfterFailure(
+            rowReader,
+            failure,
+            Some(progress)
+          )
           MilvusPartitionReaderFactory.closeAfterFailure(
             taskAllocator,
-            failure
+            failure,
+            Some(progress)
           )
           throw failure
       }

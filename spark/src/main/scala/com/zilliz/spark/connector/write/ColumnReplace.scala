@@ -25,6 +25,7 @@ import org.apache.spark.sql.connector.expressions.{
   SortDirection,
   SortOrder
 }
+import org.apache.spark.sql.connector.metric.{CustomMetric, CustomTaskMetric}
 import org.apache.spark.sql.connector.write.{
   BatchWrite,
   DataWriterFactory,
@@ -52,6 +53,13 @@ import com.zilliz.milvus.storage.write.{
   ManifestTransaction,
   WriterResources,
   WrittenColumnGroups
+}
+import com.zilliz.spark.connector.metrics.{
+  OperationToken,
+  OperationalMetrics,
+  WriteFailureCategory,
+  WriteOperationalMetrics,
+  WritePhase
 }
 import com.zilliz.spark.connector.options.{MilvusOption, StorageOptions}
 import com.zilliz.spark.connector.table.SnapshotSources
@@ -412,8 +420,13 @@ final class ColumnReplaceTable(
 final class ColumnReplaceWrite(
     plan: ColumnReplacePlan,
     task: ColumnReplaceTask
-) extends Write
+) extends DriverMeasuredWrite
     with RequiresDistributionAndOrdering {
+
+  private val operationId = UUID.randomUUID().toString
+  private val metrics = new WriteOperationalMetrics(
+    plan.segments.map(segment => segment.id -> segment.rows).toMap
+  )
 
   private val segment = Expressions.column(
     s"${RowIdentity.ColumnName}.${RowIdentity.SegmentIdField}"
@@ -438,7 +451,23 @@ final class ColumnReplaceWrite(
     s"MilvusColumnReplace(snapshot=${plan.snapshot.name}, " +
       s"fields=${plan.targets.map(_.name).mkString(",")}, segments=${plan.segments.size})"
 
-  override def toBatch(): BatchWrite = new ColumnReplaceBatchWrite(plan, task)
+  override def supportedCustomMetrics(): Array[CustomMetric] =
+    WriteOperationalMetrics.supported
+
+  override protected def driverMetricsValues: Array[CustomTaskMetric] =
+    metrics.driverValues
+
+  override def toBatch(): BatchWrite = {
+    val token =
+      OperationalMetrics.begin("write", metrics.operationalValues, operationId)
+    new ColumnReplaceBatchWrite(
+      plan,
+      task.copy(operationId = operationId, operationToken = Some(token)),
+      metrics,
+      operationId,
+      token
+    )
+  }
 }
 
 /** The driver side of one column replacement.
@@ -452,33 +481,102 @@ final class ColumnReplaceWrite(
   */
 final class ColumnReplaceBatchWrite(
     plan: ColumnReplacePlan,
-    task: ColumnReplaceTask
+    task: ColumnReplaceTask,
+    metrics: WriteOperationalMetrics,
+    operationId: String,
+    token: OperationToken
 ) extends BatchWrite
     with Logging {
 
-  private val operationId = UUID.randomUUID().toString
   @volatile private var claimed = false
   @volatile private var createdAt = ""
   @volatile private var outcomes = Map.empty[Long, SegmentOutcome]
   @volatile private var resultPublished = false
+  private var failureReported = false
   @volatile private var segmentsBroadcast
       : Option[Broadcast[Map[Long, PlannedSegment]]] = None
+
+  private def report(): Unit = synchronized {
+    metrics.operationalValues.foreach { case (name, value) =>
+      OperationalMetrics.set(token, name, value)
+    }
+  }
+
+  private def enter(phase: Long): Unit = {
+    metrics.enter(phase)
+    OperationalMetrics.phase(token, phaseName(phase))
+    report()
+  }
+
+  private def phaseName(phase: Long): String = phase match {
+    case WritePhase.Prepared   => "planning"
+    case WritePhase.CommitPlan => "commit"
+    case WritePhase.Validating => "validation"
+    case WritePhase.Committing => "commit"
+    case WritePhase.Publishing => "publish"
+    case _                     => WritePhase.name(phase)
+  }
+
+  private def failed(failure: Throwable): Unit = {
+    metrics.fail(failure)
+    report()
+    reportFailure()
+  }
+
+  private def reportFailure(): Unit = synchronized {
+    val state = metrics.values
+    if (
+      !failureReported && state(
+        WriteOperationalMetrics.FailureCategory
+      ) != WriteFailureCategory.None
+    ) {
+      OperationalMetrics.failure(
+        token,
+        phaseName(state(WriteOperationalMetrics.FailurePhase)),
+        WriteFailureCategory.name(
+          state(WriteOperationalMetrics.FailureCategory)
+        )
+      )
+      failureReported = true
+    }
+  }
+
+  private def finishFailure(): Unit = {
+    report()
+    val state = metrics.values
+    val outcome =
+      if (
+        state(WriteOperationalMetrics.UnknownSegments) > 0L || state(
+          WriteOperationalMetrics.FailureCategory
+        ) == WriteFailureCategory.PublicationUnconfirmed
+      ) "unknown"
+      else "failed"
+    OperationalMetrics.finish(token, outcome)
+  }
 
   override def createBatchWriterFactory(
       info: PhysicalWriteInfo
   ): DataWriterFactory = {
+    enter(WritePhase.Claiming)
     createdAt = Instant.now().toString
     val context = SparkSession.active.sparkContext
-    WriteResultRecords.writeOperation(
-      plan.result,
-      operationId,
-      MilvusOption.WriteOperationReplaceColumns,
-      createdAt,
-      context.applicationId,
-      plan.snapshot,
-      plan.targets,
-      plan.segments.size
-    )
+    try
+      WriteResultRecords.writeOperation(
+        plan.result,
+        operationId,
+        MilvusOption.WriteOperationReplaceColumns,
+        createdAt,
+        context.applicationId,
+        plan.snapshot,
+        plan.targets,
+        plan.segments.size
+      )
+    catch {
+      case NonFatal(failure) =>
+        failed(failure)
+        finishFailure()
+        throw failure
+    }
     claimed = true
     // Spark aborts a write only after the factory exists, so a failure from
     // here on records itself: the address is claimed and must say why it has
@@ -489,9 +587,14 @@ final class ColumnReplaceBatchWrite(
           plan.segments.map(segment => segment.id -> segment).toMap
         )
       segmentsBroadcast = Some(broadcast)
-      new ColumnReplaceWriterFactory(task, broadcast)
+      enter(WritePhase.Writing)
+      new ColumnReplaceWriterFactory(
+        task.copy(operationId = operationId),
+        broadcast
+      )
     } catch {
       case NonFatal(failure) =>
+        failed(failure)
         try abort(Array.empty)
         catch { case NonFatal(record) => failure.addSuppressed(record) }
         throw failure
@@ -500,9 +603,15 @@ final class ColumnReplaceBatchWrite(
 
   override def useCommitCoordinator(): Boolean = true
 
-  override def commit(messages: Array[WriterCommitMessage]): Unit =
+  override def commit(messages: Array[WriterCommitMessage]): Unit = try {
     WriterResources.closing(releaseBroadcast()) {
+      enter(WritePhase.Validating)
       val written = writtenSegments(messages)
+      metrics.filesReady(
+        written.values.map(_.rows).sum,
+        written.values.map(_.columnGroups.map(_.files.size.toLong).sum).sum
+      )
+      report()
       val commits = plan.segments.map { segment =>
         PlannedCommit(
           segmentId = segment.id,
@@ -513,6 +622,7 @@ final class ColumnReplaceBatchWrite(
           columnGroups = written(segment.id).columnGroups
         )
       }
+      enter(WritePhase.CommitPlan)
       WriteResultRecords.writeCommitPlan(
         plan.result,
         operationId,
@@ -520,10 +630,16 @@ final class ColumnReplaceBatchWrite(
         plan.targets,
         commits
       )
+      enter(WritePhase.Committing)
       val committed = SegmentCommits.commitAll(
         commits,
         plan.storage,
-        plan.targets.map(_.fieldId.toString)
+        plan.targets.map(_.fieldId.toString),
+        outcome => {
+          synchronized { outcomes += outcome.segmentId -> outcome }
+          metrics.segmentOutcome(outcome.segmentId, outcome.state.name)
+          report()
+        }
       )
       outcomes = committed.map(outcome => outcome.segmentId -> outcome).toMap
       val failed = committed.filter(_.state != SegmentState.Committed)
@@ -536,6 +652,7 @@ final class ColumnReplaceBatchWrite(
         )
       }
       val versions = committed.map(o => o.segmentId -> o.version.get).toMap
+      enter(WritePhase.Publishing)
       WriteResultRecords.writeResult(
         plan.result,
         WriteResult(
@@ -552,17 +669,28 @@ final class ColumnReplaceBatchWrite(
         )
       )
       resultPublished = true
+      metrics.published()
+      report()
       logInfo(
         s"Column replacement $operationId committed ${commits.size} segment(s) of snapshot " +
           s"${plan.snapshot.name}; receipt ${plan.result.resultKey}"
       )
     }
+    report()
+    OperationalMetrics.finish(token, "success")
+  } catch {
+    case NonFatal(failure) =>
+      failed(failure)
+      throw failure
+  }
 
-  override def abort(messages: Array[WriterCommitMessage]): Unit =
+  override def abort(messages: Array[WriterCommitMessage]): Unit = try {
     WriterResources.closing(releaseBroadcast()) {
       // Without the claim the address belongs to another operation: nothing
       // here may be recorded there, and this job wrote no files.
       if (claimed && !resultPublished) {
+        metrics.taskFailed()
+        report()
         val written = Option(messages)
           .getOrElse(Array.empty[WriterCommitMessage])
           .toSeq
@@ -589,22 +717,33 @@ final class ColumnReplaceBatchWrite(
             )
           )
         }
+        recorded.foreach(outcome =>
+          metrics.segmentOutcome(outcome.segmentId, outcome.state.name)
+        )
+        report()
         val (stage, message) =
           if (outcomes.isEmpty)
             "write" -> "the job failed before any segment manifest was committed"
           else if (recorded.forall(_.state == SegmentState.Committed))
             "publish" -> "every segment manifest committed, but receipt publication could not be confirmed"
           else "commit" -> "some segment manifests did not commit"
-        WriteResultRecords.writeFailure(
-          plan.result,
-          operationId,
-          Instant.now().toString,
-          stage,
-          message,
-          recorded
-        )
+        try
+          WriteResultRecords.writeFailure(
+            plan.result,
+            operationId,
+            Instant.now().toString,
+            stage,
+            message,
+            recorded
+          )
+        finally {
+          reportFailure()
+        }
       }
     }
+  } finally {
+    if (claimed && !resultPublished) finishFailure()
+  }
 
   /** The adopted attempt of every partition, as written segments by id. Every
     * planned segment must be there once with all of its rows.
@@ -638,7 +777,24 @@ final class ColumnReplaceBatchWrite(
           s"'${MilvusOption.ReadMode}=${MilvusOption.ReadModePhysical}' and keep every row"
       )
     }
+    val expected =
+      plan.segments.map(segment => segment.id -> segment.rows).toMap
+    require(
+      byId.keySet == expected.keySet,
+      "the adopted write messages contain unplanned segments"
+    )
+    byId.values.foreach(segment =>
+      require(
+        segment.rows == expected(segment.segmentId),
+        s"segment ${segment.segmentId} reported ${segment.rows} rows, expected ${expected(segment.segmentId)}"
+      )
+    )
     byId
+  }
+
+  private def cleanupFailed(): Unit = {
+    metrics.cleanupFailed()
+    report()
   }
 
   private def deleteQuietly(files: Seq[String]): Unit =
@@ -650,6 +806,7 @@ final class ColumnReplaceBatchWrite(
             try store.delete(file)
             catch {
               case NonFatal(e) =>
+                cleanupFailed()
                 logWarning(
                   s"Could not delete unreferenced file $file: ${e.getMessage}"
                 )
@@ -658,6 +815,7 @@ final class ColumnReplaceBatchWrite(
         }
       } catch {
         case NonFatal(e) =>
+          cleanupFailed()
           logWarning(
             s"Could not delete ${files.size} unreferenced file(s): ${e.getMessage}"
           )
@@ -669,6 +827,7 @@ final class ColumnReplaceBatchWrite(
       try broadcast.destroy()
       catch {
         case NonFatal(e) =>
+          cleanupFailed()
           logWarning(
             s"Could not release the segment broadcast: ${e.getMessage}"
           )
@@ -689,7 +848,8 @@ private[write] object SegmentCommits {
   def commitAll(
       commits: Seq[PlannedCommit],
       storage: Map[String, String],
-      columns: Seq[String]
+      columns: Seq[String],
+      reportOutcome: SegmentOutcome => Unit = _ => ()
   ): Seq[SegmentOutcome] = {
     val stop = new AtomicBoolean(false)
     val pool = Executors.newFixedThreadPool(
@@ -700,20 +860,24 @@ private[write] object SegmentCommits {
       commits
         .map { commit =>
           pool.submit(new Callable[SegmentOutcome] {
-            override def call(): SegmentOutcome =
-              if (stop.get())
-                SegmentOutcome(
-                  commit.segmentId,
-                  commit.sourceVersion,
-                  SegmentState.NotCommitted,
-                  None,
-                  Some("not attempted after an earlier segment failed")
-                )
-              else {
-                val outcome = commitOne(commit, storage, columns)
-                if (outcome.state != SegmentState.Committed) stop.set(true)
-                outcome
-              }
+            override def call(): SegmentOutcome = {
+              val outcome =
+                if (stop.get())
+                  SegmentOutcome(
+                    commit.segmentId,
+                    commit.sourceVersion,
+                    SegmentState.NotCommitted,
+                    None,
+                    Some("not attempted after an earlier segment failed")
+                  )
+                else {
+                  val outcome = commitOne(commit, storage, columns)
+                  if (outcome.state != SegmentState.Committed) stop.set(true)
+                  outcome
+                }
+              reportOutcome(outcome)
+              outcome
+            }
           })
         }
         .map(_.get())
