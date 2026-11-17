@@ -1,6 +1,6 @@
 package com.zilliz.spark.connector.write
 
-import java.nio.file.{Files, Path}
+import java.nio.file.{Files, Path, Paths}
 import java.time.Instant
 import java.util.{Comparator, UUID}
 import java.util.concurrent.{Callable, CountDownLatch, Executors, TimeUnit}
@@ -707,6 +707,50 @@ class ColumnReplaceExampleTest extends AnyFunSuite with BeforeAndAfterAll {
     ) {
       objectStorage(runLargeReceipt, useCrt = Some(useCrt))
     }
+  }
+
+  /** Local storage under a relative `fs.root_path`, the default form. With
+    * `carriesRoot`, every key and path starts with that root, as a
+    * bucket-relative key does; without it, keys are written below the root. No
+    * snapshot is prepared: the bodies only write and read result records.
+    */
+  private def localUnderRelativeRoot(carriesRoot: Boolean)(
+      body: Place => Unit
+  ): Unit = {
+    assume(
+      available,
+      "the native libraries and a compatible Arrow JVM are required"
+    )
+    val parent = Files.createDirectories(Paths.get("target"))
+    val root = Files.createTempDirectory(parent, "column-replace-relative-")
+    try {
+      val storage = StorageProperties.from(
+        Map(
+          StorageProperties.StorageType -> StorageProperties.StorageTypeLocal,
+          StorageProperties.RootPath -> root.toString
+        )
+      )
+      val prefix = if (carriesRoot) s"$root/" else ""
+      body(Place(storage, prefix, name => prefix + name, storage))
+    } finally {
+      val paths = Files.walk(root)
+      try paths.sorted(Comparator.reverseOrder[Path]()).forEach(Files.delete(_))
+      finally paths.close()
+    }
+  }
+
+  Seq(true, false).foreach { carriesRoot =>
+    test(
+      s"concurrent writes under a relative fs.root_path give the address to one operation (keys carry the root: $carriesRoot)"
+    ) {
+      localUnderRelativeRoot(carriesRoot)(runConcurrentClaims)
+    }
+  }
+
+  test(
+    "a large receipt is created under a relative fs.root_path at a key that carries the root"
+  ) {
+    localUnderRelativeRoot(carriesRoot = true)(runLargeReceipt)
   }
 
   test("a NULL in a required vector field and a wrong dimension are refused") {

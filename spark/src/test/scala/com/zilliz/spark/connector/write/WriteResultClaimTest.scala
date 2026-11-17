@@ -357,6 +357,26 @@ class WriteResultClaimTest extends AnyFunSuite with Matchers {
   }
 
   test(
+    "a relative local address synchronizes the directory its key names, with or without the root"
+  ) {
+    val storage = StorageProperties.from(
+      Map(
+        StorageProperties.StorageType -> StorageProperties.StorageTypeLocal,
+        StorageProperties.RootPath -> "files"
+      )
+    )
+    Seq("files/results/run", "results/run").foreach { path =>
+      withClue(s"path=$path: ") {
+        WriteResultLocation
+          .resolve(path, storage)
+          .recordProperties(1L)(
+            StorageProperties.LocalDurabilityRoot
+          ) shouldBe "files/results/run"
+      }
+    }
+  }
+
+  test(
     "publishing the same complete receipt again preserves its stored bytes"
   ) {
     val store = new MemoryStore

@@ -125,23 +125,21 @@ final case class WriteResultLocation(
     * partial object and the backend decides a conditional create in that one
     * request. The CRT transport would stream every upload as a multipart upload
     * instead. Local records synchronize directories up to the write result
-    * address, not up to the root of its namespace.
+    * address, not up to the root of its namespace; the address is the directory
+    * that the store itself resolves the key to, whether or not the key carries
+    * `fs.root_path`.
     */
   private[write] def recordProperties(size: Long): Map[String, String] =
-    if (
-      properties
-        .get(StorageProperties.StorageType)
-        .exists(_.equalsIgnoreCase(StorageProperties.StorageTypeLocal))
-    )
-      properties + (StorageProperties.LocalDurabilityRoot -> Paths
-        .get(properties.getOrElse(StorageProperties.RootPath, ""), key)
-        .toString)
-    else
-      properties ++ Map(
-        StorageProperties.S3UseCrt -> "false",
-        StorageProperties.MultiPartUploadSize ->
-          WriteResultLocation.singleRequestPartSize(size).toString
-      )
+    NativeObjectStore.localPath(properties, key) match {
+      case Some(directory) =>
+        properties + (StorageProperties.LocalDurabilityRoot -> directory)
+      case None =>
+        properties ++ Map(
+          StorageProperties.S3UseCrt -> "false",
+          StorageProperties.MultiPartUploadSize ->
+            WriteResultLocation.singleRequestPartSize(size).toString
+        )
+    }
 }
 
 object WriteResultLocation {

@@ -1,5 +1,7 @@
 package com.zilliz.milvus.storage.io
 
+import java.nio.file.Paths
+
 import com.zilliz.milvus.jni.storage.NativeStorageLibrary
 import com.zilliz.milvus.storage.credential.StorageProperties
 import io.milvus.storage.{MilvusStorageFileSystem, MilvusStorageProperties}
@@ -25,10 +27,7 @@ final class NativeObjectStore private (
     * backend answers.
     */
   private def down(key: String): String =
-    if (rootPath.isEmpty) key
-    else if (key == rootPath) ""
-    else if (key.startsWith(rootPath + "/")) key.substring(rootPath.length + 1)
-    else key
+    NativeObjectStore.belowRoot(rootPath, key)
 
   private def up(key: String): String =
     if (rootPath.isEmpty || key.startsWith(rootPath)) key
@@ -86,30 +85,62 @@ final class NativeObjectStore private (
 
 object NativeObjectStore {
 
+  /** The filesystem path that `key` names when `properties` describe local
+    * storage, by the rule every store operation applies: a key that carries
+    * `fs.root_path` and one written below it name the same path. Object storage
+    * has no filesystem path.
+    */
+  def localPath(
+      properties: Map[String, String],
+      key: String
+  ): Option[String] =
+    if (!isLocal(properties)) None
+    else
+      Some(
+        Paths
+          .get(
+            properties
+              .get(StorageProperties.RootPath)
+              .map(_.trim)
+              .getOrElse(""),
+            belowRoot(localRootPath(properties), key)
+          )
+          .toString
+      )
+
+  private def isLocal(properties: Map[String, String]): Boolean =
+    properties
+      .get(StorageProperties.StorageType)
+      .map(_.trim)
+      .contains(StorageProperties.StorageTypeLocal)
+
+  /** What the local backend roots at, and what a key built from `fs.root_path`
+    * therefore repeats; empty for every backend the C layer roots at the
+    * bucket.
+    */
+  private def localRootPath(properties: Map[String, String]): String =
+    if (isLocal(properties))
+      properties
+        .get(StorageProperties.RootPath)
+        .map(_.trim.stripSuffix("/"))
+        .filter(_.nonEmpty)
+        .getOrElse("")
+    else ""
+
+  /** The key the C filesystem takes for `key` when it is rooted at `rootPath`:
+    * only a whole leading root segment is taken off.
+    */
+  private def belowRoot(rootPath: String, key: String): String =
+    if (rootPath.isEmpty) key
+    else if (key == rootPath) ""
+    else if (key.startsWith(rootPath + "/")) key.substring(rootPath.length + 1)
+    else key
+
   /** Carries the `fs.*` map, not a handle, so it survives the trip to an
     * executor.
     */
   final case class Factory(properties: Map[String, String])
       extends ObjectStoreFactory {
-
-    /** What the local backend roots at, and what a key built from
-      * `fs.root_path` therefore repeats; empty for every backend the C layer
-      * roots at the bucket.
-      */
-    private def isLocal: Boolean =
-      properties
-        .get(StorageProperties.StorageType)
-        .map(_.trim)
-        .contains(StorageProperties.StorageTypeLocal)
-
-    private def localRootPath: String =
-      if (isLocal)
-        properties
-          .get(StorageProperties.RootPath)
-          .map(_.trim.stripSuffix("/"))
-          .filter(_.nonEmpty)
-          .getOrElse("")
-      else ""
 
     override def open(path: String): NativeObjectStore = {
       NativeStorageLibrary.load()
@@ -121,8 +152,8 @@ object NativeObjectStore {
         new NativeObjectStore(
           filesystem,
           nativeProperties,
-          localRootPath,
-          isLocal
+          localRootPath(properties),
+          isLocal(properties)
         )
       } catch {
         case failure: Throwable =>

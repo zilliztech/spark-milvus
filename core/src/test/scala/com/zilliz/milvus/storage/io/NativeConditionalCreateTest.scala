@@ -1,7 +1,7 @@
 package com.zilliz.milvus.storage.io
 
 import java.nio.charset.StandardCharsets
-import java.nio.file.{Files, Path}
+import java.nio.file.{Files, Path, Paths}
 import java.util.concurrent.{Callable, CountDownLatch, Executors, TimeUnit}
 
 import org.scalatest.funsuite.AnyFunSuite
@@ -44,6 +44,26 @@ class NativeConditionalCreateTest
     )
     try body(store)
     finally store.close()
+  }
+
+  test(
+    "a created key lands at the path localPath names, with or without root"
+  ) {
+    withWritableStore { store =>
+      val properties =
+        Map("fs.storage_type" -> "local", "fs.root_path" -> root.toString)
+      Seq(s"$root/named/with-root.json", "named/without-root.json").foreach {
+        key =>
+          withClue(s"key=$key: ") {
+            val payload = key.getBytes(StandardCharsets.UTF_8)
+            store.create(key, payload)
+            NativeObjectStore
+              .localPath(properties, key)
+              .map(path => Files.readAllBytes(Paths.get(path)).toSeq) shouldBe
+              Some(payload.toSeq)
+          }
+      }
+    }
   }
 
   test("conditional creation keeps the original payload and native conflict") {
