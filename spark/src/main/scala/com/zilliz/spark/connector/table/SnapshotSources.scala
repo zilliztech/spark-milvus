@@ -32,7 +32,6 @@ object SnapshotSources {
     MilvusOption.validateSnapshotModeOptions(milvusOption.options)
     val selectedPartitions =
       MilvusOption.selectedPartitionIds(milvusOption.options)
-    val selectedSegments = MilvusOption.selectedSegmentIds(milvusOption.options)
     val source = OptionParsing
       .value(milvusOption.options, MilvusOption.SnapshotPath)
       .map(_.trim)
@@ -40,7 +39,7 @@ object SnapshotSources {
       case Some(path) => catalogSource(milvusOption, path)
       case None       => new OptionStringsSnapshotSource(milvusOption)
     }
-    if (withSegments) narrowed(source, selectedPartitions, selectedSegments)
+    if (withSegments) narrowed(source, selectedPartitions)
     else source
   }
 
@@ -86,14 +85,13 @@ object SnapshotSources {
 
   private[connector] def narrowed(
       source: SnapshotSource,
-      partitionIds: Seq[Long],
-      segmentIds: Seq[Long]
+      partitionIds: Seq[Long]
   ): SnapshotSource =
     SnapshotSource(
       source
         .snapshot()
         .fold(throw _, identity)
-        .narrow(partitionIds, segmentIds)
+        .narrow(partitionIds)
     )
 
   /** Builds one snapshot while owning one driver-side store. The store closes

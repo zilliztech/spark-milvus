@@ -114,7 +114,7 @@ selection options do not choose the write's rows or fields:
 | Options rejected by the writer | Reason |
 |---|---|
 | `milvus.read.mode`, `milvus.read.include_row_id` | These configure the source read. The DataFrame must already contain `_milvus_row_id`. |
-| `milvus.partitions`, `milvus.segments` | The write must cover every stored row of the Snapshot. |
+| `milvus.partitions` | The write must cover every stored row of the Snapshot. |
 | `fieldIDs`, `milvus.extra.columns` | Select the replacement columns in the DataFrame before writing. |
 | `milvus.snapshot.manifests`, `milvus.snapshot.schema.bytes`, `milvus.snapshot.schema.json` | A write requires the original Snapshot file, not an explicit empty Snapshot. |
 

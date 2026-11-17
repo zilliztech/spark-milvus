@@ -3,8 +3,9 @@ package com.zilliz.spark.connector
 /** Fixed V3 snapshots exposed as read-only Spark tables. `MilvusTables`
   * validates DataSource input, resolves one Snapshot and derives its schema;
   * `SnapshotSources` reads either a snapshot file or complete V3 metadata.
-  * Stores close after metadata is materialized. Partition and segment selectors
-  * narrow the resolved snapshot. `MilvusTable` advertises BATCH_READ only.
+  * Stores close after metadata is materialized. Partition selection retains all
+  * data segments in the selected partitions and applicable delete sources.
+  * `MilvusTable` advertises BATCH_READ only.
   *
   * Nonempty inputs require a complete Milvus snapshot file, including its
   * segment Avro records for identity and L0 validation. Explicit schema options

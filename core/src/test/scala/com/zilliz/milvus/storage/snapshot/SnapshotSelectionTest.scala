@@ -5,20 +5,21 @@ import org.scalatest.matchers.should.Matchers
 
 class SnapshotSelectionTest extends AnyFunSuite with Matchers {
   test(
-    "selection returns input positions without confusing repeated ids across partitions"
+    "selection returns every input position in the selected partition and global deletes"
   ) {
     val selected = SnapshotSelection.select(
       "fixed",
       Seq(20L, 21L),
       Seq(
-        SnapshotSelection.Segment(30L, 20L, hasData = true),
-        SnapshotSelection.Segment(30L, 21L, hasData = true),
-        SnapshotSelection.Segment(50L, -1L, hasData = false)
+        SnapshotSelection.Segment(20L, hasData = true),
+        SnapshotSelection.Segment(21L, hasData = true),
+        SnapshotSelection.Segment(-1L, hasData = false),
+        SnapshotSelection.Segment(21L, hasData = true),
+        SnapshotSelection.Segment(20L, hasData = false)
       ),
-      Seq(21L),
-      Seq(30L)
+      Seq(21L)
     )
-    selected.segmentPositions shouldBe Set(1, 2)
+    selected.segmentPositions shouldBe Set(1, 2, 3)
     selected.partitionIds shouldBe Seq(21L)
   }
 
@@ -28,8 +29,7 @@ class SnapshotSelectionTest extends AnyFunSuite with Matchers {
     val selected = SnapshotSelection.select(
       "fixed",
       Seq(20L, 21L),
-      Seq(SnapshotSelection.Segment(30L, 20L, hasData = true)),
-      Seq.empty,
+      Seq(SnapshotSelection.Segment(20L, hasData = true)),
       Seq.empty
     )
     selected.segmentPositions shouldBe Set(0)

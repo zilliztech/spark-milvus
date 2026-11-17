@@ -16,7 +16,6 @@ case class MilvusOption(
 object MilvusOption {
   // Constants for map keys
   val MilvusPartitions = "milvus.partitions"
-  val MilvusSegments = "milvus.segments"
   val ReadBatchMaxRows = "milvus.read.batch.max.rows"
   val ReadBatchMaxBytes = "milvus.read.batch.max.bytes"
   val ReadArrowMaxBytes = "milvus.read.arrow.max.bytes"
@@ -367,15 +366,6 @@ object MilvusOption {
       options: CaseInsensitiveStringMap
   ): Seq[Long] =
     selectedIdsFrom(key => Option(options.get(key)), MilvusPartitions)
-
-  def selectedSegmentIds(options: Map[String, String]): Seq[Long] =
-    selectedIdsFrom(
-      key => OptionParsing.value(options, key),
-      MilvusSegments
-    )
-
-  def selectedSegmentIds(options: CaseInsensitiveStringMap): Seq[Long] =
-    selectedIdsFrom(key => Option(options.get(key)), MilvusSegments)
 
   def readerFieldIds(options: Map[String, String]): Seq[Long] =
     selectedIdsFrom(

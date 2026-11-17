@@ -218,27 +218,23 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
     }
   }
 
-  test("partition and segment selectors parse strict distinct ids") {
+  test("partition selectors parse strict distinct ids") {
     MilvusOption.selectedPartitionIds(
       Map(MilvusOption.MilvusPartitions -> "20, 21,20")
     ) shouldBe Seq(20L, 21L)
-    MilvusOption.selectedSegmentIds(
-      Map(MilvusOption.MilvusSegments -> "30,31")
-    ) shouldBe Seq(30L, 31L)
-
     Seq(
-      MilvusOption.MilvusPartitions -> "20,,21",
-      MilvusOption.MilvusPartitions -> "   ",
-      MilvusOption.MilvusSegments -> "",
-      MilvusOption.MilvusSegments -> "30,nope",
-      MilvusOption.MilvusSegments -> "30,-1"
-    ).foreach { case (key, value) =>
+      "20,,21",
+      "   ",
+      "",
+      "20,nope",
+      "20,-1"
+    ).foreach { value =>
       val error = intercept[IllegalArgumentException] {
-        if (key == MilvusOption.MilvusPartitions)
-          MilvusOption.selectedPartitionIds(Map(key -> value))
-        else MilvusOption.selectedSegmentIds(Map(key -> value))
+        MilvusOption.selectedPartitionIds(
+          Map(MilvusOption.MilvusPartitions -> value)
+        )
       }
-      error.getMessage should include(key)
+      error.getMessage should include(MilvusOption.MilvusPartitions)
       if (value.trim.isEmpty) error.getMessage should include("empty")
       else error.getMessage should include(value)
     }

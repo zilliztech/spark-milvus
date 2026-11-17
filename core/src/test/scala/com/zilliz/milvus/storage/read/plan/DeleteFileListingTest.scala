@@ -217,8 +217,10 @@ class DeleteFileListingTest extends AnyFunSuite with Matchers {
       keys(listed, 30L) shouldBe Set("delete-40", "delete-41")
       keys(listed, 31L) shouldBe Set("delete-41")
       keys(listed, 32L) shouldBe Set("delete-42")
-      val narrowed = snapshot.narrow(Seq.empty, Seq(30L))
+      val narrowed = snapshot.narrow(Seq(20L))
+      narrowed.dataSegments.map(_.id) shouldBe Seq(30L, 32L)
       keys(list(narrowed), 30L) shouldBe Set("delete-40", "delete-41")
+      keys(list(narrowed), 32L) shouldBe Set("delete-42")
       val pruned = snapshot.retainDataSegments(Set(30L))
       keys(list(pruned), 30L) shouldBe Set("delete-40", "delete-41")
       ReadPlan

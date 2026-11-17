@@ -267,11 +267,10 @@ most applications; use these options when you need additional control.
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `milvus.partitions` | all partitions | Comma-separated nonnegative partition IDs, such as `10,11`. Every requested ID must exist. |
-| `milvus.segments` | all data segments | Comma-separated nonnegative data-segment IDs. Every requested ID must exist. If `milvus.partitions` is also set, every requested segment must belong to those partitions; a segment outside them fails planning. Applicable delete-only segments are retained automatically. |
 | `fieldIDs` | all collection fields | Comma-separated nonnegative field IDs. Each ID must exist in the snapshot schema, including its system fields. This limits the initial schema; Spark `select` can narrow it further. An explicit `.schema()` must select exactly these IDs with matching names and Spark types. |
 | `milvus.extra.columns` | none | Comma-separated metadata names: `_segment_id`, `_row_offset`, `_timestamp`. For example, `_segment_id,_row_offset`. See [Output schema](#output-schema). Request `_milvus_row_id` through `milvus.read.include_row_id` instead. |
 
-Partition, segment and field-ID lists reject blanks, empty entries, negative
+Partition and field-ID lists reject blanks, empty entries, negative
 IDs and non-numeric values. Repeated IDs are ignored, preserving their
 first-seen order. Metadata-column lists also ignore repeats; a blank value
 requests no extra columns.
@@ -363,8 +362,9 @@ The output schema for `milvus` format depends on the Milvus collection schema an
   stored position, and a [column replacement](column-replacement.md) consumes
   it. Callers carry it unchanged and do not interpret its fields.
 
-The connector does not expose a `partition` metadata column. Partition and
-segment selection uses `milvus.partitions` and `milvus.segments`.
+The connector does not expose a `partition` metadata column. Use
+`milvus.partitions` to select partitions; a scan includes every data segment in
+the selected partitions and retains applicable delete-only segments.
 
 ## Supported data types
 

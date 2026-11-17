@@ -242,21 +242,16 @@ class V3ReadContractTest extends AnyFunSuite with BeforeAndAfterAll {
             ((3000L until 3008L) ++ (3100L until 3108L))
         )
         val expectedAll = if (applies) liveIds else (liveIds :+ 3002L).sorted
-        val expectedSegment = (3000L until 3008L)
-          .filterNot(id => applies && id == 3002L)
         Seq(true, false).foreach { columnar =>
           val readOptions =
             options + ("milvus.read.columnar" -> columnar.toString)
           assert(ids(read(readOptions)) == expectedAll)
-          // Both restrictions exclude the L0 source itself. Its applicable
-          // deletes must already have been attached to the retained data task.
+          // Partition selection must retain every data segment in partition 20
+          // and any applicable collection-wide L0 deletes.
           val narrowed = read(
-            readOptions ++ Map(
-              "milvus.partitions" -> "20",
-              "milvus.segments" -> "30"
-            )
+            readOptions + ("milvus.partitions" -> "20")
           )
-          assert(ids(narrowed) == expectedSegment)
+          assert(ids(narrowed) == expectedAll)
 
         }
       }
@@ -277,8 +272,7 @@ class V3ReadContractTest extends AnyFunSuite with BeforeAndAfterAll {
         MilvusOption.SnapshotManifests -> json
           .get("storagev2_manifest_list")
           .toString,
-        "milvus.partitions" -> "20",
-        "milvus.segments" -> "30"
+        "milvus.partitions" -> "20"
       )
       failsReadPlanning(explicit, MilvusOption.SnapshotPath)
     }
@@ -300,10 +294,7 @@ class V3ReadContractTest extends AnyFunSuite with BeforeAndAfterAll {
       // Keep the Avro container header and schema, but omit its manifest record.
       writer.create(schema, l0Manifest.toFile)
       writer.close()
-      val narrowed = options ++ Map(
-        "milvus.partitions" -> "20",
-        "milvus.segments" -> "30"
-      )
+      val narrowed = options + ("milvus.partitions" -> "20")
       failsReadPlanning(
         narrowed,
         "files/insert_log/10/-1/41",
@@ -331,7 +322,7 @@ class V3ReadContractTest extends AnyFunSuite with BeforeAndAfterAll {
       // Segment 30 has no local delete for PK 3002. Losing the L0 role must
       // fail before selection could discard that delete source as data.
       failsReadPlanning(
-        options ++ Map("milvus.partitions" -> "20", "milvus.segments" -> "30"),
+        options + ("milvus.partitions" -> "20"),
         "41",
         "snapshot segment Avro"
       )
