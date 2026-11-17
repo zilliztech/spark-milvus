@@ -3,7 +3,6 @@ package com.zilliz.spark.connector.read
 import scala.jdk.CollectionConverters._
 
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -52,10 +51,6 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
     )
   )
 
-  private val options = MilvusOption(
-    new CaseInsensitiveStringMap(new java.util.HashMap[String, String]())
-  )
-
   private def task(
       layout: SegmentLayout,
       deletes: DeleteSource = DeleteSource.None
@@ -71,8 +66,7 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
   private def v3(deletes: DeleteSource = DeleteSource.None) =
     ColumnBinding(
       MilvusInputPartition(
-        task(SegmentLayout.Manifest("files/seg"), deletes),
-        options.milvusFilter
+        task(SegmentLayout.Manifest("files/seg"), deletes)
       ),
       dataSchema
     )
@@ -122,8 +116,7 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
     val v3Binding = ColumnBinding(
       MilvusInputPartition(
         task(SegmentLayout.Manifest("files/seg"), deletes)
-          .copy(schemaBytes = schema.toByteArray),
-        options.milvusFilter
+          .copy(schemaBytes = schema.toByteArray)
       ),
       wanted
     )
@@ -152,7 +145,7 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
       neededFieldIds = Seq(407L)
     )
     val v3Binding = ColumnBinding(
-      MilvusInputPartition(v3Task, options.milvusFilter),
+      MilvusInputPartition(v3Task),
       outputSchema
     )
 
@@ -179,7 +172,7 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
       neededFieldIds = Seq(101L)
     )
     val binding = ColumnBinding(
-      MilvusInputPartition(projectedTask, options.milvusFilter),
+      MilvusInputPartition(projectedTask),
       StructType(Seq(StructField("id", LongType)))
     )
 
@@ -189,8 +182,7 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
   test("the V3 timestamp metadata column reads stored field id 1") {
     val binding = ColumnBinding(
       MilvusInputPartition(
-        task(SegmentLayout.Manifest("files/seg")),
-        options.milvusFilter
+        task(SegmentLayout.Manifest("files/seg"))
       ),
       StructType(
         Seq(
@@ -217,8 +209,7 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
         task(
           SegmentLayout.Manifest("files/seg"),
           DeleteSource.Materialized(plan)
-        ),
-        options.milvusFilter
+        )
       ),
       narrow
     )
@@ -227,8 +218,7 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
 
     val without = ColumnBinding(
       MilvusInputPartition(
-        task(SegmentLayout.Manifest("files/seg")),
-        options.milvusFilter
+        task(SegmentLayout.Manifest("files/seg"))
       ),
       narrow
     )
@@ -239,8 +229,7 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
   test("column binding is chosen by the task layout") {
     ColumnBinding(
       MilvusInputPartition(
-        task(SegmentLayout.Manifest("files/seg")),
-        options.milvusFilter
+        task(SegmentLayout.Manifest("files/seg"))
       ),
       dataSchema
     ) shouldBe a[V3ColumnBinding]

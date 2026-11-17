@@ -147,7 +147,6 @@ class MilvusPartitionReaderFactory(
           requestedExtraColumns = requestedExtraColumns,
           snapshotId = snapshotId,
           pushedExpression = pushedExpression,
-          milvusFilter = p.milvusFilter,
           columnNameFor = setup.columnNameFor,
           taskAllocatorOwner = Some(taskAllocator)
         )
@@ -188,7 +187,6 @@ class MilvusPartitionReaderFactory(
           schema = dataSchema,
           setup = setup,
           pushedExpression = pushedExpression,
-          milvusFilter = p.milvusFilter,
           allocator = taskAllocator.allocator,
           taskAllocatorOwner = Some(taskAllocator)
         )

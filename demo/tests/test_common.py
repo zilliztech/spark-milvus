@@ -89,7 +89,7 @@ class DemoCommonTest(unittest.TestCase):
                 demo.parse_args("read", arguments)
 
     def test_unknown_options_are_rejected(self):
-        for key in ("unexpected", "milvus.read.unknown", "spark.option", "milvus.search.params"):
+        for key in ("unexpected", "milvus.read.unknown", "spark.option", "milvus.search.params", "milvus.filter"):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 demo.read_options(self.file({"milvus.snapshot.path": "snapshot.json", key: "value"}))
         with self.assertRaises(ValueError):

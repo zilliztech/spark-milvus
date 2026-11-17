@@ -106,7 +106,6 @@ private[connector] object ColumnReplaceTables {
   private val ReadOnlyOptions = Seq(
     MilvusOption.MilvusPartitions,
     MilvusOption.MilvusSegments,
-    MilvusOption.MilvusFilter,
     MilvusOption.MilvusExtraColumns,
     MilvusOption.ReadMode,
     MilvusOption.ReadIncludeRowId,

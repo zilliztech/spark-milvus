@@ -15,12 +15,7 @@ import org.apache.spark.sql.connector.read.{
 import org.apache.spark.sql.types.{StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-import com.zilliz.milvus.storage.expr.{
-  And,
-  FilterEvaluator,
-  FilterExpr,
-  PredicateExpr
-}
+import com.zilliz.milvus.storage.expr.{And, PredicateExpr}
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.snapshot.Snapshot
 import com.zilliz.spark.connector.expr.SparkPredicateTranslator
@@ -51,31 +46,8 @@ class MilvusScanBuilder(
   private var currentOptions = options
   private val milvusOption = MilvusOption(options)
   private val extraColumns = milvusOption.extraColumns
-  private val milvusFilter: Option[FilterExpr] = milvusOption.milvusFilter
-  private val milvusFilterFieldIds: Set[Long] = milvusFilter
-    .map { expression =>
-      try FilterEvaluator.validate(expression, snapshot.schema.fields)
-      catch {
-        case error: IllegalArgumentException =>
-          throw new IllegalArgumentException(
-            s"Option '${MilvusOption.MilvusFilter}' is invalid: ${error.getMessage}",
-            error
-          )
-      }
-      val fieldsByName = snapshot.schema.fields
-        .map(field => field.name -> field)
-        .toMap
-      expression.fields.map(name => fieldsByName(name).fieldID)
-    }
-    .getOrElse(Set.empty)
   private val configuredReaderFieldIds =
     MilvusOption.readerFieldIds(options)
-  private val scanFieldIds = schema.fields.iterator
-    .filter(_.metadata.contains(FieldMetadata.MilvusFieldIdMetadataKey))
-    .map(_.metadata.getLong(FieldMetadata.MilvusFieldIdMetadataKey))
-    .toSeq
-  private val filterNeedsHiddenFields =
-    !milvusFilterFieldIds.subsetOf(scanFieldIds.toSet)
 
   private var pushedPredicateArray: Array[Predicate] = Array.empty[Predicate]
   private var pushedExpression: Option[PredicateExpr] = None
@@ -183,13 +155,8 @@ class MilvusScanBuilder(
         if (configuredReaderFieldIds.nonEmpty) Some(configuredReaderFieldIds)
         else None
       )
-      .orElse(
-        if (filterNeedsHiddenFields) Some(scanFieldIds)
-        else None
-      )
     baseFieldIds.foreach { projected =>
-      val selected = (projected ++ predicateFieldIds.toSeq.sorted ++
-        milvusFilterFieldIds.toSeq.sorted).distinct
+      val selected = (projected ++ predicateFieldIds.toSeq.sorted).distinct
       val neededFieldIds =
         if (selected.nonEmpty) selected
         else emptyProjectionFallbackId.toSeq

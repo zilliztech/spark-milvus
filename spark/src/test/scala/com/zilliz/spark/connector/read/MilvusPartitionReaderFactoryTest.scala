@@ -10,7 +10,6 @@ import java.nio.charset.StandardCharsets
 import scala.jdk.CollectionConverters._
 
 import org.apache.spark.sql.types.{LongType, StructField, StructType}
-import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 
 import com.zilliz.milvus.storage.expr.{FieldRef, IsNotNull, PredicateExpr}
@@ -110,10 +109,6 @@ class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
 
   private val schema = StructType(Seq(StructField("id", LongType)))
 
-  private val options = MilvusOption(
-    new CaseInsensitiveStringMap(new java.util.HashMap[String, String]())
-  )
-
   private def task(layout: SegmentLayout) = SegmentReadTask(
     segmentId = 30L,
     partitionId = 20L,
@@ -122,11 +117,8 @@ class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
     properties = Map("fs.storage_type" -> "local")
   )
 
-  private def v3(milvusOption: MilvusOption = options) =
-    MilvusInputPartition(
-      task(SegmentLayout.Manifest("files/seg")),
-      milvusOption.milvusFilter
-    )
+  private def v3() =
+    MilvusInputPartition(task(SegmentLayout.Manifest("files/seg")))
 
   private def factory(
       columnar: Boolean,

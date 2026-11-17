@@ -7,7 +7,7 @@ import java.util.Set;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 
-/** Project selected fields and demonstrate Spark and Milvus scalar predicates. */
+/** Project selected fields and filter rows with Spark predicates. */
 public final class FilterProject {
     public static void main(String[] args) throws Exception {
         try (DemoSupport demo = DemoSupport.open(args, "FilterProject", true, true)) {
@@ -27,23 +27,11 @@ public final class FilterProject {
             List<Row> missingRows = demo.boundedRows(missing);
             missing.show(20, false);
 
-            // A Milvus scalar expression can also be bound to the snapshot read.
-            // Its result still respects snapshot deletes and later Spark predicates.
-            String nativeFilter = demo.options.getOrDefault("milvus.filter", "category == 1");
-            Dataset<Row> filteredRead = demo.spark.read().format("milvus")
-                .options(demo.options)
-                .option("milvus.filter", nativeFilter)
-                .load()
-                .select("id", "category");
-            List<Row> filteredRows = demo.boundedRows(filteredRead);
-            filteredRead.orderBy("id").show(20, false);
-
             if (demo.fixture) {
                 Set<Long> wanted = Set.of(3003L, 3004L, 3005L, 3006L, 3007L, 3101L, 3103L, 3107L);
                 if (demo.where == null) {
                     DemoSupport.require(ids(rows).equals(wanted), "Spark predicate returned unexpected IDs");
                 }
-                DemoSupport.require(ids(filteredRows).equals(wanted), "Milvus filter returned unexpected IDs");
                 DemoSupport.require(ids(missingRows).equals(Set.of(3001L)), "NULL category row differs");
             }
             System.out.println("Demo passed: FilterProject");

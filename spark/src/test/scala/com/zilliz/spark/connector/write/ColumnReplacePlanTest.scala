@@ -6,8 +6,10 @@ import java.io.{
   ObjectInputStream,
   ObjectOutputStream
 }
+import scala.jdk.CollectionConverters._
 
 import org.apache.spark.sql.types.{LongType, StructField, StructType}
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -24,6 +26,7 @@ import com.zilliz.milvus.storage.snapshot.{
   SnapshotOrigin
 }
 import com.zilliz.milvus.storage.write.ColumnGroupFiles
+import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.types.{RowIdentity, SparkTypes}
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
@@ -100,6 +103,22 @@ class ColumnReplacePlanTest extends AnyFunSuite with Matchers {
     intercept[IllegalArgumentException](
       ColumnReplaceTables.resolveTargets(frame, at)
     ).getMessage
+
+  // Rejected where every read and write parses its options, before the
+  // snapshot is resolved.
+  test("a column replacement that sets the removed milvus.filter fails") {
+    val options = new CaseInsensitiveStringMap(
+      Map(
+        MilvusOption.WriteOperation -> MilvusOption.WriteOperationReplaceColumns,
+        MilvusOption.SnapshotPath -> "snapshot.json",
+        "path" -> "result",
+        "milvus.filter" -> "id == 1"
+      ).asJava
+    )
+    intercept[IllegalArgumentException](
+      ColumnReplaceTables.plan(options, input(column("score")))
+    ).getMessage should include("'milvus.filter' was removed")
+  }
 
   test("the replaced columns carry their field ids and nullability") {
     val resolved =

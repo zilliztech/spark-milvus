@@ -47,12 +47,12 @@ Follow the import grouping and ordering in `.scalafmt.conf`.
 For example:
 
 ```scala
-import com.zilliz.milvus.storage.expr.PlanParser
+import com.zilliz.milvus.storage.expr.PredicateExpr
 
-filter.foreach(PlanParser.parse)
+pushedExpression.map(PredicateExpr.fieldIds)
 ```
 
-Do not write `filter.foreach(com.zilliz.milvus.storage.expr.PlanParser.parse)`.
+Do not write `pushedExpression.map(com.zilliz.milvus.storage.expr.PredicateExpr.fieldIds)`.
 Package declarations, imports and class-name strings required by reflection or
 configuration still use the complete package name.
 

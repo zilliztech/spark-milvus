@@ -9,7 +9,7 @@ import org.apache.spark.sql.types.StructType
 
 import com.zilliz.milvus.storage.expr.{
   ExclusionBitmap,
-  FilterExpr,
+  PredicateEvaluator,
   PredicateExpr
 }
 import com.zilliz.milvus.storage.read.exec.{ReadMetrics, SegmentReader}
@@ -21,10 +21,10 @@ import com.zilliz.spark.connector.types.{ArrowAllocator, ArrowConverter}
   * columns are named and which the query needs, and that is the
   * `ColumnBinding`'s; the loop here does not know which line it reads.
   *
-  * The loop pulls a batch, evaluates table filters once, hands out its rows one
-  * by one, skips excluded rows, closes the batch and pulls the next. The
-  * `SegmentReader` opened by the binding owns the EOF row-count contract, so
-  * row and columnar consumers cannot disagree about a short read.
+  * The loop pulls a batch, evaluates the pushed predicate once, hands out its
+  * rows one by one, skips excluded rows, closes the batch and pulls the next.
+  * The `SegmentReader` opened by the binding owns the EOF row-count contract,
+  * so row and columnar consumers cannot disagree about a short read.
   */
 class MilvusRowPartitionReader(
     schema: StructType,
@@ -32,8 +32,7 @@ class MilvusRowPartitionReader(
     pushedExpression: Option[PredicateExpr] = None,
     allocator: BufferAllocator = ArrowAllocator.get,
     taskAllocatorOwner: Option[AutoCloseable] = None,
-    private[read] val preopenedSegmentReader: Option[SegmentReader] = None,
-    milvusFilter: Option[FilterExpr] = None
+    private[read] val preopenedSegmentReader: Option[SegmentReader] = None
 ) extends RowOffsetReader
     with Logging {
 
@@ -76,13 +75,9 @@ class MilvusRowPartitionReader(
     currentFilterBitmap =
       if (currentBatch == null) null
       else
-        BatchExclusions
-          .of(
-            currentBatch,
-            milvusFilter,
-            pushedExpression,
-            setup.arrowColumnFor,
-            setup.columnNameFor
+        pushedExpression
+          .map(
+            PredicateEvaluator.evaluate(_, currentBatch, setup.columnNameFor)
           )
           .orNull
   }

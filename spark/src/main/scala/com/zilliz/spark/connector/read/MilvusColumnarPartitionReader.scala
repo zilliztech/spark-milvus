@@ -18,7 +18,7 @@ import org.apache.spark.sql.vectorized.{
 
 import com.zilliz.milvus.storage.expr.{
   ExclusionBitmap,
-  FilterExpr,
+  PredicateEvaluator,
   PredicateExpr
 }
 import com.zilliz.milvus.storage.read.exec.{ReadMetrics, SegmentReader}
@@ -60,8 +60,7 @@ class MilvusColumnarPartitionReader(
     snapshotId: Long = 0L,
     pushedExpression: Option[PredicateExpr] = None,
     columnNameFor: Long => Option[String] = (_: Long) => None,
-    taskAllocatorOwner: Option[AutoCloseable] = None,
-    milvusFilter: Option[FilterExpr] = None
+    taskAllocatorOwner: Option[AutoCloseable] = None
 ) extends PartitionReader[ColumnarBatch]
     with Logging {
 
@@ -137,14 +136,8 @@ class MilvusColumnarPartitionReader(
     val startOffset = rowsSeen
     rowsSeen += root.getRowCount.toLong
 
-    val filterBitmap = BatchExclusions
-      .of(
-        root,
-        milvusFilter,
-        pushedExpression,
-        arrowColumnFor,
-        columnNameFor
-      )
+    val filterBitmap = pushedExpression
+      .map(PredicateEvaluator.evaluate(_, root, columnNameFor))
       .orNull
     val surviving = survivingRows(root, filterBitmap)
     val columns =

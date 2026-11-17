@@ -248,7 +248,6 @@ most applications; use these options when you need additional control.
 | `milvus.partitions` | all partitions | Comma-separated nonnegative partition IDs, such as `10,11`. Every requested ID must exist. |
 | `milvus.segments` | all data segments | Comma-separated nonnegative data-segment IDs. Every requested ID must exist. If `milvus.partitions` is also set, every requested segment must belong to those partitions; a segment outside them fails planning. Applicable delete-only segments are retained automatically. |
 | `fieldIDs` | all collection fields | Comma-separated nonnegative field IDs. Each ID must exist in the snapshot schema, including its system fields. This limits the initial schema; Spark `select` can narrow it further. An explicit `.schema()` must select exactly these IDs with matching names and Spark types. |
-| `milvus.filter` | no filter | Scalar expression such as `category == 1 and rating >= 2.0`. See [Milvus scalar filter](#milvus-scalar-filter) for the supported syntax. It combines with Spark filters and delete filtering before a row limit is applied. |
 | `milvus.extra.columns` | none | Comma-separated metadata names: `_segment_id`, `_row_offset`, `_timestamp`. For example, `_segment_id,_row_offset`. See [Output schema](#output-schema). Request `_milvus_row_id` through `milvus.read.include_row_id` instead. |
 
 Partition, segment and field-ID lists reject blanks, empty entries, negative
@@ -301,29 +300,10 @@ Spark. A predicate-only column is read internally without being added to the
 result schema. The DataSource V1 Filter API is not
 supported.
 
-#### Milvus scalar filter
-
-An ordinary table read can use the same scalar Milvus expression subset:
-
-```scala
-spark.read
-  .format("milvus")
-  .options(snapshotOptions)
-  .option("milvus.filter", "category == 1 and rating >= 2.0")
-  .load()
-```
-
-Supported fields are Bool, integer, Float, Double, String, VarChar, and Text.
-The syntax includes `==`, `!=`, `<`, `<=`, `>`, `>=`, `IN`, `NOT IN`,
-`IS NULL`, `IS NOT NULL`, `AND`, `OR`, and `NOT`; Bool comparisons are limited
-to `==` and `!=`. Filter-only fields are read
-internally but do not enter the result schema. When a Spark `where` condition
-is also pushed, both conditions must pass; deletes are then applied and Limit
-counts only surviving rows. A blank or malformed expression, an unknown field,
-or an incompatible literal fails planning instead of being ignored.
-
-JSON paths, Array predicates, and `json_contains`
-are not in the current scalar subset.
+Spark predicates are the only filter on field values. Setting the removed
+`milvus.filter` option fails planning instead of returning unfiltered rows;
+write the condition with `where`, for example
+`.where("category = 1 AND rating >= 2.0")`.
 
 ### 2.4 Column replacement and receipts
 
