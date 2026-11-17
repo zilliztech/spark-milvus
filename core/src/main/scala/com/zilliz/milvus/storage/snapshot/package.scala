@@ -16,9 +16,11 @@ package com.zilliz.milvus.storage
   * and the collection schema version are kept, so that a row identity can be
   * bound to its snapshot and a write can report the schema it was based on.
   *
-  * SnapshotSelection validates partition and segment selections from neutral
-  * identity descriptors; external format adapters share the same selection
-  * rules. PhysicalColumnGroups carries already-resolved files and column names
-  * for consumers of the low-level reader, without compatibility interpretation.
+  * SnapshotSelection validates partition selections from neutral segment
+  * descriptors, retaining every segment in the selected partitions and the
+  * collection-wide delete sources. Snapshot.retainDataSegments separately
+  * applies optimizer pruning while preserving applicable delete sources.
+  * PhysicalColumnGroups carries already-resolved files and column names for
+  * consumers of the low-level reader, without compatibility interpretation.
   */
 package object snapshot

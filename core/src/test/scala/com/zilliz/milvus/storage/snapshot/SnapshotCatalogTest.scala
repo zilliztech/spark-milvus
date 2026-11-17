@@ -307,7 +307,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
       assert(snapshot.deleteOnlySegments.map(_.id) == Seq(41L))
       assert(snapshot.deleteOnlySegments.head.partitionId == -1L)
       assert(snapshot.dataSegments.head.channelName == "channel-a")
-      val narrowed = snapshot.narrow(Seq.empty, Seq(30L))
+      val narrowed = snapshot.narrow(Seq(20L))
       assert(narrowed.segments.map(_.id) == Seq(30L, 41L))
       assert(
         snapshot.retainDataSegments(Set(30L)).segments.map(_.id) == Seq(
@@ -431,7 +431,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
           42L -> 21L
         )
       )
-      val narrowed = snapshot.narrow(Seq(21L), Seq(30L))
+      val narrowed = snapshot.narrow(Seq(21L))
       assert(narrowed.segments.map(_.id) == Seq(30L, 41L, 42L))
       val deletes = DeleteFileListing
         .of(narrowed, true, "", store)

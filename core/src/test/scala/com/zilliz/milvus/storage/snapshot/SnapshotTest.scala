@@ -32,17 +32,14 @@ class SnapshotTest extends AnyFunSuite with Matchers {
   )
 
   test("multi-value partition selection preserves snapshot order") {
-    val selected = snapshot.narrow(Seq(21L, 20L), Seq.empty)
+    val selected = snapshot.narrow(Seq(21L, 20L, 21L))
 
     selected.partitionIds shouldBe Seq(20L, 21L)
     selected.segments shouldBe snapshot.segments
   }
 
-  test("segment selection preserves snapshot order and partitions") {
-    val selected = snapshot.narrow(Seq.empty, Seq(31L, 40L))
-
-    selected.partitionIds shouldBe Seq(20L, 21L)
-    selected.segments shouldBe Seq(data20b, data21)
+  test("an empty partition selection preserves the snapshot") {
+    snapshot.narrow(Seq.empty) shouldBe snapshot
   }
 
   test("optimizer segment retention keeps the selected segments") {
@@ -56,23 +53,32 @@ class SnapshotTest extends AnyFunSuite with Matchers {
     none.segments shouldBe empty
   }
 
-  test("partition and segment selectors intersect") {
-    val selected = snapshot.narrow(Seq(20L), Seq(31L))
+  test("partition selection retains every segment within the partition") {
+    val selected = snapshot.narrow(Seq(20L))
 
     selected.partitionIds shouldBe Seq(20L)
-    selected.segments shouldBe Seq(data20b)
+    selected.segments shouldBe Seq(data20a, data20b)
   }
 
-  test("unknown partition and segment ids fail planning") {
+  test("partition selection retains partition and collection-wide deletes") {
+    val deletes20 = data(50L, 20L).copy(isDeleteOnly = true)
+    val deletes21 = data(51L, 21L).copy(isDeleteOnly = true)
+    val deletesAll = data(52L, -1L).copy(isDeleteOnly = true)
+    val withDeletes = snapshot.copy(segments =
+      Seq(data20a, deletes20, data21, deletes21, deletesAll, data20b)
+    )
+
+    val selected = withDeletes.narrow(Seq(20L))
+
+    selected.partitionIds shouldBe Seq(20L)
+    selected.segments shouldBe Seq(data20a, deletes20, deletesAll, data20b)
+  }
+
+  test("unknown partition ids fail planning") {
     val partitionError = intercept[IllegalArgumentException] {
-      snapshot.narrow(Seq(99L), Seq.empty)
+      snapshot.narrow(Seq(20L, 99L))
     }
     partitionError.getMessage should include("99")
-
-    val segmentError = intercept[IllegalArgumentException] {
-      snapshot.narrow(Seq(20L), Seq(40L))
-    }
-    segmentError.getMessage should include("40")
-    segmentError.getMessage should include("20")
+    partitionError.getMessage should include("fixed")
   }
 }

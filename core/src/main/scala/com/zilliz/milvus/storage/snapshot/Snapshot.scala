@@ -79,26 +79,21 @@ final case class Snapshot(
     copy(partitionIds = orderedPartitions, segments = retainedSegments)
   }
 
-  /** The selected partitions and/or data segments. Selection preserves snapshot
-    * order. Every requested id must exist after the other selector is applied;
-    * an accidental empty read is therefore a planning error. Selecting data
-    * segments also retains the delete-only segments of their partitions,
+  /** All segments in the selected partitions, in snapshot order. Every
+    * requested partition must exist; an accidental empty read is therefore a
+    * planning error. Collection-wide delete-only segments are also retained
     * because those deletes still apply.
     */
-  def narrow(
-      selectedPartitionIds: Seq[Long],
-      selectedSegmentIds: Seq[Long]
-  ): Snapshot = {
-    if (selectedPartitionIds.isEmpty && selectedSegmentIds.isEmpty) return this
+  def narrow(selectedPartitionIds: Seq[Long]): Snapshot = {
+    if (selectedPartitionIds.isEmpty) return this
     val selected = SnapshotSelection.select(
       name,
       partitionIds,
       segments.map(segment =>
         SnapshotSelection
-          .Segment(segment.id, segment.partitionId, segment.hasData)
+          .Segment(segment.partitionId, segment.hasData)
       ),
-      selectedPartitionIds,
-      selectedSegmentIds
+      selectedPartitionIds
     )
     copy(
       partitionIds = selected.partitionIds,
@@ -108,10 +103,6 @@ final case class Snapshot(
       }
     )
   }
-
-  /** Single-id compatibility entry point. */
-  def narrow(partitionId: Option[Long], segmentId: Option[Long]): Snapshot =
-    narrow(partitionId.toSeq, segmentId.toSeq)
 }
 
 /** Which entry point produced a `Snapshot`; for errors and logs. */
