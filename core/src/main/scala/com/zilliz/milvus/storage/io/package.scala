@@ -4,16 +4,20 @@ package com.zilliz.milvus.storage
   * NativeObjectStore owns the upstream MilvusStorageFileSystem and its
   * MilvusStorageProperties until close, and offers readAll, readAt, size, list,
   * exists and a scoped low-level filesystem operation. WritableObjectStore adds
-  * file output and cleanup through the same session; NativeWritableObjectStore
-  * borrows its existing filesystem. File writes create parent directories only
-  * for the local backend; remote object writes do not request bucket or
-  * directory creation. Explicit createDir retains the upstream filesystem
-  * semantics, except in object-storage mode, which
-  * NativeWritableObjectStore.open selects for every backend but the local one:
-  * object storage has no directories, and the native recursive create starts
-  * with a bucket check (S3 HeadBucket), which a role scoped to a key prefix
-  * cannot run. Every operation still requires an open store. The upstream
-  * binding owns JNI and library loading. It is a wrapper, not an
+  * file output, conditional creation and cleanup through the same session;
+  * NativeWritableObjectStore borrows its existing filesystem. Conditional
+  * creation delegates to the native writer and succeeds only after its close
+  * completes. Existing objects and unsupported conditional writes fail without
+  * an existence-check fallback; native failures retain their type and details.
+  * The local backend's conditional exclusion is limited to one process. File
+  * writes create parent directories only for the local backend; remote object
+  * writes do not request bucket or directory creation. Explicit createDir
+  * retains the upstream filesystem semantics, except in object-storage mode,
+  * which NativeWritableObjectStore.open selects for every backend but the local
+  * one: object storage has no directories, and the native recursive create
+  * starts with a bucket check (S3 HeadBucket), which a role scoped to a key
+  * prefix cannot run. Every operation still requires an open store. The
+  * upstream binding owns JNI and library loading. It is a wrapper, not an
   * implementation: the seven cloud backends, their credential providers and the
   * filesystem itself all live in the C layer.
   *

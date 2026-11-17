@@ -28,7 +28,7 @@ class MilvusNativeDependencies(ConanFile):
         "arrow/*:with_snappy": True,
         "arrow/*:with_lz4": True,
         "aws-sdk-cpp/*:config": True,
-        "aws-sdk-cpp/*:s3-crt": False,
+        "aws-sdk-cpp/*:s3-crt": True,
         "aws-sdk-cpp/*:text-to-speech": False,
         "aws-sdk-cpp/*:transfer": False,
         "boost/*:without_test": True,

@@ -23,6 +23,11 @@ class StorageSourceGraphTest(unittest.TestCase):
             source = Path(directory)
             corrosion = source / "corrosion"
             corrosion.mkdir()
+            sdk = source / "sdk" / "aws" / "s3-crt"
+            sdk.mkdir(parents=True)
+            sdk_header = sdk / "S3CrtClient.h"
+            original_header = "class S3CrtClient {\n  struct aws_s3_client* m_s3CrtClient = {};\n};\n"
+            sdk_header.write_text(original_header)
             (source / "dummy.cpp").write_text("int storage_graph_fixture;\n")
             (corrosion / "CMakeLists.txt").write_text("""
 function(corrosion_import_crate)
@@ -47,6 +52,7 @@ project(storage_source_graph LANGUAGES CXX)
 # validation belongs to the real native build, which resolves Conan packages.
 foreach(target IN ITEMS Boost::boost arrow::arrow milvus-common::milvus-common
     protobuf::protobuf nlohmann_json::nlohmann_json AWS::aws-sdk-cpp-identity-management
+    AWS::aws-c-io AWS::aws-c-http AWS::aws-c-s3 AWS::aws-sdk-cpp-s3-crt
     google-cloud-cpp::storage avro-cpp::avrocpp_s Folly::folly fmt::fmt
     azure-sdk-for-cpp::azure-sdk-for-cpp glog::glog CURL::libcurl
     prometheus-cpp::core opentelemetry-cpp::opentelemetry_proto)
@@ -59,13 +65,16 @@ function(find_package name)
 endfunction()
 set(known_packages Boost fmt folly glog prometheus-cpp Arrow Azure Protobuf
     nlohmann_json opentelemetry-cpp google-cloud-cpp CURL AWSSDK milvus-common
-    libavrocpp avro-cpp JNI)
+    aws-c-io aws-c-http aws-c-s3 libavrocpp avro-cpp JNI)
+set(AWSSDK_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/sdk")
 include("${STORAGE_ADAPTER}")
 milvus_add_storage()
 foreach(target IN ITEMS milvus-storage prsbridge milvus-storage-jni)
   get_target_property(sources ${target} SOURCES)
   file(WRITE "${CMAKE_BINARY_DIR}/${target}.sources" "${sources}")
 endforeach()
+get_target_property(providers milvus-storage LINK_LIBRARIES)
+file(WRITE "${CMAKE_BINARY_DIR}/providers" "${providers}")
 get_property(features GLOBAL PROPERTY STORAGE_RUST_FEATURES)
 get_property(locked GLOBAL PROPERTY STORAGE_CARGO_LOCKED)
 get_property(bridges GLOBAL PROPERTY STORAGE_BRIDGE_FILES)
@@ -74,12 +83,14 @@ file(WRITE "${CMAKE_BINARY_DIR}/locked" "${locked}")
 file(WRITE "${CMAKE_BINARY_DIR}/bridges" "${bridges}")
 """)
             build = source / "build"
-            result = subprocess.run([
+            command = [
                 "cmake", "-S", str(source), "-B", str(build),
                 "-DSTORAGE_ADAPTER=" + str(repository / "native/build/cmake/Storage.cmake"),
                 "-DMILVUS_STORAGE_SOURCE_DIR=" + str(storage),
                 "-DFETCHCONTENT_SOURCE_DIR_CORROSION=" + str(corrosion),
-            ], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+            ]
+            result = subprocess.run(command, text=True, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, timeout=60)
             self.assertEqual(result.returncode, 0, result.stdout)
 
             def selected_sources(target):
@@ -89,6 +100,7 @@ file(WRITE "${CMAKE_BINARY_DIR}/bridges" "${bridges}")
             cpp_sources = selected_sources("milvus-storage")
             self.assertIn("cpp/src/filesystem/talon/talon_file_system_producer.cpp", cpp_sources)
             self.assertIn("cpp/src/filesystem/talon/talon_file_system.cpp", cpp_sources)
+            self.assertIn("cpp/src/filesystem/s3/native_s3_transport.cpp", cpp_sources)
             credential_sources = {path.relative_to(storage).as_posix()
                                   for path in storage.rglob("TencentCloudOIDCAssumeRoleChainProvider.cpp")}
             self.assertTrue(credential_sources, "Pinned storage must contain the Tencent role-chain provider")
@@ -102,6 +114,18 @@ file(WRITE "${CMAKE_BINARY_DIR}/bridges" "${bridges}")
             self.assertEqual((build / "locked").read_text(), "TRUE")
             self.assertEqual(set((build / "bridges").read_text().split(";")),
                              {"lib.rs", "talon/talon_bridge.rs"})
+            providers = set((build / "providers").read_text().split(";"))
+            self.assertTrue({"AWS::aws-c-io", "AWS::aws-c-http", "AWS::aws-c-s3",
+                             "AWS::aws-sdk-cpp-s3-crt"} <= providers)
+            self.assertEqual(sdk_header.read_text(), original_header)
+            overlay = build / "sdk-extension/aws/s3-crt/S3CrtClient.h"
+            self.assertIn("GetUnderlyingS3Client() const noexcept", overlay.read_text())
+            # Refuse an SDK whose layout no longer matches the reviewed extension.
+            sdk_header.write_text("class S3CrtClient {};\n")
+            result = subprocess.run(command, text=True, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, timeout=60)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("Unsupported S3CrtClient header", result.stdout)
 
 
 if __name__ == "__main__":

@@ -469,24 +469,23 @@ final class ColumnReplaceBatchWrite(
   override def createBatchWriterFactory(
       info: PhysicalWriteInfo
   ): DataWriterFactory = {
-    WriteResultRecords.claim(plan.result, operationId)
-    claimed = true
     createdAt = Instant.now().toString
+    val context = SparkSession.active.sparkContext
+    WriteResultRecords.writeOperation(
+      plan.result,
+      operationId,
+      MilvusOption.WriteOperationReplaceColumns,
+      createdAt,
+      context.applicationId,
+      plan.snapshot,
+      plan.targets,
+      plan.segments.size
+    )
+    claimed = true
     // Spark aborts a write only after the factory exists, so a failure from
     // here on records itself: the address is claimed and must say why it has
     // no result.
     try {
-      val context = SparkSession.active.sparkContext
-      WriteResultRecords.writeOperation(
-        plan.result,
-        operationId,
-        MilvusOption.WriteOperationReplaceColumns,
-        createdAt,
-        context.applicationId,
-        plan.snapshot,
-        plan.targets,
-        plan.segments.size
-      )
       val broadcast =
         context.broadcast(
           plan.segments.map(segment => segment.id -> segment).toMap
@@ -596,7 +595,7 @@ final class ColumnReplaceBatchWrite(
           if (outcomes.isEmpty)
             "write" -> "the job failed before any segment manifest was committed"
           else if (recorded.forall(_.state == SegmentState.Committed))
-            "publish" -> "every segment manifest committed, but the receipt was not published"
+            "publish" -> "every segment manifest committed, but receipt publication could not be confirmed"
           else "commit" -> "some segment manifests did not commit"
         WriteResultRecords.writeFailure(
           plan.result,

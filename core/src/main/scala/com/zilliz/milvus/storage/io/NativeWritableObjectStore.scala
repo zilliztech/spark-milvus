@@ -1,5 +1,8 @@
 package com.zilliz.milvus.storage.io
 
+import com.zilliz.milvus.storage.write.WriterResources
+import io.milvus.storage.MilvusStorageFileSystem
+
 /** Adds business writes to an existing native session. This adapter owns the
   * supplied store; closing either view ends the shared session.
   *
@@ -29,12 +32,30 @@ final class NativeWritableObjectStore(
 
   override def write(key: String, data: Array[Byte]): Unit =
     store.withFileSystem(key) { (filesystem, target) =>
-      // Local files need parents; object storage has none to create.
-      val parent = target.lastIndexOf('/')
-      if (store.local && !objectStorage && parent > 0)
-        filesystem.createDir(target.substring(0, parent), true)
+      createParent(filesystem, target)
       filesystem.writeFile(target, data)
     }
+
+  override def create(key: String, data: Array[Byte]): Unit =
+    store.withFileSystem(key) { (filesystem, target) =>
+      require(data != null, "data must not be null")
+      createParent(filesystem, target)
+      val writer = filesystem.openWriter(target, conditional = true)
+      WriterResources.closing(writer.close()) {
+        // The C writer rejects empty chunks; close still creates an empty file.
+        if (data.nonEmpty) writer.write(data)
+      }
+    }
+
+  private def createParent(
+      filesystem: MilvusStorageFileSystem,
+      target: String
+  ): Unit = {
+    // Local files need parents; object storage has none to create.
+    val parent = target.lastIndexOf('/')
+    if (store.local && !objectStorage && parent > 0)
+      filesystem.createDir(target.substring(0, parent), true)
+  }
 
   override def createDir(key: String, recursive: Boolean): Unit =
     store.withFileSystem(key)((filesystem, target) =>

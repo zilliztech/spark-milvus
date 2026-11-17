@@ -434,7 +434,7 @@ def build(args, repository, java_home, work, target, profile):
                     "dlopenEntries": [adapter.library_name("milvus-storage-jni"), adapter.library_name("milvus-storage")],
                     "parentProviders": {}, "componentTests": [],
                     "featureOptions": {"storage.jemalloc": False, "storage.fiu": False,
-                                       "storage.crt": False, "storage.talon": True,
+                                       "storage.crt": True, "storage.talon": True,
                                        "storage.rust.openssl.shared": True}, "jobs": args.jobs}
         overlay = extension.get("metadata", {})
         if set(overlay).intersection(metadata):
@@ -503,7 +503,7 @@ def build(args, repository, java_home, work, target, profile):
                           if (args.storage_source / ".git").exists()
                           else (storage / "cpp/conanfile.py").read_text())
         conan_os = adapter.conan_os
-        recipes = {"storage": (storage_recipe, {"with_crt": False, "with_ut": False, "with_benchmark": False})}
+        recipes = {"storage": (storage_recipe, {"with_ut": False, "with_benchmark": False})}
         recipes.update({component["name"]: (Path(component["recipe"]).read_text(), component["recipeOptions"])
                         for component in components})
         version_selection = validate_upstream_versions(constraints, recipes, conan_os=conan_os)

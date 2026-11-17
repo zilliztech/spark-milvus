@@ -11,8 +11,7 @@ import io.milvus.storage.{
 /** Records written column groups in a V3 segment's manifest: one transaction on
   * the latest revision by default, or an explicitly pinned revision for legacy
   * column replacement. Concurrent advancement fails instead of replacing a
-  * newer base. [[ManifestTransaction.createFirst]] uses the same conditional
-  * revision commit to claim an otherwise empty path exactly once.
+  * newer base.
   */
 object ManifestTransaction {
 
@@ -36,28 +35,6 @@ object ManifestTransaction {
       files: Seq[String],
       metadata: Map[String, String]
   )
-
-  /** Commits revision 1 of the manifest at `basePath`, holding only `stats`,
-    * and fails once any revision exists there. Revision files are created with
-    * the store's conditional write, so of concurrent callers exactly one
-    * succeeds; on a store without conditional writes the native layer falls
-    * back to an existence check, as for every other manifest commit.
-    *
-    * A failure does not say whether another caller won: inspect the path's
-    * latest revision to tell a lost race from an unreachable store.
-    */
-  def createFirst(
-      basePath: String,
-      properties: Map[String, String],
-      stats: Seq[Stat]
-  ): Long = {
-    require(stats.nonEmpty, "the first revision needs at least one statistic")
-    run(basePath, properties, readVersion = 0L) { transaction =>
-      stats.foreach { stat =>
-        transaction.updateStat(stat.key, stat.files.toArray, stat.metadata)
-      }
-    }
-  }
 
   /** @return the committed manifest version. */
   def commit(
@@ -129,8 +106,7 @@ object ManifestTransaction {
   /** One transaction from `readVersion` with the FAIL resolver: any revision
     * committed after `readVersion` rejects the commit instead of rebasing a
     * stale result onto it. Ordinary writes read latest; legacy column
-    * replacement pins the snapshot revision; [[createFirst]] reads the empty
-    * revision 0.
+    * replacement pins the snapshot revision.
     */
   private def run(
       basePath: String,

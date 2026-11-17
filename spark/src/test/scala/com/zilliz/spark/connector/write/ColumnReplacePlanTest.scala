@@ -333,7 +333,7 @@ class ColumnReplacePlanTest extends AnyFunSuite with Matchers {
       WriteResultLocation.resolve("s3://other/run/write-result", storage)
     remote.key shouldBe "run/write-result"
     remote.properties(StorageProperties.BucketName) shouldBe "other"
-    remote.claimBasePath shouldBe "run/write-result/_claim"
+    remote.operationKey shouldBe "run/write-result/_operation.json"
 
     val relative = WriteResultLocation.resolve("run/write-result", storage)
     relative.key shouldBe "run/write-result"
