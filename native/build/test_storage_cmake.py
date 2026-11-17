@@ -4,6 +4,7 @@ External packages and Corrosion are stand-ins; this checks the selected source
 graph and bridge inputs, not compilation or runtime authentication.
 """
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -126,6 +127,28 @@ file(WRITE "${CMAKE_BINARY_DIR}/bridges" "${bridges}")
                                     stderr=subprocess.STDOUT, timeout=60)
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertIn("Unsupported S3CrtClient header", result.stdout)
+
+
+    def test_header_extension_matches_the_pinned_upstream_extension(self):
+        # The adapter reimplements the extension instead of running upstream
+        # CMake; the anchor and the inserted declaration must stay identical.
+        repository = Path(__file__).resolve().parents[2]
+        upstream = repository / "milvus-storage/cpp/ExtendS3CrtClient.cmake"
+        if not upstream.is_file():
+            self.skipTest("Initialize milvus-storage to compare the pinned SDK extension")
+        adapter = repository / "native/build/cmake/Storage.cmake"
+
+        def extension(path):
+            text = path.read_text()
+            member = re.search(r'set\((?:storage_)?native_member "([^"\n]*)"\)', text)
+            replacement = re.search(
+                r'string\(REPLACE "\$\{(?:storage_)?native_member\}"\s*"([^"]*)"', text)
+            self.assertIsNotNone(member, path)
+            self.assertIsNotNone(replacement, path)
+            inserted = replacement.group(1).replace("${storage_native_member}", "${native_member}")
+            return member.group(1), inserted
+
+        self.assertEqual(extension(adapter), extension(upstream))
 
 
 if __name__ == "__main__":

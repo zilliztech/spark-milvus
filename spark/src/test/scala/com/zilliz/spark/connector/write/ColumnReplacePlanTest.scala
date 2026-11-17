@@ -8,6 +8,7 @@ import java.io.{
 }
 import scala.jdk.CollectionConverters._
 
+import com.fasterxml.jackson.core.JsonProcessingException
 import org.apache.spark.sql.types.{LongType, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
@@ -319,6 +320,27 @@ class ColumnReplacePlanTest extends AnyFunSuite with Matchers {
     intercept[IllegalArgumentException](
       WriteResultRecords.parseResult(other.toString)
     ).getMessage should include("not a write result record")
+  }
+
+  test("a receipt is read with the header rules that its recovery applies") {
+    val valid = WriteResultRecords.resultNode(receipt).toString
+    Seq(
+      valid.replace("\"format_version\":1", "\"format_version\":1.5") ->
+        "unsupported column write record version",
+      valid.replace("\"format_version\":1", "\"format_version\":1.0") ->
+        "unsupported column write record version",
+      valid.replace("\"operation_id\":\"op\"", "\"operation_id\":\"\"") ->
+        "nonempty operation id"
+    ).foreach { case (json, message) =>
+      withClue(s"receipt=${json.take(120)}: ") {
+        intercept[IllegalArgumentException](
+          WriteResultRecords.parseResult(json)
+        ).getMessage should include(message)
+      }
+    }
+    intercept[JsonProcessingException](
+      WriteResultRecords.parseResult(valid + " {}")
+    )
   }
 
   test("the rows of a published receipt can be shipped to executors") {

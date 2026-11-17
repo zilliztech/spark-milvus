@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.io.{FileInfo, WritableObjectStore}
 import io.milvus.storage.MilvusStorageException
 
@@ -132,6 +133,7 @@ class WriteResultClaimTest extends AnyFunSuite with Matchers {
     for (
       (kind, key) <- Seq(
         "operation" -> location.operationKey,
+        "legacy_claim_guard" -> location.legacyClaimKey,
         "result" -> location.resultKey
       )
     ) {
@@ -269,17 +271,109 @@ class WriteResultClaimTest extends AnyFunSuite with Matchers {
   ) {
     val store = new MemoryStore
     location.legacyClaimKey shouldBe "run/result/_claim/_metadata/manifest-1.avro"
-    // Any object reserves the old address; inspecting or migrating its Avro is unnecessary.
+    // Any object but a guard reserves the old address. Its bytes are read only
+    // to tell it from a guard; the Avro is never interpreted or migrated.
     store.seed(location.legacyClaimKey, "legacy claim bytes")
 
-    intercept[IllegalStateException] {
+    val failure = intercept[IllegalStateException] {
       createOperation(store, "owner")
     }
 
+    failure.getMessage should include("earlier connector version")
     store.lookups should contain(location.legacyClaimKey)
     store.creates shouldBe empty
-    store.reads shouldBe empty
+    store.reads.toSeq shouldBe Seq(location.legacyClaimKey)
     store.closed shouldBe false
+  }
+
+  test("a guard at the earlier claim key leaves the claim to its own record") {
+    val store = new MemoryStore
+    store.seed(location.operationKey, record("operation", "first").toString)
+    store.seed(
+      location.legacyClaimKey,
+      record("legacy_claim_guard", "first").toString
+    )
+
+    val failure = intercept[IllegalStateException] {
+      createOperation(store, "second")
+    }
+
+    failure.getMessage should include("already belongs to another column write")
+    failure.getMessage should not include "earlier connector version"
+    failure.getCause shouldBe a[FileAlreadyExistsException]
+  }
+
+  test("a guard is not created over a claim of the earlier protocol") {
+    val store = new MemoryStore
+    store.seed(location.legacyClaimKey, "legacy claim bytes")
+    val original = store.bytes(location.legacyClaimKey)
+
+    val failure = intercept[IllegalStateException] {
+      WriteResultRecords.createRecord(
+        location,
+        location.legacyClaimKey,
+        record("legacy_claim_guard", "owner"),
+        store
+      )
+    }
+
+    failure.getMessage should include("earlier connector version")
+    failure.getCause shouldBe a[FileAlreadyExistsException]
+    store.bytes(location.legacyClaimKey).toSeq shouldBe original.toSeq
+  }
+
+  test(
+    "records are uploaded by one request and synchronized in their address"
+  ) {
+    val mib = 1024L * 1024
+    WriteResultLocation.singleRequestPartSize(0L) shouldBe 10 * mib
+    WriteResultLocation.singleRequestPartSize(10 * mib - 1) shouldBe 10 * mib
+    WriteResultLocation.singleRequestPartSize(10 * mib) shouldBe 20 * mib
+    WriteResultLocation.singleRequestPartSize(
+      5120 * mib - 1
+    ) shouldBe 5120 * mib
+    intercept[IllegalArgumentException](
+      WriteResultLocation.singleRequestPartSize(5120 * mib)
+    ).getMessage should include("does not fit in one upload request")
+
+    val remote = WriteResultLocation(
+      "s3://bucket/run/result",
+      Map(
+        StorageProperties.StorageType -> "remote",
+        StorageProperties.BucketName -> "bucket"
+      ),
+      "run/result"
+    ).recordProperties(10 * mib)
+    remote(StorageProperties.S3UseCrt) shouldBe "false"
+    remote(StorageProperties.MultiPartUploadSize) shouldBe (20 * mib).toString
+    remote.get(StorageProperties.LocalDurabilityRoot) shouldBe None
+
+    val local = WriteResultLocation.resolve("/data/results/run1", Map.empty)
+    val synced = local.recordProperties(1L)
+    synced(StorageProperties.LocalDurabilityRoot) shouldBe "/data/results/run1"
+    synced.get(StorageProperties.S3UseCrt) shouldBe None
+    // Readers keep the namespace boundary and create no directory.
+    local.properties.get(StorageProperties.LocalDurabilityRoot) shouldBe None
+  }
+
+  test(
+    "a relative local address synchronizes the directory its key names, with or without the root"
+  ) {
+    val storage = StorageProperties.from(
+      Map(
+        StorageProperties.StorageType -> StorageProperties.StorageTypeLocal,
+        StorageProperties.RootPath -> "files"
+      )
+    )
+    Seq("files/results/run", "results/run").foreach { path =>
+      withClue(s"path=$path: ") {
+        WriteResultLocation
+          .resolve(path, storage)
+          .recordProperties(1L)(
+            StorageProperties.LocalDurabilityRoot
+          ) shouldBe "files/results/run"
+      }
+    }
   }
 
   test(
