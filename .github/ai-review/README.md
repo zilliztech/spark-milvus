@@ -14,8 +14,8 @@ arbitrary network endpoints. GitHub publication is performed by the program.
 
 ## Deployment
 
-1. Merge `.github/ai-review/`, `ai-review.yml`, `ai-review-tests.yml` and the
-   PR-Agent coordination change into the upstream default branch (`main`). A PR
+1. Merge `.github/ai-review/`, `ai-review.yml` and `ai-review-tests.yml`
+   into the upstream default branch (`main`). A PR
    into a release branch such as `3.0` alone does not deploy the default-branch
    program.
 2. Keep the existing `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` repository
@@ -23,15 +23,11 @@ arbitrary network endpoints. GitHub publication is performed by the program.
    chat-completions API with function tools and JSON output
    (`response_format: {"type": "json_object"}`). Secret values are never copied
    into the repository or artifacts.
-3. Set repository variable `ENABLE_AI_REVIEW=true`. PR-Agent then keeps its
-   description and labels while disabling automatic review and code suggestions.
+3. Set the repository variable `ENABLE_AI_REVIEW=true` to enable reviews.
 4. Use the **AI Review** workflow's manual PR-number input to validate a real
    open PR. Subsequent opens/pushes/reopens/ready events trigger automatically.
 
-To turn off the new reviewer, set `ENABLE_AI_REVIEW=false`; PR-Agent resumes its
-previous review behavior. No credential changes are required. The first
-deployment PR is reviewed by the existing process because this workflow always
-loads the already trusted default-branch implementation.
+To turn off reviews, set `ENABLE_AI_REVIEW=false`.
 
 ## Results and limitations
 
