@@ -11,6 +11,7 @@ import org.apache.arrow.vector.{
 }
 import org.apache.arrow.vector.types.pojo.Schema
 import org.apache.spark.sql.types._
+import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -24,6 +25,11 @@ import com.zilliz.milvus.storage.expr.{
 import com.zilliz.milvus.storage.expr.Literal.IntegerValue
 import com.zilliz.milvus.storage.read.exec.{ReadMetrics, SegmentReader}
 import com.zilliz.milvus.storage.schema.{FieldMetadata, SchemaMapper}
+import com.zilliz.spark.connector.metrics.{
+  ReadEndReason,
+  ReadOperationalMetrics,
+  ReadProgress
+}
 import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
@@ -211,7 +217,8 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
       rawVectors: Boolean = false,
       requestedExtraColumns: Set[String] = Set.empty,
       pushedExpression: Option[PredicateExpr] = None,
-      columnNameFor: Long => Option[String] = (_: Long) => None
+      columnNameFor: Long => Option[String] = (_: Long) => None,
+      progress: ReadProgress = new ReadProgress
   ) = new MilvusColumnarPartitionReader(
     schema,
     new FakeSegmentReader(roots.toList),
@@ -222,8 +229,68 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
     segmentId = 30L,
     requestedExtraColumns = requestedExtraColumns,
     pushedExpression = pushedExpression,
-    columnNameFor = columnNameFor
+    columnNameFor = columnNameFor,
+    progress = progress
   )
+
+  test(
+    "columnar operational metrics count exclusions once and output after the limit"
+  ) {
+    val allocator = new RootAllocator()
+    val progress = new ReadProgress
+    var deletionChecks = 0
+    val root = namedRoot(
+      allocator,
+      Seq(10L, 11L, 12L, 13L, 14L),
+      Seq.fill(5)(Seq(1f, 2f))
+    )
+    val base = reader(
+      Seq(root),
+      deleted = (_, row) => { deletionChecks += 1; row == 1 },
+      pushedExpression = Some(
+        Comparison(
+          FieldRef(100L, DataType.Int64),
+          ComparisonOperator.LessThanOrEqual,
+          IntegerValue(13L)
+        )
+      ),
+      columnNameFor = id => Some(if (id == 100L) "id" else id.toString),
+      progress = progress
+    )
+    val observed = new ObservedPartitionReader(
+      new LimitedBatchReader(base, 2, Some(progress)),
+      progress,
+      (batch: ColumnarBatch) => batch.numRows().toLong
+    )
+    try {
+      observed.next() shouldBe true
+      val batch = observed.get()
+      batch.numRows() shouldBe 2
+      batch.column(0).getLong(0) shouldBe 10L
+      batch.column(0).getLong(1) shouldBe 12L
+      observed.get() should be theSameInstanceAs batch
+      observed.next() shouldBe false
+      observed.next() shouldBe false
+      deletionChecks shouldBe 5
+      val values = observed
+        .currentMetricsValues()
+        .map(metric => metric.name() -> metric.value())
+        .toMap
+      values(ReadOperationalMetrics.DecodedRows) shouldBe 5L
+      values(ReadOperationalMetrics.DeletedRows) shouldBe 1L
+      values(ReadOperationalMetrics.FilteredRows) shouldBe 1L
+      values(ReadOperationalMetrics.EmittedRows) shouldBe 2L
+      values(ReadOperationalMetrics.CompletedSegments) shouldBe 1L
+      values(ReadOperationalMetrics.endName(ReadEndReason.Limit)) shouldBe 1L
+      values(
+        ReadOperationalMetrics.endName(ReadEndReason.Exhausted)
+      ) shouldBe 0L
+    } finally {
+      observed.close()
+      observed.close()
+      allocator.close()
+    }
+  }
 
   test("a batch with no deletes carries every row") {
     val allocator = new RootAllocator(Long.MaxValue)
@@ -633,6 +700,40 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
       fake.isClosed shouldBe true
       owner.closes shouldBe 1
     } finally allocator.close()
+  }
+
+  test(
+    "distinct cleanup failures are counted once and remain suppressed on the first"
+  ) {
+    val first = new IllegalStateException("segment close failed")
+    val second = new IllegalStateException("allocator close failed")
+    val progress = new ReadProgress
+    val fake = new FakeSegmentReader(Nil) {
+      override def close(): Unit = throw first
+    }
+    val owner = new AutoCloseable {
+      override def close(): Unit = throw second
+    }
+    val reader = new MilvusColumnarPartitionReader(
+      sparkSchema,
+      fake,
+      milvusSchema,
+      (_, _) => false,
+      identity,
+      rawVectors = false,
+      segmentId = 30L,
+      taskAllocatorOwner = Some(owner),
+      progress = progress
+    )
+    val caught = intercept[IllegalStateException](reader.close())
+    caught should be theSameInstanceAs first
+    caught.getSuppressed.toSeq should contain(second)
+    reader.close()
+    progress.values(ReadOperationalMetrics.CleanupFailures) shouldBe 2L
+    progress.values(ReadOperationalMetrics.CompletedSegments) shouldBe 0L
+    progress.values(
+      ReadOperationalMetrics.endName(ReadEndReason.Failed)
+    ) shouldBe 1L
   }
 
   test("a column the batch does not carry is an error, not a null column") {

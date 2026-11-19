@@ -8,7 +8,7 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.connector.expressions.{Expressions, NamedReference}
 import org.apache.spark.sql.connector.expressions.filter.Predicate
-import org.apache.spark.sql.connector.metric.CustomMetric
+import org.apache.spark.sql.connector.metric.{CustomMetric, CustomTaskMetric}
 import org.apache.spark.sql.connector.read.{
   Batch,
   InputPartition,
@@ -29,7 +29,11 @@ import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.snapshot.Snapshot
 import com.zilliz.milvus.storage.stats.{PrimaryKeyBloomPruner, PrimaryKeyFilter}
 import com.zilliz.spark.connector.expr.SparkPredicateTranslator
-import com.zilliz.spark.connector.metrics.ScanMetrics
+import com.zilliz.spark.connector.metrics.{
+  OperationalMetrics,
+  ReadOperationalMetrics,
+  ScanMetrics
+}
 import com.zilliz.spark.connector.options.{MilvusOption, StorageOptions}
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
@@ -90,6 +94,9 @@ class MilvusScan(
 
   override def supportedCustomMetrics(): Array[CustomMetric] =
     ScanMetrics.supported
+
+  override def reportDriverMetrics(): Array[CustomTaskMetric] =
+    ReadOperationalMetrics.planned(planInputPartitions().length.toLong)
 
   override def columnarSupportMode(): Scan.ColumnarSupportMode =
     // SUPPORTED makes Spark skip the reader factory's per-partition check.
@@ -303,21 +310,42 @@ class MilvusScan(
     plan.specs.map(task => MilvusInputPartition(task): InputPartition).toArray
   }
 
-  override def createReaderFactory(): PartitionReaderFactory =
-    new MilvusPartitionReaderFactory(
-      schema,
-      MilvusPartitionReaderFactory.readerOptions(options.asScala.toMap),
-      pushedExpression,
-      pushedLimit,
-      snapshotId =
-        if (milvusOption.extraColumns.contains(MilvusOption.MilvusRowIdColumn))
-          snapshot.id.getOrElse(
-            throw new IllegalStateException(
-              s"snapshot ${snapshot.name} has no id for '${MilvusOption.MilvusRowIdColumn}'"
-            )
+  override def createReaderFactory(): PartitionReaderFactory = {
+    // A Scan can be reused by another SQL execution. Capture its operation at
+    // execution preparation, rather than serializing a token from planning.
+    val operation = OperationalMetrics.begin("read")
+    try {
+      OperationalMetrics.phase(operation, "planning")
+      OperationalMetrics.set(
+        operation,
+        ReadOperationalMetrics.PlannedSegments,
+        planInputPartitions().length.toLong
+      )
+      OperationalMetrics.phase(operation, "reading")
+      new MilvusPartitionReaderFactory(
+        schema,
+        MilvusPartitionReaderFactory.readerOptions(options.asScala.toMap),
+        pushedExpression,
+        pushedLimit,
+        snapshotId =
+          if (
+            milvusOption.extraColumns.contains(MilvusOption.MilvusRowIdColumn)
           )
-        else 0L
-    )
+            snapshot.id.getOrElse(
+              throw new IllegalStateException(
+                s"snapshot ${snapshot.name} has no id for '${MilvusOption.MilvusRowIdColumn}'"
+              )
+            )
+          else 0L,
+        operationToken = Some(operation)
+      )
+    } catch {
+      case failure: Throwable =>
+        OperationalMetrics.failure(operation, "planning", "other")
+        OperationalMetrics.finish(operation, "failed")
+        throw failure
+    }
+  }
 }
 
 object MilvusScan extends Logging {

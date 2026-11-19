@@ -5,6 +5,8 @@ import org.apache.spark.sql.connector.metric.CustomTaskMetric
 import org.apache.spark.sql.connector.read.PartitionReader
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
+import com.zilliz.spark.connector.metrics.{ReadEndReason, ReadProgress}
+
 /** Stops a row reader after `limit` rows.
   *
   * A pushed-down limit is per partition: Spark keeps its own Limit on top and
@@ -18,22 +20,46 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
   */
 final class LimitedRowReader(
     underlying: PartitionReader[InternalRow],
-    limit: Int
+    limit: Int,
+    progress: Option[ReadProgress] = None
 ) extends PartitionReader[InternalRow] {
   require(limit >= 0, s"limit must not be negative, got $limit")
 
   private var delivered = 0
+  private var ready = false
+  private var current: InternalRow = null
+  private var closed = false
 
   override def next(): Boolean = {
-    if (delivered >= limit) return false
+    ready = false
+    current = null
+    if (closed) return false
+    if (delivered >= limit) {
+      progress.foreach(_.end(ReadEndReason.Limit))
+      return false
+    }
     val more = underlying.next()
-    if (more) delivered += 1
+    ready = more
+    if (more) {
+      delivered += 1
+      if (delivered == limit) progress.foreach(_.end(ReadEndReason.Limit))
+    }
     more
   }
 
-  override def get(): InternalRow = underlying.get()
+  override def get(): InternalRow = {
+    require(ready && !closed, "No current row; call next() before get()")
+    if (current == null) current = underlying.get()
+    current
+  }
 
-  override def close(): Unit = underlying.close()
+  override def close(): Unit = {
+    if (!closed) {
+      closed = true
+      current = null
+      underlying.close()
+    }
+  }
 
   override def currentMetricsValues(): Array[CustomTaskMetric] =
     underlying.currentMetricsValues()
@@ -47,26 +73,46 @@ final class LimitedRowReader(
   */
 final class LimitedBatchReader(
     underlying: PartitionReader[ColumnarBatch],
-    limit: Int
+    limit: Int,
+    progress: Option[ReadProgress] = None
 ) extends PartitionReader[ColumnarBatch] {
   require(limit >= 0, s"limit must not be negative, got $limit")
 
   private var remaining = limit
   private var current: ColumnarBatch = null
+  private var closed = false
 
   override def next(): Boolean = {
-    if (remaining <= 0) return false
+    current = null
+    if (closed) return false
+    if (remaining <= 0) {
+      progress.foreach(_.end(ReadEndReason.Limit))
+      return false
+    }
     if (!underlying.next()) return false
     current = underlying.get()
     val rows = current.numRows()
     if (rows > remaining) current.setNumRows(remaining)
     remaining -= current.numRows()
+    if (remaining == 0) progress.foreach(_.end(ReadEndReason.Limit))
     true
   }
 
-  override def get(): ColumnarBatch = current
+  override def get(): ColumnarBatch = {
+    require(
+      current != null && !closed,
+      "No current batch; call next() before get()"
+    )
+    current
+  }
 
-  override def close(): Unit = underlying.close()
+  override def close(): Unit = {
+    if (!closed) {
+      closed = true
+      current = null
+      underlying.close()
+    }
+  }
 
   override def currentMetricsValues(): Array[CustomTaskMetric] =
     underlying.currentMetricsValues()

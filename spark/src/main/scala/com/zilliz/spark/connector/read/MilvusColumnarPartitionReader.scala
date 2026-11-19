@@ -1,5 +1,7 @@
 package com.zilliz.spark.connector.read
 
+import scala.collection.mutable.ArrayBuilder
+
 import org.apache.arrow.vector.{VarBinaryVector, VectorSchemaRoot}
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.connector.metric.CustomTaskMetric
@@ -23,7 +25,12 @@ import com.zilliz.milvus.storage.expr.{
 }
 import com.zilliz.milvus.storage.read.exec.{ReadMetrics, SegmentReader}
 import com.zilliz.milvus.storage.schema.{FieldMetadata, MilvusTypes}
-import com.zilliz.spark.connector.metrics.ScanMetrics
+import com.zilliz.spark.connector.metrics.{
+  ReadEndReason,
+  ReadFailurePhase,
+  ReadProgress,
+  ScanMetrics
+}
 import com.zilliz.spark.connector.types.{
   MilvusSparseVectorColumn,
   MilvusVectorColumn,
@@ -60,7 +67,8 @@ class MilvusColumnarPartitionReader(
     snapshotId: Long = 0L,
     pushedExpression: Option[PredicateExpr] = None,
     columnNameFor: Long => Option[String] = (_: Long) => None,
-    taskAllocatorOwner: Option[AutoCloseable] = None
+    taskAllocatorOwner: Option[AutoCloseable] = None,
+    private[read] val progress: ReadProgress = new ReadProgress
 ) extends PartitionReader[ColumnarBatch]
     with Logging {
 
@@ -73,19 +81,32 @@ class MilvusColumnarPartitionReader(
   private var ownedSegmentReader: SegmentReader = segmentReader
   private var allocatorOwner: AutoCloseable = taskAllocatorOwner.orNull
   private var finalMetrics: ReadMetrics = ReadMetrics.Zero
+  private var closed = false
+  private var exhausted = false
 
   override def next(): Boolean = {
-    closeCurrent()
-    ownedSegmentReader.next() match {
-      case None => false
+    if (closed || exhausted) return false
+    progress.inPhase(ReadFailurePhase.Close)(closeCurrent())
+    progress.inPhase(ReadFailurePhase.Read)(ownedSegmentReader.next()) match {
+      case None =>
+        exhausted = true
+        progress.end(ReadEndReason.Exhausted)
+        false
       case Some(root) =>
         current = root
-        batch = toBatch(root)
+        progress.decodedRows(root.getRowCount.toLong)
+        batch = progress.inPhase(ReadFailurePhase.Convert)(toBatch(root))
         true
     }
   }
 
-  override def get(): ColumnarBatch = batch
+  override def get(): ColumnarBatch = {
+    require(
+      batch != null && !closed,
+      "No current batch; call next() before get()"
+    )
+    batch
+  }
 
   // Nothing here becomes an InternalRow: a batch with deletes is delivered
   // through SelectedRowsColumn, which maps row positions and copies nothing.
@@ -94,52 +115,74 @@ class MilvusColumnarPartitionReader(
       if (ownedSegmentReader != null) ownedSegmentReader.metrics
       else finalMetrics,
       rowsMaterialized = 0L
-    )
+    ) ++ progress.taskValues
 
   override def close(): Unit = {
-    closeCurrent()
+    if (closed) return
+    closed = true
+    try progress.inPhase(ReadFailurePhase.Close)(releaseAll())
+    finally progress.close()
+  }
+
+  private def releaseAll(): Unit = {
+    var failure: Throwable = null
+    def closeResource(action: => Unit): Unit =
+      try action
+      catch {
+        case next: Throwable =>
+          progress.failed(ReadFailurePhase.Close, next)
+          if (failure == null) failure = next
+          else if (failure ne next) failure.addSuppressed(next)
+      }
+    closeResource(closeCurrent())
     if (ownedSegmentReader != null) {
       val owned = ownedSegmentReader
       ownedSegmentReader = null
-      try owned.close()
-      catch {
-        case e: Throwable => logWarning("closing segment reader failed", e)
-      }
-      try finalMetrics = owned.metrics
-      catch { case e: Throwable => logWarning("read final metrics failed", e) }
+      closeResource(owned.close())
+      closeResource { finalMetrics = owned.metrics }
     }
     if (allocatorOwner != null) {
       val owned = allocatorOwner
-      try {
-        owned.close()
-        allocatorOwner = null
-      } catch {
-        case e: Throwable => logWarning("closing task allocator failed", e)
-      }
+      allocatorOwner = null
+      closeResource(owned.close())
     }
+    if (failure != null) throw failure
   }
 
   private def closeCurrent(): Unit = {
-    if (batch != null) {
-      try batch.close()
-      catch { case e: Throwable => logWarning("closing the batch failed", e) }
-      batch = null
+    val ownedBatch = batch
+    val ownedRoot = current
+    batch = null
+    current = null
+    var failure: Throwable = null
+    try if (ownedBatch != null) ownedBatch.close()
+    catch {
+      case error: Throwable =>
+        progress.failed(ReadFailurePhase.Close, error)
+        failure = error
     }
-    if (current != null) {
-      try current.close()
-      catch { case e: Throwable => logWarning("closing the root failed", e) }
-      current = null
+    try if (ownedRoot != null) ownedRoot.close()
+    catch {
+      case error: Throwable =>
+        progress.failed(ReadFailurePhase.Close, error)
+        if (failure == null) failure = error
+        else if (failure ne error) failure.addSuppressed(error)
     }
+    if (failure != null) throw failure
   }
 
   private def toBatch(root: VectorSchemaRoot): ColumnarBatch = {
     val startOffset = rowsSeen
     rowsSeen += root.getRowCount.toLong
 
-    val filterBitmap = pushedExpression
-      .map(PredicateEvaluator.evaluate(_, root, columnNameFor))
-      .orNull
-    val surviving = survivingRows(root, filterBitmap)
+    val filterBitmap = progress.inPhase(ReadFailurePhase.Filter) {
+      pushedExpression
+        .map(PredicateEvaluator.evaluate(_, root, columnNameFor))
+        .orNull
+    }
+    val surviving = progress.inPhase(ReadFailurePhase.Filter)(
+      survivingRows(root, filterBitmap)
+    )
     val columns =
       schema.fields.map(field => columnFor(root, field, startOffset))
     if (surviving == null) {
@@ -163,31 +206,35 @@ class MilvusColumnarPartitionReader(
       filterBitmap: ExclusionBitmap
   ): Array[Int] = {
     val rows = root.getRowCount
-    var anyExcluded = false
+    var keep: ArrayBuilder[Int] = null
+    var deletedCount = 0L
+    var filteredCount = 0L
     var i = 0
-    while (i < rows && !anyExcluded) {
-      if (isExcluded(root, i, filterBitmap)) anyExcluded = true
-      i += 1
+    try {
+      while (i < rows) {
+        val excluded = if (deleted(root, i)) {
+          deletedCount += 1L
+          true
+        } else if (filterBitmap != null && filterBitmap.isExcluded(i)) {
+          filteredCount += 1L
+          true
+        } else false
+        if (excluded && keep == null) {
+          keep = Array.newBuilder[Int]
+          keep.sizeHint(rows)
+          var earlier = 0
+          while (earlier < i) {
+            keep += earlier
+            earlier += 1
+          }
+        } else if (!excluded && keep != null) keep += i
+        i += 1
+      }
+    } finally {
+      progress.excludedRows(deletedCount, filteredCount)
     }
-    if (!anyExcluded) return null
-
-    val keep = Array.newBuilder[Int]
-    keep.sizeHint(rows)
-    var j = 0
-    while (j < rows) {
-      if (!isExcluded(root, j, filterBitmap)) keep += j
-      j += 1
-    }
-    keep.result()
+    if (keep == null) null else keep.result()
   }
-
-  private def isExcluded(
-      root: VectorSchemaRoot,
-      row: Int,
-      filterBitmap: ExclusionBitmap
-  ): Boolean =
-    deleted(root, row) ||
-      (filterBitmap != null && filterBitmap.isExcluded(row))
 
   private def columnFor(
       root: VectorSchemaRoot,

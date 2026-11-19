@@ -20,6 +20,16 @@ package com.zilliz.spark.connector
   * occupied, and a claim also creates a guard record at that protocol's claim
   * key so that connectors using it reject the address in turn.
   *
+  * Operational metrics distinguish rows accepted by a task attempt, complete
+  * files adopted by Spark, confirmed segment manifest revisions and a confirmed
+  * published receipt. The driver owns durable-result accounting and reports
+  * partial and unknown commits without treating task output as a committed
+  * replacement. Task counters describe attempt work, including retries, and
+  * failure reporting preserves the original write exception. Profile-specific
+  * `DriverMeasuredWrite` exposes driver write metrics to Spark 4 SQL execution;
+  * Spark 3.5 exposes those outcomes through the optional operational metrics
+  * plugin because its write interface has no callback.
+  *
   * Nothing here appends rows, calls a Milvus service, registers a revision or
   * creates a snapshot; callers own job registration and online visibility.
   */

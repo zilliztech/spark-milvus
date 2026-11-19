@@ -66,6 +66,12 @@ segment yielding fewer rows than its declared count fails the task.
 
 ### 1.2 Metrics
 
+Scans and column replacements report operational progress, failures and
+confirmed write milestones. See [Operational monitoring](monitoring.md) for
+metric definitions, retry semantics and the optional Driver metrics plugin
+for Prometheus. Spark 3.5 requires the plugin for driver write milestones;
+Spark 4 also reports those milestones in the SQL UI.
+
 Every scan reports its C/JVM boundary costs on the scan node of the Spark SQL
 page: `milvus.jni.calls`, `milvus.jni.nanos`, `milvus.arrow.batches`,
 `milvus.arrow.bytes` (Arrow bytes handed over), `milvus.copies` and

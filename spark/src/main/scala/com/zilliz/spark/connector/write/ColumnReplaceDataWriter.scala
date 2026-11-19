@@ -14,6 +14,7 @@ import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.connector.metric.CustomTaskMetric
 import org.apache.spark.sql.connector.write.{
   DataWriter,
   DataWriterFactory,
@@ -32,6 +33,14 @@ import com.zilliz.milvus.storage.write.{
   V3SegmentWriter,
   WriterResources
 }
+import com.zilliz.spark.connector.metrics.{
+  OperationToken,
+  OperationalMetrics,
+  WriteFailureCategory,
+  WriteOperationalMetrics,
+  WritePhase,
+  WriteTaskMetrics
+}
 import com.zilliz.spark.connector.types.RowIdentity
 
 /** What every write task of one column replacement needs. Segment descriptors
@@ -49,7 +58,9 @@ final case class ColumnReplaceTask(
     targetSchema: StructType,
     storage: Map[String, String],
     bucket: String,
-    params: WriteOptions
+    params: WriteOptions,
+    operationId: String = "",
+    operationToken: Option[OperationToken] = None
 )
 
 object ColumnReplaceTask {
@@ -132,8 +143,53 @@ final class ColumnReplaceDataWriter(
   private val started = mutable.Set.empty[Long]
   private var current: SegmentColumnsWriter = null
   private var statisticsStore: NativeObjectStore = null
+  private val metrics = new WriteTaskMetrics
+  private val observation =
+    task.operationToken.map(token => OperationalMetrics.task(token, "writing"))
+  private var lastReportedNanos = 0L
+  private var lastReportedRows = 0L
 
-  override def write(row: InternalRow): Unit = {
+  override def currentMetricsValues(): Array[CustomTaskMetric] =
+    metrics.taskValues
+
+  private def reportProgress(force: Boolean = false): Unit = {
+    val now = System.nanoTime()
+    if (force || now - lastReportedNanos >= 1000000000L) {
+      lastReportedNanos = now
+      val values = metrics.values
+      val rows = values(WriteOperationalMetrics.AcceptedRows)
+      observation.foreach { current =>
+        values.foreach { case (name, value) => current.set(name, value) }
+        if (rows > lastReportedRows) current.progress()
+      }
+      lastReportedRows = rows
+    }
+  }
+
+  private def recordFailure(failure: Throwable): Unit = {
+    val first = metrics.failed(failure)
+    observation.foreach { current =>
+      metrics.values.foreach { case (name, value) => current.set(name, value) }
+      if (first)
+        current.failure(
+          WriteFailureCategory.name(
+            WriteFailureCategory.of(failure, WritePhase.Writing)
+          )
+        )
+    }
+  }
+
+  override def write(row: InternalRow): Unit = try {
+    accept(row)
+    metrics.rowAccepted()
+    reportProgress()
+  } catch {
+    case NonFatal(failure) =>
+      recordFailure(failure)
+      throw failure
+  }
+
+  private def accept(row: InternalRow): Unit = {
     if (row.isNullAt(task.rowIdOrdinal)) {
       throw new IllegalArgumentException(
         s"A row has a null '${RowIdentity.ColumnName}'; carry the column from the physical read unchanged"
@@ -161,24 +217,39 @@ final class ColumnReplaceDataWriter(
     current.write(identity.getLong(RowIdentity.RowOffsetOrdinal), row)
   }
 
-  override def commit(): WriterCommitMessage = {
+  override def commit(): WriterCommitMessage = try {
     finishCurrent()
+    reportProgress(force = true)
+    observation.foreach(_.progress())
+    observation.foreach(_.end("files_ready"))
     ColumnReplaceCommitMessage(finished.toList)
+  } catch {
+    case NonFatal(failure) =>
+      recordFailure(failure)
+      throw failure
   }
 
   /** No manifest references this attempt's files, because the driver commits
     * only attempts Spark adopted, so they can go.
     */
-  override def abort(): Unit = {
+  override def abort(): Unit = try {
     val files = finished.toList.flatMap(_.columnGroups.flatMap(_.files))
     try if (current != null) current.abort()
     finally {
       current = null
       deleteQuietly(files)
     }
+  } catch {
+    case NonFatal(failure) =>
+      metrics.cleanupFailed()
+      throw failure
+  } finally {
+    reportProgress(force = true)
+    observation.foreach(_.end("aborted"))
+    observation.foreach(_.close())
   }
 
-  override def close(): Unit = {
+  override def close(): Unit = try {
     val writer = current
     val store = statisticsStore
     current = null
@@ -188,6 +259,13 @@ final class ColumnReplaceDataWriter(
       () => if (writer != null) writer.abort(),
       () => if (store != null) store.close()
     )
+  } catch {
+    case NonFatal(failure) =>
+      metrics.cleanupFailed()
+      throw failure
+  } finally {
+    reportProgress(force = true)
+    observation.foreach(_.close())
   }
 
   private def start(segmentId: Long): Unit = {
@@ -256,6 +334,7 @@ final class ColumnReplaceDataWriter(
             try store.delete(file)
             catch {
               case NonFatal(e) =>
+                metrics.cleanupFailed()
                 logWarning(
                   s"Could not delete abandoned file $file: ${e.getMessage}"
                 )
@@ -264,6 +343,7 @@ final class ColumnReplaceDataWriter(
         }
       } catch {
         case NonFatal(e) =>
+          metrics.cleanupFailed()
           logWarning(
             s"Could not delete ${files.size} abandoned file(s): ${e.getMessage}"
           )

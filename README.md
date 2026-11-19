@@ -318,6 +318,7 @@ joining external updates, permissions and failure recovery.
 | [Reference](docs/reference.md) | Supported options, defaults, storage credentials and data types |
 | [Examples](demo/README.md) | Collection reads, SQL and column replacement |
 | [Cluster setup](docs/cluster-setup.md) | Driver and executor permissions, networking and native runtime |
+| [Operational monitoring](docs/monitoring.md) | Read progress, confirmed write milestones and Driver metrics export |
 | [Release artifacts](docs/release-artifacts.md) | Published Maven coordinates, package choices and platform support |
 | [3.0.0 release notes](https://github.com/zilliztech/spark-milvus/releases/tag/v3.0.0) | Released capabilities and migration from earlier versions |
 
