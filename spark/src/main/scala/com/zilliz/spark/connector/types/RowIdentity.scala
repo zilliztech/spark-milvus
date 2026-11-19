@@ -2,8 +2,6 @@ package com.zilliz.spark.connector.types
 
 import org.apache.spark.sql.types.{LongType, StructField, StructType}
 
-import com.zilliz.spark.connector.options.MilvusOption
-
 /** `_milvus_row_id`: where a row is stored in one fixed snapshot. A physical
   * read produces it and the column replacement write consumes it, so the value
   * a caller carries from one to the other must reach the write unchanged. Its
@@ -15,7 +13,7 @@ import com.zilliz.spark.connector.options.MilvusOption
   * was read from, `segment_id` and `row_offset` to its stored position.
   */
 object RowIdentity {
-  val ColumnName: String = MilvusOption.MilvusRowIdColumn
+  val ColumnName = "_milvus_row_id"
 
   val SnapshotIdField = "snapshot_id"
   val SegmentIdField = "segment_id"

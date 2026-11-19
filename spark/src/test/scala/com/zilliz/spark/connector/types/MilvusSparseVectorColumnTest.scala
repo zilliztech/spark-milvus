@@ -8,9 +8,7 @@ import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.codec.SparseFloatVectorConverter
 
-/** Checked against `SparseFloatVectorConverter`, the decoder the row path uses,
-  * so the two paths cannot read the same bytes differently.
-  */
+/** Checks sparse column values against the storage codec. */
 class MilvusSparseVectorColumnTest extends AnyFunSuite with Matchers {
 
   // Golden uint32/float32 little-endian pairs, independent of the writer.

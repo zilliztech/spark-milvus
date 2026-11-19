@@ -9,7 +9,12 @@ import java.io.{
 import scala.jdk.CollectionConverters._
 
 import com.fasterxml.jackson.core.JsonProcessingException
-import org.apache.spark.sql.types.{LongType, StructField, StructType}
+import org.apache.spark.sql.types.{
+  LongType,
+  MetadataBuilder,
+  StructField,
+  StructType
+}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
@@ -132,14 +137,23 @@ class ColumnReplacePlanTest extends AnyFunSuite with Matchers {
   }
 
   test("the DataFrame must carry the row identity unchanged") {
-    refusal(StructType(Seq(column("score")))) should include(
-      "has no '_milvus_row_id' column"
-    )
+    val missing = refusal(StructType(Seq(column("score"))))
+    missing should include("has no '_milvus_row_id' column")
+    missing should include("milvus.read.mode=physical")
+    missing should include("SELECT _milvus_row_id")
     refusal(
       StructType(
         Seq(StructField(RowIdentity.ColumnName, LongType), column("score"))
       )
     ) should include("carry the column from the physical read unchanged")
+    val stored = RowIdentity.field.copy(
+      metadata = new MetadataBuilder()
+        .putLong(FieldMetadata.MilvusFieldIdMetadataKey, 109L)
+        .build()
+    )
+    refusal(StructType(Seq(stored, column("score")))) should include(
+      "is a stored collection field"
+    )
     refusal(input()) should include("names no column to replace")
   }
 

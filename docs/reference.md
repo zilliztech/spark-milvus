@@ -59,10 +59,13 @@ options; each segment task binds its storage identity.
 A valid empty snapshot keeps its schema and returns zero rows. Missing required
 identity, timestamp or schema, and declared segments without V3 manifests, are
 rejected. Each Spark partition reads one data segment through its pinned V3
-manifest. The driver sends delete-file descriptors rather than decoded
-primary-key maps. Each executor reads and closes the applicable delete files,
-then drops rows by primary key and timestamp. An unreadable delete file or a
-segment yielding fewer rows than its declared count fails the task.
+manifest. On the default live read, the driver sends delete-file descriptors
+and each executor applies the applicable segment-local and L0 deletes by
+primary key and timestamp. L0 deletes apply within their source channel and
+partition, with partition `-1` covering all partitions of that channel. A
+physical read skips delete filtering and returns all stored rows. An unreadable
+required file or a segment yielding fewer rows than its declared count fails
+the task.
 
 ### 1.2 Metrics
 
@@ -72,12 +75,11 @@ metric definitions, retry semantics and the optional Driver metrics plugin
 for Prometheus. Spark 3.5 requires the plugin for driver write milestones;
 Spark 4 also reports those milestones in the SQL UI.
 
-Every scan reports its C/JVM boundary costs on the scan node of the Spark SQL
-page: `milvus.jni.calls`, `milvus.jni.nanos`, `milvus.arrow.batches`,
-`milvus.arrow.bytes` (Arrow bytes handed over), `milvus.copies` and
+Each snapshot scan reports its C/JVM boundary costs on the scan node of the
+Spark SQL page: `milvus.jni.calls`, `milvus.jni.nanos`, `milvus.arrow.batches`,
+`milvus.arrow.bytes` (Arrow bytes handed over), `milvus.copies`,
 `milvus.copied.bytes` (columns copied because a native batch arrived sliced),
-`milvus.rows.materialized` (rows converted to Spark rows; zero on the columnar
-path), and `milvus.arrow.allocated.max` (allocator peak, maximum over tasks).
+and `milvus.arrow.allocated.max` (allocator peak, maximum over tasks).
 Segment-data bytes read from object storage are not included: those reads
 happen inside milvus-storage.
 
@@ -113,7 +115,7 @@ of these explicit metadata options.
 | `milvus.snapshot.schema.bytes` | unset | Base64-encoded protobuf `CollectionSchema` bytes for an empty snapshot. Takes precedence over schema JSON when both are supplied. |
 | `milvus.snapshot.schema.json` | unset | Raw snapshot JSON containing the collection schema, used when schema bytes are absent. This is not Spark `StructType` JSON. |
 | `milvus.snapshot.collection.id` | 0 when absent | Collection ID for the empty snapshot; a supplied value must be a positive Long. |
-| `milvus.snapshot.partition.ids` | unset | Comma-separated nonnegative partition IDs for the empty snapshot. Use `milvus.partitions` below to select among a resolved snapshot's partitions. |
+| `milvus.snapshot.partition.ids` | unset | Comma-separated nonnegative partition IDs declared by the empty snapshot. To filter a snapshot read, use a [predicate on `_partition_id`](#spark-predicate-pushdown). |
 
 A standard object-store URI uses `s3a://`, `s3://`, `gs://` or `oss://` with
 the bucket as its authority. A bucket-relative key uses `fs.bucket_name`.
@@ -263,37 +265,70 @@ fails during planning.
 
 ### 2.3 Data Operation Parameters
 
-All options in this section are optional. By default, a scan reads all live
-rows and collection fields in the fixed Snapshot, converts vectors to Spark
-types, and uses columnar batches. Spark's `select` and `where` are enough for
-most applications; use these options when you need additional control.
+By default, a scan reads all live rows and collection fields in the fixed
+snapshot and converts vectors to Spark types. Snapshot scans deliver Arrow
+columnar batches to Spark in both live and physical mode. Spark converts a
+batch to rows when a downstream operation requires them.
 
 #### Selecting rows and columns
 
-| Option | Default | Meaning |
-| --- | --- | --- |
-| `milvus.partitions` | all partitions | Comma-separated nonnegative partition IDs, such as `10,11`. Every requested ID must exist. |
-| `fieldIDs` | all collection fields | Comma-separated nonnegative field IDs. Each ID must exist in the snapshot schema, including its system fields. This limits the initial schema; Spark `select` can narrow it further. An explicit `.schema()` must select exactly these IDs with matching names and Spark types. |
-| `milvus.extra.columns` | none | Comma-separated metadata names: `_segment_id`, `_row_offset`, `_timestamp`. For example, `_segment_id,_row_offset`. See [Output schema](#output-schema). Request `_milvus_row_id` through `milvus.read.include_row_id` instead. |
+Select collection fields by name, for example `docs.select("id", "title")`.
+To read the stored Milvus `RowID` (system field ID `0`) when the collection
+schema omits it, include `RowID BIGINT` in the reader's explicit schema.
+Filter Milvus partitions with `docs.where("_partition_id IN (10, 11)")`.
+An ID absent from the snapshot matches no rows.
 
-Partition and field-ID lists reject blanks, empty entries, negative
-IDs and non-numeric values. Repeated IDs are ignored, preserving their
-first-seen order. Metadata-column lists also ignore repeats; a blank value
-requests no extra columns.
+##### Hidden metadata columns
+
+The default schema and `SELECT *` omit hidden columns. Reference one by name
+in `select` or `where`. The first four columns below are available on both
+live and physical reads.
+
+| Column | Spark type | Value |
+| --- | --- | --- |
+| `_partition_id` | `LongType`, non-null | Milvus partition ID of the row's data segment. Equality and `IN` conditions can prune partitions before segment reads are planned. |
+| `_segment_id` | `LongType`, non-null | ID of the data segment containing the row. |
+| `_row_offset` | `LongType`, non-null | Zero-based physical row position within the segment. Filtering deleted rows can leave gaps. |
+| `_timestamp` | `LongType`, snapshot nullability | Stored Milvus system timestamp (field ID `1`). |
+| `_milvus_row_id` | Non-null struct of three non-null `LongType` fields: `snapshot_id`, `segment_id`, `row_offset` | Row identity for column replacement. Available on physical reads of a snapshot with a positive `snapshot_info.id`. Carry it unchanged through to the write. |
+
+For example, `docs.select("*", "_segment_id", "_row_offset")` adds the physical
+location to every returned row. A visible collection field with the same name
+takes precedence. To access the hidden column in that case, supply a read
+schema containing only the collection fields you need, omitting the namesake.
+
+For SQL through a temporary view, project the hidden columns into the view
+before registering it. The same example works in Scala and PySpark.
+
+```python
+docs.select(
+    "id", "_partition_id", "_segment_id", "_row_offset", "_timestamp"
+).createOrReplaceTempView("located_docs")
+spark.sql("""
+    SELECT id, _segment_id, _row_offset, _timestamp
+    FROM located_docs
+    WHERE _partition_id IN (10, 11)
+""").show()
+```
+
+For a [column replacement](column-replacement.md#example), select the row
+identity directly from a physical read, for example:
+
+```python
+source = (spark.read.format("milvus").options(**snapshot_options)
+          .option("milvus.read.mode", "physical").load())
+prepared = source.select("_milvus_row_id", "score")
+```
 
 #### Read modes and output
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `milvus.read.mode` | unset: live rows | Leave unset for normal analysis. `physical` includes stored rows marked deleted and is required for [column replacement](column-replacement.md). `write_result` reads a replacement receipt using `.load(resultPath)`. Values are case-insensitive; a blank value behaves as unset. `live` is not an accepted value. |
-| `milvus.read.apply.deletes` | `true`; `false` in physical mode | Apply segment-local and applicable L0 deletes from the snapshot. `false` includes deleted rows. Physical mode rejects `true`. L0 deletes apply within the same source channel and partition; partition `-1` covers all partitions of that channel. |
-| `milvus.read.include_row_id` | `false` | Add `_milvus_row_id` for column replacement. Requires `milvus.read.mode=physical` and a positive `snapshot_info.id` in the snapshot. Keep this column unchanged when writing replacements. |
+| `milvus.read.mode` | unset (live rows) | Leave unset for live rows only. Set `physical` to read all stored rows, including rows marked deleted, as required for [column replacement](column-replacement.md). Set `write_result` to read a receipt with `.load(resultPath)`. Values are case-insensitive. A blank value behaves as unset. |
 | `milvus.read.vector.raw` | `false` | `false` converts vectors to Spark arrays or maps as listed under [Supported data types](#supported-data-types). `true` returns stored vector bytes as `BinaryType`, for applications that decode them themselves or pass them to a native library. Binary vectors remain `BinaryType` in either mode. |
-| `milvus.read.columnar` | `true` | Deliver Arrow batches to Spark. `false` uses the row-at-a-time reader. This does not change the output schema or delete semantics. |
 
-`write_result` reads a fixed receipt schema, not snapshot data. Supply its
-result path and storage options; snapshot selectors and the scan tuning
-options below do not control this receipt read.
+`write_result` reads the fixed receipt schema. Supply the result path and
+storage options for the receipt.
 
 #### Batch size and memory
 
@@ -303,8 +338,7 @@ options below do not control this receipt read.
 | `milvus.read.batch.max.bytes` | 33554432 (32 MiB) | Positive Long: target byte limit for one native record batch. Maximum 4294967296 (4 GiB). Passed as `reader.record_batch_max_size`; this is not a limit on total task memory. |
 | `milvus.read.arrow.max.bytes` | 9223372036854775807 (`Long.MaxValue`) | Positive Long: hard limit of one read task's Arrow child allocator. Covers imported/read Arrow buffers, but not milvus-storage's separate native memory pool or other Spark memory. |
 
-Boolean read options (`milvus.snapshot.mode`, `milvus.read.apply.deletes`,
-`milvus.read.include_row_id`, `milvus.read.vector.raw`, `milvus.read.columnar`)
+Boolean read options (`milvus.snapshot.mode`, `milvus.read.vector.raw`)
 accept only `true` or `false`,
 case-insensitively. Positive integer/long options reject blanks, zero, negative,
 non-decimal and overflowing values, reporting the key and supplied value. Use
@@ -312,19 +346,21 @@ decimal byte counts such as `33554432`, not size strings such as `32m`.
 
 #### Spark predicate pushdown
 
+Partition pruning through [`_partition_id`](#hidden-metadata-columns) retains
+the delete records that apply to each selected segment. Conditions on the hidden
+`_timestamp` column support the same pushdown as other stored `LongType` fields.
+
 Spark SQL and DataFrame `where` conditions use DataSource V2 predicate
 pushdown. Bool fields support equality, inequality, null-safe equality (`<=>`),
 `IN`, and null checks. Numeric fields support all six comparisons, `<=>`, `IN`, and null
 checks. String, VarChar, and Text fields additionally support prefix and suffix
-conditions. These operators preserve Spark SQL three-valued NULL semantics in
-both row and columnar reads.
+conditions. These operators preserve Spark SQL three-valued NULL semantics.
 
 Each predicate tree is pushed only when the connector supports the whole tree.
-Unsupported operators, casts, nested references, JSON, Array, Geometry, vector,
-and synthetic metadata predicates remain in Spark's plan and are evaluated by
-Spark. A predicate-only column is read internally without being added to the
-result schema. The DataSource V1 Filter API is not
-supported.
+Spark evaluates unsupported operators, casts, nested references and filters on
+JSON, Array, Geometry and vector fields. It also evaluates filters on
+`_segment_id` and `_row_offset`. Fields used only in predicates can be
+omitted from the result. The DataSource V1 Filter API is not supported.
 
 Spark predicates are the only filter on field values. Setting the removed
 `milvus.filter` option fails planning instead of returning unfiltered rows;
@@ -348,29 +384,15 @@ for its fixed schema and configuration.
 
 The output schema for `milvus` format depends on the Milvus collection schema and includes:
 
-- Collection fields selected by Spark projection and `fieldIDs`. Each field
+- Collection fields selected by Spark projection. Each field
   keeps the snapshot's name, field ID, Milvus data type, nullability, key flags,
   and vector dimension in its Spark metadata.
 - `$meta` when the collection schema records its authoritative field ID as one
   JSON field marked dynamic. If dynamic fields are enabled but that definition
   is missing or inconsistent, planning fails; the connector never guesses the
   physical field ID.
-- Requested metadata columns, appended in the fixed order shown below
-  regardless of request order:
-  - `_segment_id` (`LongType`, non-null): the data segment ID.
-  - `_row_offset` (`LongType`, non-null): the physical row position in that
-    segment before delete filtering.
-  - `_timestamp` (`LongType`, snapshot nullability): the stored Milvus system
-    timestamp field with field ID `1`; it is read from storage, not synthesized.
-- `_milvus_row_id` (non-null struct of `snapshot_id`, `segment_id` and
-  `row_offset`, all `LongType`) last, when `milvus.read.include_row_id=true`
-  asks for it. It binds the row to the snapshot it was read from and to its
-  stored position, and a [column replacement](column-replacement.md) consumes
-  it. Callers carry it unchanged and do not interpret its fields.
-
-The connector does not expose a `partition` metadata column. Use
-`milvus.partitions` to select partitions; a scan includes every data segment in
-the selected partitions and retains applicable delete-only segments.
+- Any [hidden metadata columns](#hidden-metadata-columns) you explicitly
+  select, in the order of your projection.
 
 ## Supported data types
 
@@ -383,12 +405,12 @@ the selected partitions and retains applicable delete-only segments.
 
 ### Vector types
 
-- FloatVector
-- Float16Vector
-- BFloat16Vector
-- BinaryVector
-- Int8Vector
-- SparseFloatVector
+| Milvus type | Default Spark SQL type | With `milvus.read.vector.raw=true` |
+| --- | --- | --- |
+| FloatVector, Float16Vector, BFloat16Vector | `array<float>` | `binary` |
+| Int8Vector | `array<smallint>` | `binary` |
+| SparseFloatVector | `map<bigint,float>` | `binary` |
+| BinaryVector | `binary` | `binary` |
 
 ### Complex types
 

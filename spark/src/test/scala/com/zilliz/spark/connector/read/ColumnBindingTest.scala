@@ -9,15 +9,9 @@ import org.scalatest.matchers.should.Matchers
 import com.zilliz.milvus.storage.delete.DeletePlan
 import com.zilliz.milvus.storage.read.plan.{DeleteSource, SegmentReadTask}
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
-import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
-/** The derivation both readers share.
-  *
-  * It was inside each row reader before, and the columnar reader would have
-  * been a third and fourth copy. These cases pin the part that differs between
-  * the two lines — what a column is called — and the part that does not.
-  */
+/** Binds requested Spark fields and delete dependencies to stored columns. */
 class ColumnBindingTest extends AnyFunSuite with Matchers {
 
   private val milvusSchema = CollectionSchema(
@@ -80,9 +74,6 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
     v3().pkColumnName shouldBe "100"
 
     v3().timestampColumnName shouldBe "1"
-    v3().arrowColumnFor(
-      MilvusOption.MilvusExtraColumnTimestamp
-    ) shouldBe "1"
   }
 
   // A user field named "timestamp" is not field 1; the schema handed to the
@@ -180,20 +171,18 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
   }
 
   test("the V3 timestamp metadata column reads stored field id 1") {
+    val timestamp = MetadataColumns
+      .hiddenFields(dataSchema, milvusSchema)
+      .find(_.name == MetadataColumns.Timestamp)
+      .get
     val binding = ColumnBinding(
       MilvusInputPartition(
         task(SegmentLayout.Manifest("files/seg"))
       ),
-      StructType(
-        Seq(
-          StructField(MilvusOption.MilvusExtraColumnTimestamp, LongType)
-        )
-      )
+      StructType(Seq(timestamp))
     )
 
-    binding.arrowColumnFor(
-      MilvusOption.MilvusExtraColumnTimestamp
-    ) shouldBe "1"
+    binding.arrowColumnFor(timestamp.name) shouldBe "1"
     binding.neededColumns shouldBe Seq("1")
   }
 

@@ -112,11 +112,7 @@ private[connector] object ColumnReplaceTables {
     * covers the whole snapshot, so none of them applies.
     */
   private val ReadOnlyOptions = Seq(
-    MilvusOption.MilvusPartitions,
-    MilvusOption.MilvusExtraColumns,
     MilvusOption.ReadMode,
-    MilvusOption.ReadIncludeRowId,
-    MilvusOption.ReaderFieldIDs,
     MilvusOption.SnapshotManifests,
     MilvusOption.SnapshotSchemaBytes,
     MilvusOption.SnapshotSchemaJson
@@ -171,7 +167,7 @@ private[connector] object ColumnReplaceTables {
 
     val milvusOption = MilvusOption(options)
     val snapshot = SnapshotSources
-      .forRead(milvusOption, withSegments = true)
+      .forRead(milvusOption)
       .snapshot()
       .fold(
         {
@@ -252,13 +248,19 @@ private[connector] object ColumnReplaceTables {
     if (rowIds.isEmpty) {
       throw new IllegalArgumentException(
         s"The DataFrame has no '${RowIdentity.ColumnName}' column. Read the snapshot with " +
-          s"'${MilvusOption.ReadMode}=${MilvusOption.ReadModePhysical}' and " +
-          s"'${MilvusOption.ReadIncludeRowId}=true', and keep that column unchanged"
+          s"'${MilvusOption.ReadMode}=${MilvusOption.ReadModePhysical}', " +
+          s"SELECT ${RowIdentity.ColumnName}, and carry it unchanged to the write"
       )
     }
     if (rowIds.length > 1 || rowIds.head.name != RowIdentity.ColumnName) {
       throw new IllegalArgumentException(
         s"The DataFrame must have exactly one column named '${RowIdentity.ColumnName}', got ${rowIds.map(_.name).mkString(", ")}"
+      )
+    }
+    if (rowIds.head.metadata.contains(FieldMetadata.MilvusFieldIdMetadataKey)) {
+      throw new IllegalArgumentException(
+        s"Column '${RowIdentity.ColumnName}' is a stored collection field. " +
+          s"Omit it from the physical read's external schema, then SELECT ${RowIdentity.ColumnName} to carry the hidden row identity"
       )
     }
     if (

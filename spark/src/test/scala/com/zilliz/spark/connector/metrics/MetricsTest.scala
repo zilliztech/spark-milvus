@@ -9,7 +9,7 @@ class MetricsTest extends AnyFunSuite {
   test("driver and task values cover every declared read metric") {
     val declared = ScanMetrics.supported.map(_.name()).toSet
     val reported =
-      ScanMetrics.taskValues(ReadMetrics.Zero, rowsMaterialized = 0L) ++
+      ScanMetrics.taskValues(ReadMetrics.Zero) ++
         new ReadProgress().taskValues ++ ReadOperationalMetrics.planned(0L)
     assert(reported.map(_.name()).toSet == declared)
     assert(declared.size == ScanMetrics.supported.length)
@@ -36,15 +36,13 @@ class MetricsTest extends AnyFunSuite {
           copies = 1,
           copiedBytes = 512,
           allocatedMax = 65536
-        ),
-        rowsMaterialized = 30
+        )
       )
       .map(m => m.name() -> m.value())
       .toMap
     assert(values(ScanMetrics.JniCalls) == 7)
     assert(values(ScanMetrics.ArrowBytes) == 4096)
     assert(values(ScanMetrics.Copies) == 1)
-    assert(values(ScanMetrics.RowsMaterialized) == 30)
     assert(values(ScanMetrics.ArrowAllocatedMax) == 65536)
   }
 

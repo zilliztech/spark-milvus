@@ -64,7 +64,10 @@ object ArtifactConsumerSmoke {
       )
     assert(rows == wanted, "advanced V3 fields or deletes differ")
     assert(
-      read(spark, options + (MilvusOption.ReadApplyDeletes -> "false"))
+      read(
+        spark,
+        options + (MilvusOption.ReadMode -> MilvusOption.ReadModePhysical)
+      )
         .count() == 16L
     )
     passed("v3-advanced")
@@ -141,10 +144,8 @@ object ArtifactConsumerSmoke {
     val options =
       storage(directory) + (MilvusOption.SnapshotPath -> "snapshot.json")
     val before = values(read(spark, options))
-    val physicalOptions = options ++ Map(
-      MilvusOption.ReadMode -> MilvusOption.ReadModePhysical,
-      MilvusOption.ReadIncludeRowId -> "true"
-    )
+    val physicalOptions =
+      options + (MilvusOption.ReadMode -> MilvusOption.ReadModePhysical)
     val source = read(spark, physicalOptions)
     val identities = source.select("id", RowIdentity.ColumnName).collect()
     assert(identities.map(_.getLong(0)).toSet == entities.map(_.id).toSet)

@@ -25,9 +25,7 @@ import org.apache.spark.unsafe.types.UTF8String
   * type and its binary accessor answers `getBinary` only, so a `StringType`
   * column read through it throws on the first `getUTF8String`.
   *
-  * The bytes are validated as UTF-8 on the way out, the same as
-  * `ArrowConverter.utf8StringFromVariableWidth` does on the row path, so the
-  * two paths reject the same values.
+  * Reading a value validates its bytes as UTF-8.
   */
 final class Utf8FromBinaryColumn(vector: VarBinaryVector)
     extends ColumnVector(StringType) {

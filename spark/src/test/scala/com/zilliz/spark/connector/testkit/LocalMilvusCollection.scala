@@ -68,8 +68,7 @@ object LocalMilvusCollection {
     Map(
       "fs.storage_type" -> "local",
       "fs.root_path" -> directory.toString,
-      MilvusOption.SnapshotPath -> "snapshot.json",
-      MilvusOption.ReadColumnar -> "true"
+      MilvusOption.SnapshotPath -> "snapshot.json"
     )
   }
 }

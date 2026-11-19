@@ -31,6 +31,8 @@ class DemoCommonTest(unittest.TestCase):
     def test_explicit_snapshot_preserves_input_identity(self):
         options = {"milvus.snapshot.path": "snapshot.json", "fs.storage_type": "local", "fs.root_path": "/data"}
         self.assertEqual(demo.read_options(self.file(options)), options)
+        physical = {**options, "milvus.read.mode": "physical"}
+        self.assertEqual(demo.read_options(self.file(physical)), physical)
 
     def test_fixture_reads_are_checked_against_frozen_rows_and_deletes(self):
         options, expected = demo.fixture_input()
@@ -90,7 +92,9 @@ class DemoCommonTest(unittest.TestCase):
 
     def test_unknown_options_are_rejected(self):
         for key in ("unexpected", "milvus.read.unknown", "spark.option", "milvus.search.params",
-                    "milvus.filter", "milvus.segments"):
+                    "milvus.filter", "milvus.segments", "milvus.partitions",
+                    "fieldIDs", "milvus.extra.columns", "milvus.read.include_row_id", "milvus.read.apply.deletes",
+                    "milvus.read.columnar"):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 demo.read_options(self.file({"milvus.snapshot.path": "snapshot.json", key: "value"}))
         with self.assertRaises(ValueError):

@@ -30,9 +30,9 @@ latency or retries from Arrow buffers or JNI timing.
 A successful `LIMIT` query can leave most of the snapshot unread. Neither
 `segments.completed` nor query success means every planned physical row was
 visited. Repeated metric sampling and repeated reader closure do not add rows or
-terminal events. Decoded batches can include unused tails; exclusion counts
-cover rows actually evaluated by the selected row or columnar path. These
-counters need not form a complete row balance under early termination.
+terminal events. A local limit can shorten a batch after the reader has counted
+its deleted and filtered rows. Under early termination, those counts and the
+emitted rows can therefore add up to fewer than the decoded rows.
 
 ## Write metrics
 
@@ -184,7 +184,5 @@ investigate, not a safe instruction to replay a write.
 
 The scan still exposes `milvus.jni.calls`, `milvus.jni.nanos`,
 `milvus.arrow.batches`, `milvus.arrow.bytes`, `milvus.copies`,
-`milvus.copied.bytes`, `milvus.rows.materialized` and
-`milvus.arrow.allocated.max`. Arrow bytes describe buffers handed to the JVM;
-allocator usage is the maximum over tasks. Neither measures physical storage
-traffic.
+`milvus.copied.bytes` and `milvus.arrow.allocated.max`. Arrow bytes describe
+buffers handed to the JVM. Allocator usage is the maximum over tasks.

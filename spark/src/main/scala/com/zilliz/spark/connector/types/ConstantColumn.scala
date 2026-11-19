@@ -10,9 +10,9 @@ import org.apache.spark.unsafe.types.UTF8String
 
 /** A column whose every row holds the same value.
   *
-  * The metadata extra columns are like this within one partition: `_partition`
-  * and `_segment_id` come from the partition itself, not from the data. Storing
-  * one value rather than a buffer of copies is the point.
+  * The metadata extra columns are like this within one partition:
+  * `_partition_id` and `_segment_id` come from the partition itself, not from
+  * the data. Storing one value rather than a buffer of copies is the point.
   */
 object ConstantColumn {
 

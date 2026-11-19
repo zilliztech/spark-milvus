@@ -10,9 +10,8 @@ import org.apache.spark.sql.types.StructType
 import com.zilliz.milvus.storage.delete.DeletePlan
 import com.zilliz.milvus.storage.read.exec.{DeletePlans, SegmentReader}
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
-import com.zilliz.milvus.storage.schema.SchemaMapper
+import com.zilliz.milvus.storage.schema.{FieldMetadata, SchemaMapper}
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
-import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.{CollectionSchema, FieldSchema}
 
 /** Everything a reader has to work out before it can open a segment: which
@@ -62,6 +61,23 @@ sealed trait ColumnBinding {
   final def arrowColumnFor(sparkFieldName: String): String =
     arrowColumnNames.getOrElse(sparkFieldName, sparkFieldName)
 
+  /** Projection fields carry their resolved Milvus IDs. In particular, hidden
+    * _timestamp always reads field 1 even if an external schema omitted a
+    * collection field with that name.
+    */
+  protected final def projectedColumnNames(
+      schema: StructType
+  ): Map[String, String] =
+    schema.fields.iterator
+      .filter(_.metadata.contains(FieldMetadata.MilvusFieldIdMetadataKey))
+      .map { field =>
+        val id = field.metadata.getLong(FieldMetadata.MilvusFieldIdMetadataKey)
+        field.name -> columnNameFor(id).getOrElse(
+          throw new IllegalArgumentException(s"Unknown physical field id $id")
+        )
+      }
+      .toMap
+
   final def pkField: Option[FieldSchema] =
     milvusSchema.fields.find(_.isPrimaryKey)
 
@@ -72,9 +88,7 @@ sealed trait ColumnBinding {
 
   final def open(allocator: BufferAllocator): SegmentReader = {
     // Resolve and close the delete-file store before the segment reader opens
-    // its own native handles. This ordering applies to both the row and
-    // columnar callers; in particular, passing isDeleted as a function to the
-    // columnar reader must not defer delete I/O until its first batch.
+    // its own native handles and starts filtering batches.
     deletePlan
     SegmentReader.open(
       task,
@@ -124,8 +138,8 @@ object ColumnBinding {
 
   /** Binds the columns using the layout described by the task.
     *
-    * `schema` is the data schema, metadata extra columns already removed: it
-    * says which columns the query wants.
+    * `schema` is the data schema, synthesized columns already removed: it says
+    * which columns the query wants.
     */
   def apply(
       partition: MilvusInputPartition,
@@ -168,7 +182,8 @@ final case class PhysicalColumnBinding(
     "physical groups name unknown Arrow columns"
   )
   override val columnNameFor: Long => Option[String] = physical.fieldNames.get
-  override val arrowColumnNames: Map[String, String] = physical.outputColumns
+  override val arrowColumnNames: Map[String, String] =
+    physical.outputColumns ++ projectedColumnNames(schema)
   override val pkColumnName: String =
     pkField.flatMap(field => columnNameFor(field.fieldID)).getOrElse("")
   override val timestampColumnName: String = columnNameFor(1L).getOrElse("")
@@ -216,7 +231,9 @@ final case class V3ColumnBinding(
   override val columnNameFor: Long => Option[String] = id => Some(id.toString)
 
   override val arrowColumnNames: Map[String, String] =
-    fieldNameToId.map { case (name, id) => name -> id.toString }
+    fieldNameToId.map { case (name, id) =>
+      name -> id.toString
+    } ++ projectedColumnNames(schema)
 
   override val pkColumnName: String =
     pkField.map(_.fieldID.toString).getOrElse("")
@@ -226,7 +243,9 @@ final case class V3ColumnBinding(
 
   override lazy val neededColumns: Seq[String] = {
     val requested = if (task.neededFieldIds.nonEmpty) {
-      val knownIds = fieldNameToId.values.toSet
+      val knownIds = (SchemaMapper.CanonicalSystemFields ++ milvusSchema.fields)
+        .map(_.fieldID)
+        .toSet
       val missingIds = task.neededFieldIds.filterNot(knownIds)
       if (missingIds.nonEmpty) {
         throw new IllegalArgumentException(
@@ -236,7 +255,7 @@ final case class V3ColumnBinding(
       }
       task.neededFieldIds.map(_.toString)
     } else {
-      schema.fieldNames.toSeq.flatMap(fieldNameToId.get).map(_.toString)
+      schema.fieldNames.toSeq.flatMap(arrowColumnNames.get)
     }
     if (!appliesDeletes) requested
     else {
@@ -261,7 +280,7 @@ object V3ColumnBinding {
     "rowid" -> 0L,
     "Timestamp" -> 1L,
     "timestamp" -> 1L,
-    MilvusOption.MilvusExtraColumnTimestamp -> 1L
+    MetadataColumns.Timestamp -> 1L
   )
 
   private[read] def buildFieldNameToId(

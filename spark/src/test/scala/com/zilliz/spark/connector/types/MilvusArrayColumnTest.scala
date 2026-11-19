@@ -1,10 +1,9 @@
 package com.zilliz.spark.connector.types
 
-import scala.collection.JavaConverters._
-
 import org.apache.arrow.memory.RootAllocator
 import org.apache.arrow.vector.VarBinaryVector
 import org.apache.spark.sql.types._
+import org.apache.spark.sql.vectorized.ColumnarArray
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -16,9 +15,7 @@ import io.milvus.grpc.schema.{
   StringArray
 }
 
-/** A Milvus Array column arrives as one serialized ScalarField per row; the row
-  * path and the columnar path must both give the elements back.
-  */
+/** A Milvus Array stores one serialized ScalarField per row. */
 class MilvusArrayColumnTest extends AnyFunSuite with Matchers {
 
   private def longs(values: Long*): Array[Byte] =
@@ -74,15 +71,6 @@ class MilvusArrayColumnTest extends AnyFunSuite with Matchers {
     }
   }
 
-  test("the row path decodes the same bytes") {
-    withVector(Seq(Some(longs(4L, 5L)))) { v =>
-      val data = ArrowConverter
-        .arrowValueToSparkValue(v, 0, ArrayType(LongType))
-        .asInstanceOf[org.apache.spark.sql.catalyst.util.ArrayData]
-      data.toLongArray.toSeq shouldBe Seq(4L, 5L)
-    }
-  }
-
   test("a Spark element type Milvus arrays cannot hold is refused") {
     withVector(Seq(Some(longs(1L)))) { v =>
       an[IllegalArgumentException] should be thrownBy
@@ -100,59 +88,24 @@ class MilvusArrayColumnTest extends AnyFunSuite with Matchers {
       ScalarField.Data.IntData(IntArray(data = values))
     ).toByteArray
 
-  // The row path took an Array<Float/Int8/Int16> value for a binary-backed
-  // vector because both are VarBinary, and failed.
-  test(
-    "the row path decodes Float and Int8/Int16 element arrays like the columnar path"
-  ) {
-    import org.apache.arrow.vector.VectorSchemaRoot
-    import com.zilliz.milvus.storage.schema.FieldMetadata
-    import com.zilliz.spark.connector.types.ArrowConverter
-    import io.milvus.grpc.schema.{DataType => MilvusDataType}
-    val arrayMetadata = new MetadataBuilder()
-      .putLong(
-        FieldMetadata.MilvusDataTypeMetadataKey,
-        MilvusDataType.Array.value
-      )
-      .build()
+  test("Float and Int8/Int16 arrays preserve values, empty arrays and nulls") {
     def check(
         rows: Seq[Option[Array[Byte]]],
         elementType: DataType
-    )(
-        expect: (Int, org.apache.spark.sql.catalyst.util.ArrayData) => Unit
-    ): Unit =
+    )(expect: ColumnarArray => Unit): Unit =
       withVector(rows) { v =>
-        val root = new VectorSchemaRoot(
-          java.util.Arrays.asList(v.getField),
-          java.util.Arrays.asList[org.apache.arrow.vector.FieldVector](v),
-          rows.size
-        )
-        val schema = StructType(
-          Seq(StructField("arr", ArrayType(elementType), true, arrayMetadata))
-        )
         val column = new MilvusArrayColumn(v, elementType)
-        rows.indices.foreach { i =>
-          val row = ArrowConverter.arrowToInternalRow(root, i, schema)
-          if (rows(i).isEmpty) {
-            row.isNullAt(0) shouldBe true
-            column.isNullAt(i) shouldBe true
-          } else {
-            expect(i, row.getArray(0))
-            expect(i, column.getArray(i))
-          }
-        }
-        column.close()
+        try {
+          expect(column.getArray(0))
+          column.getArray(1).numElements shouldBe 0
+          column.isNullAt(2) shouldBe true
+        } finally column.close()
       }
-    check(
-      Seq(Some(floats(1.5f, -2f)), Some(floats()), None),
-      FloatType
-    ) {
-      case (0, a) => a.toFloatArray.toSeq shouldBe Seq(1.5f, -2f)
-      case (_, a) => a.numElements shouldBe 0
+    check(Seq(Some(floats(1.5f, -2f)), Some(floats()), None), FloatType) {
+      _.toFloatArray.toSeq shouldBe Seq(1.5f, -2f)
     }
     check(Seq(Some(ints(-128, 127)), Some(ints()), None), ShortType) {
-      case (0, a) => a.toShortArray.toSeq shouldBe Seq[Short](-128, 127)
-      case (_, a) => a.numElements shouldBe 0
+      _.toShortArray.toSeq shouldBe Seq[Short](-128, 127)
     }
   }
 }

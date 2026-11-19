@@ -324,7 +324,7 @@ private final class MilvusVectorElementColumn(
 
 /** A vector column handed over as the bytes Milvus stored. What
   * `milvus.read.vector.raw` asks for, and the only shape `BinaryVector` has
-  * ever had. Each row is copied out on read, the same as the row path does.
+  * ever had. Each row is copied out on read.
   */
 private final class MilvusBinaryColumn(blobs: VectorBlobs)
     extends ColumnVector(BinaryType) {

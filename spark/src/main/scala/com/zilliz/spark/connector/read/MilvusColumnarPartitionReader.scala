@@ -61,8 +61,8 @@ class MilvusColumnarPartitionReader(
     deleted: (VectorSchemaRoot, Int) => Boolean,
     arrowColumnFor: String => String,
     rawVectors: Boolean,
+    partitionId: Long,
     segmentId: Long,
-    requestedExtraColumns: Set[String] = Set.empty,
     // The snapshot's Milvus id; required only when `_milvus_row_id` is requested.
     snapshotId: Long = 0L,
     pushedExpression: Option[PredicateExpr] = None,
@@ -108,13 +108,10 @@ class MilvusColumnarPartitionReader(
     batch
   }
 
-  // Nothing here becomes an InternalRow: a batch with deletes is delivered
-  // through SelectedRowsColumn, which maps row positions and copies nothing.
   override def currentMetricsValues(): Array[CustomTaskMetric] =
     ScanMetrics.taskValues(
       if (ownedSegmentReader != null) ownedSegmentReader.metrics
-      else finalMetrics,
-      rowsMaterialized = 0L
+      else finalMetrics
     ) ++ progress.taskValues
 
   override def close(): Unit = {
@@ -243,8 +240,14 @@ class MilvusColumnarPartitionReader(
   ): ColumnVector = {
     val name = field.name
     val metadataColumn =
-      if (requestedExtraColumns.contains(name))
-        MetadataColumns.columnFor(name, segmentId, startOffset, snapshotId)
+      if (MetadataColumns.isSynthetic(field))
+        MetadataColumns.columnFor(
+          name,
+          partitionId,
+          segmentId,
+          startOffset,
+          snapshotId
+        )
       else None
     metadataColumn
       .getOrElse {
@@ -258,7 +261,18 @@ class MilvusColumnarPartitionReader(
               s"carries ${root.getSchema.getFields.toString}"
           )
         }
-        val milvusType = fieldsByName.get(name).map(_.dataType)
+        val milvusType =
+          if (
+            field.metadata.contains(FieldMetadata.MilvusDataTypeMetadataKey)
+          ) {
+            Some(
+              MilvusDataType.fromValue(
+                field.metadata
+                  .getLong(FieldMetadata.MilvusDataTypeMetadataKey)
+                  .toInt
+              )
+            )
+          } else fieldsByName.get(name).map(_.dataType)
         milvusType match {
           case Some(t) if MilvusTypes.isDenseVectorType(t) =>
             MilvusVectorColumn(vector, t, dimensionOf(name), rawVectors)

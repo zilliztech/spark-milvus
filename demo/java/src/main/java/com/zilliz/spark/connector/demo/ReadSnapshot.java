@@ -9,8 +9,7 @@ import org.apache.spark.sql.Row;
 public final class ReadSnapshot {
     public static void main(String[] args) throws Exception {
         try (DemoSupport demo = DemoSupport.open(args, "ReadSnapshot", true, false)) {
-            // The snapshot supplies the schema and segment locations. The connector
-            // reads storage and applies deletes without contacting a Milvus service.
+            // Spark converts the snapshot's columnar batches to rows for collectAsList() and show().
             Dataset<Row> documents = demo.spark.read().format("milvus").options(demo.options).load();
             documents.printSchema();
             List<Row> rows = demo.boundedRows(documents);
@@ -27,9 +26,12 @@ public final class ReadSnapshot {
                     List<Float> vector = row.getList(row.fieldIndex("vector"));
                     DemoSupport.require(vector.size() == 2, "The fixture has two-dimensional vectors");
                 }
-                System.out.println("14 live rows; snapshot deletes remove IDs 3002 and 3105.");
+                Dataset<Row> stored = demo.spark.read().format("milvus").options(demo.options)
+                    .option("milvus.read.mode", "physical").load();
+                DemoSupport.require(stored.count() == 16, "Expected all 16 stored rows in physical mode");
+                System.out.println("The sample has 16 stored rows and 14 live rows. IDs 3002 and 3105 are marked deleted.");
             }
-            System.out.println("Visible rows: " + rows.size());
+            System.out.println("Rows read: " + rows.size());
             System.out.println("Demo passed: ReadSnapshot");
         }
     }

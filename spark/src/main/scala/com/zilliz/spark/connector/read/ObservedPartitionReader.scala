@@ -2,6 +2,7 @@ package com.zilliz.spark.connector.read
 
 import org.apache.spark.sql.connector.metric.CustomTaskMetric
 import org.apache.spark.sql.connector.read.PartitionReader
+import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.TaskContext
 
 import com.zilliz.spark.connector.metrics.{
@@ -15,12 +16,11 @@ import com.zilliz.spark.connector.metrics.{
   * partition limit may have shortened the final batch. Repeated get() calls
   * return the same value and never count it again.
   */
-private[connector] final class ObservedPartitionReader[T](
-    underlying: PartitionReader[T],
-    progress: ReadProgress,
-    rowCount: T => Long
-) extends PartitionReader[T] {
-  private var current: Option[T] = None
+private[connector] final class ObservedPartitionReader(
+    underlying: PartitionReader[ColumnarBatch],
+    progress: ReadProgress
+) extends PartitionReader[ColumnarBatch] {
+  private var current: Option[ColumnarBatch] = None
   private var ready = false
   private var exhausted = false
   private var closed = false
@@ -44,14 +44,14 @@ private[connector] final class ObservedPartitionReader[T](
     more
   }
 
-  override def get(): T = {
+  override def get(): ColumnarBatch = {
     require(ready && !closed, "No current value; call next() before get()")
     current match {
       case Some(value) => value
       case None =>
         val value = progress.inPhase(ReadFailurePhase.Convert)(underlying.get())
         current = Some(value)
-        progress.emittedRows(rowCount(value))
+        progress.emittedRows(value.numRows().toLong)
         value
     }
   }

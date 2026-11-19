@@ -31,7 +31,12 @@ import org.scalatest.matchers.should.Matchers
 import com.zilliz.milvus.storage.codec.FloatConverter
 import com.zilliz.milvus.storage.codec.SparseFloatVectorEncoder
 import com.zilliz.milvus.storage.schema.FieldMetadata
-import com.zilliz.spark.connector.types.{ArrowConverter, SparkSchemaMapper}
+import com.zilliz.spark.connector.types.{
+  MilvusArrayColumn,
+  MilvusSparseVectorColumn,
+  SparkSchemaMapper,
+  Utf8FromBinaryColumn
+}
 import com.zilliz.spark.connector.write.ArrowWriter
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
@@ -404,9 +409,7 @@ class ArrowWriterTest extends AnyFunSuite with Matchers {
         vector.get(0) shouldBe SparseFloatVectorEncoder
           .encodeSparseFloatVector(Map(1L -> 1.25f, 3L -> 2.5f))
 
-        val decoded = ArrowConverter
-          .arrowToInternalRow(root, 0, sparkSchema)
-          .getMap(0)
+        val decoded = MilvusSparseVectorColumn(vector).getMap(0)
         decoded.keyArray().toLongArray shouldBe Array(1L, 3L)
         decoded.valueArray().toFloatArray shouldBe Array(1.25f, 2.5f)
       } finally root.close()
@@ -482,9 +485,6 @@ class ArrowWriterTest extends AnyFunSuite with Matchers {
         values.zipWithIndex.foreach { case (v, i) =>
           vector.isNull(i) shouldBe false
           vector.get(i) shouldBe v
-          ArrowConverter
-            .arrowToInternalRow(root, i, sparkSchema)
-            .getByte(0) shouldBe v
         }
         vector.isNull(values.size) shouldBe true
       } finally root.close()
@@ -615,26 +615,22 @@ class ArrowWriterTest extends AnyFunSuite with Matchers {
               sparkSchema
             )
             root.setRowCount(3)
-            val v = root.getVector(0).asInstanceOf[VarBinaryVector]
+            val v = root.getVector("105").asInstanceOf[VarBinaryVector]
             ArrayCodec.elements(v.get(0)) shouldBe stored
             // An empty array must not serialize to zero bytes: Milvus reads a
             // zero-length Binary value as null (segcore FieldData.cpp).
             v.get(1).length should be > 0
             ArrayCodec.elements(v.get(1)) shouldBe Seq.empty
             v.isNull(2) shouldBe true
-            // And the connector reads back what it wrote, on the row path.
-            // The column is named by field id, as the manifest records it.
-            val names = Map("arr" -> "105")
-            val back =
-              ArrowConverter.arrowToInternalRow(root, 0, sparkSchema, names)
-            back.getArray(0).numElements() shouldBe stored.size
-            ArrowConverter
-              .arrowToInternalRow(root, 1, sparkSchema, names)
-              .getArray(0)
-              .numElements() shouldBe 0
-            ArrowConverter
-              .arrowToInternalRow(root, 2, sparkSchema, names)
-              .isNullAt(0) shouldBe true
+            val back = new MilvusArrayColumn(v, elementType)
+            try {
+              back
+                .getArray(0)
+                .toObjectArray(elementType)
+                .toSeq shouldBe sparkValues
+              back.getArray(1).numElements() shouldBe 0
+              back.isNullAt(2) shouldBe true
+            } finally back.close()
           } finally root.close()
         } finally allocator.close()
       }
@@ -664,14 +660,12 @@ class ArrowWriterTest extends AnyFunSuite with Matchers {
           sparkSchema
         )
         root.setRowCount(1)
+        val vector = root.getVector("106").asInstanceOf[VarBinaryVector]
         new String(
-          root.getVector(0).asInstanceOf[VarBinaryVector].get(0),
+          vector.get(0),
           java.nio.charset.StandardCharsets.UTF_8
         ) shouldBe json
-        ArrowConverter
-          .arrowToInternalRow(root, 0, sparkSchema, Map("j" -> "106"))
-          .getUTF8String(0)
-          .toString shouldBe json
+        new Utf8FromBinaryColumn(vector).getUTF8String(0).toString shouldBe json
       } finally root.close()
     } finally allocator.close()
   }

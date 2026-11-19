@@ -23,7 +23,6 @@ val source = spark.read
   .format("milvus")
   .options(snapshot)
   .option("milvus.read.mode", "physical")
-  .option("milvus.read.include_row_id", "true")
   .load()
   .select("_milvus_row_id", "id", "score", "embedding")
 
@@ -63,7 +62,8 @@ storage identity, and the driver must have read access to the result address.
 
 ## What the DataFrame must contain
 
-- `_milvus_row_id`, exactly as the physical read produced it. It is a struct of
+- `_milvus_row_id`, exactly as the physical read produced it. Explicitly
+  select this hidden column, since `SELECT *` omits it. It is a struct of
   the snapshot id, the segment id and the row's stored offset. Callers carry it
   through joins, filters and projections unchanged; they do not build it or
   interpret its fields.
@@ -95,10 +95,9 @@ and Storage V3 segments. Only Storage V3 is written.
 
 ## Write options
 
-Reuse the Snapshot path and storage settings from the read. Keep
-`milvus.read.mode=physical` and `milvus.read.include_row_id=true` on the read
-builder only, as in the example above; do not put them in the shared options
-map passed to the writer.
+Reuse the Snapshot path and storage settings from the read. Set
+`milvus.read.mode=physical` on the read builder and select `_milvus_row_id`
+before joining external updates.
 
 | Option | Default | What to provide |
 |---|---|---|
@@ -108,14 +107,13 @@ map passed to the writer.
 | `fs.*` | Resolved from the supplied options and Spark's Hadoop configuration | The [storage settings](reference.md#22-storage-location-and-credentials) for the Snapshot. The job needs read access to the existing data and write access to the segment locations and result address. |
 | `path` | Unset; required | Supply it with `.save(resultPath)`. It is a fresh address for the write's records and receipt; the replacement column files are stored beside the existing segment data. |
 
-The writer takes the fields to replace from the DataFrame's columns. Read
-selection options do not choose the write's rows or fields:
+The writer takes the fields to replace from the DataFrame's columns. Its input
+must cover every stored row of the snapshot, including rows marked deleted.
+A source filter that excludes a partition with stored rows fails this check.
 
 | Options rejected by the writer | Reason |
 |---|---|
-| `milvus.read.mode`, `milvus.read.include_row_id` | These configure the source read. The DataFrame must already contain `_milvus_row_id`. |
-| `milvus.partitions` | The write must cover every stored row of the Snapshot. |
-| `fieldIDs`, `milvus.extra.columns` | Select the replacement columns in the DataFrame before writing. |
+| `milvus.read.mode` | This configures the source read. The DataFrame must already contain `_milvus_row_id`. |
 | `milvus.snapshot.manifests`, `milvus.snapshot.schema.bytes`, `milvus.snapshot.schema.json` | A write requires the original Snapshot file, not an explicit empty Snapshot. |
 
 ## Write modes

@@ -37,8 +37,7 @@ def read_options(path):
         raise ValueError("Options must contain a fixed milvus.snapshot.path")
     allowed = {
         "milvus.snapshot.path",
-        "milvus.partitions", "fieldIDs", "milvus.extra.columns",
-        "milvus.read.apply.deletes", "milvus.read.vector.raw", "milvus.read.columnar",
+        "milvus.read.mode", "milvus.read.vector.raw",
         "milvus.read.batch.max.rows", "milvus.read.batch.max.bytes", "milvus.read.arrow.max.bytes",
     }
     if any(not isinstance(key, str) or not isinstance(value, str) or not value
@@ -61,7 +60,7 @@ def parse_args(description, argv=None, *, filtering=False):
     parser.add_argument("--max-rows", type=int, default=10000)
     parser.add_argument("--explain", action="store_true")
     if filtering:
-        parser.add_argument("--where", help="Spark SQL predicate; default: category = 1")
+        parser.add_argument("--where", help="Spark SQL predicate to apply to the snapshot")
     args = parser.parse_args(argv)
     args.fixture = args.options is None
     if not 0 < args.max_rows <= 10000:

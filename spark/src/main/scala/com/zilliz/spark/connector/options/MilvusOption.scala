@@ -7,58 +7,25 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import com.zilliz.milvus.storage.read.plan.ReadLimits
 
 case class MilvusOption(
-    fieldIDs: String = "",
-    extraColumns: Seq[String] = Seq.empty,
-    options: Map[String, String] = Map.empty,
-    readLimits: ReadLimits = ReadLimits.Default
+    options: Map[String, String],
+    readLimits: ReadLimits
 )
 
 object MilvusOption {
   // Constants for map keys
-  val MilvusPartitions = "milvus.partitions"
   val ReadBatchMaxRows = "milvus.read.batch.max.rows"
   val ReadBatchMaxBytes = "milvus.read.batch.max.bytes"
   val ReadArrowMaxBytes = "milvus.read.arrow.max.bytes"
 
-  /** A removed option that took a Milvus scalar expression; Spark SQL and
-    * DataFrame filters replace it. Spark passes unknown options through, so a
-    * read that still sets this one fails instead of returning unfiltered rows.
-    */
   private val RemovedMilvusFilter = "milvus.filter"
-
-  val MilvusExtraColumns = "milvus.extra.columns"
-  val MilvusExtraColumnSegmentID = "_segment_id"
-  val MilvusExtraColumnRowOffset = "_row_offset"
-  val MilvusExtraColumnTimestamp = "_timestamp"
-
-  /** The stored position of a row in its snapshot, requested with
-    * [[ReadIncludeRowId]] rather than [[MilvusExtraColumns]].
-    */
-  val MilvusRowIdColumn = "_milvus_row_id"
-  private[connector] val MilvusExtraColumnSegmentIDAlias = "$segment_id"
-  private[connector] val MilvusExtraColumnRowOffsetAlias = "$row_offset"
-  private val MilvusExtraColumnSegmentIDBareAlias = "segment_id"
-  private val MilvusExtraColumnRowOffsetBareAlias = "row_offset"
-
-  private val SupportedExtraColumns = Set(
-    MilvusExtraColumnSegmentID,
-    MilvusExtraColumnRowOffset,
-    MilvusExtraColumnTimestamp
+  private val UnsupportedOptions = Seq(
+    "milvus.partitions",
+    "fieldIDs",
+    "milvus.extra.columns",
+    "milvus.read.include_row_id",
+    "milvus.read.apply.deletes",
+    "milvus.read.columnar"
   )
-
-  private[connector] def normalizeExtraColumnName(name: String): String =
-    name match {
-      case MilvusExtraColumnSegmentIDAlias |
-          MilvusExtraColumnSegmentIDBareAlias =>
-        MilvusExtraColumnSegmentID
-      case MilvusExtraColumnRowOffsetAlias |
-          MilvusExtraColumnRowOffsetBareAlias =>
-        MilvusExtraColumnRowOffset
-      case other => other
-    }
-
-  // reader config
-  val ReaderFieldIDs = "fieldIDs"
 
   // s3 config
   val S3Endpoint = "s3.endpoint"
@@ -86,9 +53,7 @@ object MilvusOption {
   val SnapshotSchemaBytes =
     "milvus.snapshot.schema.bytes" // Base64 encoded protobuf CollectionSchema bytes
   val SnapshotMaxJsonBytes = "milvus.snapshot.max.json.bytes"
-  val ReadApplyDeletes = "milvus.read.apply.deletes"
   val ReadVectorRaw = "milvus.read.vector.raw"
-  val ReadColumnar = "milvus.read.columnar"
 
   /** What a load reads. Absent: the collection's live rows. `physical`: every
     * stored row, including rows marked deleted, which a column replacement
@@ -98,9 +63,6 @@ object MilvusOption {
   val ReadMode = "milvus.read.mode"
   val ReadModePhysical = "physical"
   val ReadModeWriteResult = "write_result"
-
-  /** `true` adds [[MilvusRowIdColumn]] to a physical read. */
-  val ReadIncludeRowId = "milvus.read.include_row_id"
 
   /** What a write does. The one operation is [[WriteOperationReplaceColumns]]:
     * new files for the given columns of every stored row of a fixed snapshot.
@@ -208,44 +170,6 @@ object MilvusOption {
     readModeFrom(key => Option(options.get(key)))
       .contains(ReadModeWriteResult)
 
-  /** A physical read keeps rows marked deleted, so it cannot also be asked to
-    * apply deletes.
-    */
-  private def readApplyDeletesFrom(
-      getOption: String => Option[String]
-  ): Boolean =
-    if (readModeFrom(getOption).contains(ReadModePhysical)) {
-      if (booleanOption(getOption, ReadApplyDeletes, defaultValue = false)) {
-        throw new IllegalArgumentException(
-          s"'$ReadMode=$ReadModePhysical' reads every stored row including rows marked deleted; " +
-            s"remove '$ReadApplyDeletes=true'"
-        )
-      }
-      false
-    } else booleanOption(getOption, ReadApplyDeletes, defaultValue = true)
-
-  /** The row identity names a stored position, so only a physical read, whose
-    * rows are exactly the stored ones, can carry it.
-    */
-  private def readIncludeRowIdFrom(
-      getOption: String => Option[String]
-  ): Boolean = {
-    val requested =
-      booleanOption(getOption, ReadIncludeRowId, defaultValue = false)
-    if (requested && !readModeFrom(getOption).contains(ReadModePhysical)) {
-      throw new IllegalArgumentException(
-        s"'$ReadIncludeRowId=true' identifies stored rows and requires '$ReadMode=$ReadModePhysical'"
-      )
-    }
-    requested
-  }
-
-  def readIncludeRowId(options: Map[String, String]): Boolean =
-    readIncludeRowIdFrom(key => OptionParsing.value(options, key))
-
-  def readIncludeRowId(options: CaseInsensitiveStringMap): Boolean =
-    readIncludeRowIdFrom(key => Option(options.get(key)))
-
   /** The write operation, if the options ask for one. */
   private def writeOperationFrom(
       getOption: String => Option[String]
@@ -267,14 +191,6 @@ object MilvusOption {
   def writeOperation(options: CaseInsensitiveStringMap): Option[String] =
     writeOperationFrom(key => Option(options.get(key)))
 
-  def readApplyDeletes(options: Map[String, String]): Boolean = {
-    readApplyDeletesFrom(key => OptionParsing.value(options, key))
-  }
-
-  def readApplyDeletes(options: CaseInsensitiveStringMap): Boolean = {
-    readApplyDeletesFrom(key => Option(options.get(key)))
-  }
-
   /** Whether vector columns come out as the bytes Milvus stored. Default false:
     * vectors are decoded into Spark's own types. True hands the stored bytes
     * over as BinaryType, which is what a job that feeds them straight to a
@@ -294,118 +210,32 @@ object MilvusOption {
     readVectorRawFrom(key => Option(options.get(key)))
   }
 
-  /** Whether the scan hands Spark whole batches instead of rows. Columnar
-    * output is the default. Row and columnar readers share the V3 format and
-    * delete contracts, covered by fixed read fixtures. `false` selects the row
-    * path.
-    */
-  private def readColumnarFrom(
-      getOption: String => Option[String]
-  ): Boolean =
-    booleanOption(getOption, ReadColumnar, defaultValue = true)
-
-  private def selectedIdsFrom(
-      getOption: String => Option[String],
-      key: String
-  ): Seq[Long] = OptionParsing.nonNegativeLongList(getOption, key)
-
-  /** The synthesized and system columns a read adds to the collection fields:
-    * those [[MilvusExtraColumns]] lists, then the row identity when
-    * [[ReadIncludeRowId]] asks for it.
-    */
-  private def extraColumnsFrom(
-      getOption: String => Option[String]
-  ): Seq[String] = {
-    val listed = listedExtraColumnsFrom(getOption)
-    if (readIncludeRowIdFrom(getOption)) listed :+ MilvusRowIdColumn
-    else listed
-  }
-
-  private def listedExtraColumnsFrom(
-      getOption: String => Option[String]
-  ): Seq[String] = {
-    val raw = getOption(MilvusExtraColumns).map(_.trim).getOrElse("")
-    if (raw.isEmpty) return Seq.empty
-    val values = raw.split(",", -1).toSeq.map(_.trim)
-    if (values.exists(_.isEmpty)) {
-      throw new IllegalArgumentException(
-        s"Option '$MilvusExtraColumns' must be a comma-separated list without empty entries, got '$raw'"
-      )
-    }
-    val normalized = values.map(normalizeExtraColumnName)
-    if (normalized.contains(MilvusRowIdColumn)) {
-      throw new IllegalArgumentException(
-        s"Option '$MilvusExtraColumns' cannot request '$MilvusRowIdColumn'; " +
-          s"set '$ReadMode=$ReadModePhysical' and '$ReadIncludeRowId=true'"
-      )
-    }
-    val unsupported = normalized.filterNot(SupportedExtraColumns).distinct
-    if (unsupported.nonEmpty) {
-      throw new IllegalArgumentException(
-        s"Option '$MilvusExtraColumns' contains unsupported column(s) ${unsupported
-            .mkString(", ")}; " +
-          s"supported columns are ${SupportedExtraColumns.toSeq.sorted.mkString(", ")}"
-      )
-    }
-    normalized.distinct
-  }
-
-  def extraColumns(options: Map[String, String]): Seq[String] =
-    extraColumnsFrom(key => OptionParsing.value(options, key))
-
-  def extraColumns(options: CaseInsensitiveStringMap): Seq[String] =
-    extraColumnsFrom(key => Option(options.get(key)))
-
-  def selectedPartitionIds(options: Map[String, String]): Seq[Long] =
-    selectedIdsFrom(
-      key => OptionParsing.value(options, key),
-      MilvusPartitions
-    )
-
-  def selectedPartitionIds(
-      options: CaseInsensitiveStringMap
-  ): Seq[Long] =
-    selectedIdsFrom(key => Option(options.get(key)), MilvusPartitions)
-
-  def readerFieldIds(options: Map[String, String]): Seq[Long] =
-    selectedIdsFrom(
-      key => OptionParsing.value(options, key),
-      ReaderFieldIDs
-    )
-
-  def readerFieldIds(options: CaseInsensitiveStringMap): Seq[Long] =
-    selectedIdsFrom(key => Option(options.get(key)), ReaderFieldIDs)
-
-  def readColumnar(options: Map[String, String]): Boolean = {
-    readColumnarFrom(key => OptionParsing.value(options, key))
-  }
-
-  def readColumnar(options: CaseInsensitiveStringMap): Boolean = {
-    readColumnarFrom(key => Option(options.get(key)))
-  }
-
   /** Parse public read options. */
   def apply(options: CaseInsensitiveStringMap): MilvusOption = {
     import scala.jdk.CollectionConverters._
     rejectRemovedOptions(options)
     MilvusOption(
-      fieldIDs = options.getOrDefault(ReaderFieldIDs, ""),
-      extraColumns = extraColumns(options),
       options = options.asScala.toMap,
       readLimits = readLimits(options)
     )
   }
 
-  /** Fails if `options` sets an option the connector has removed; any value
-    * counts, a blank one included. `apply` calls it first. A reader that parses
-    * these options one by one instead of through `apply` calls it itself.
-    */
-  def rejectRemovedOptions(options: CaseInsensitiveStringMap): Unit =
+  /** Reject removed snapshot read options, including blank values. */
+  def rejectRemovedOptions(options: CaseInsensitiveStringMap): Unit = {
     if (options.containsKey(RemovedMilvusFilter)) {
       throw new IllegalArgumentException(
         s"Option '$RemovedMilvusFilter' was removed; use DataFrame where/filter or SQL WHERE instead, " +
           "which the connector pushes down to the scan"
       )
+    }
+    rejectUnsupportedOptions(options)
+  }
+
+  private[connector] def rejectUnsupportedOptions(
+      options: CaseInsensitiveStringMap
+  ): Unit =
+    UnsupportedOptions.find(options.containsKey).foreach { key =>
+      throw new IllegalArgumentException(s"Unsupported option '$key'")
     }
 
   /** Resource limits shared by public and private storage readers. */

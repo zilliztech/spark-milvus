@@ -265,7 +265,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
   }
 
   test(
-    "V3 L0 roles survive materialization and narrowing"
+    "V3 L0 roles survive materialization and segment pruning"
   ) {
     withDir { dir =>
       val l0Key = "files/snapshots/10/manifests/1/41.avro"
@@ -307,14 +307,8 @@ class SnapshotCatalogTest extends AnyFunSuite {
       assert(snapshot.deleteOnlySegments.map(_.id) == Seq(41L))
       assert(snapshot.deleteOnlySegments.head.partitionId == -1L)
       assert(snapshot.dataSegments.head.channelName == "channel-a")
-      val narrowed = snapshot.narrow(Seq(20L))
+      val narrowed = snapshot.retainDataSegments(Set(30L))
       assert(narrowed.segments.map(_.id) == Seq(30L, 41L))
-      assert(
-        snapshot.retainDataSegments(Set(30L)).segments.map(_.id) == Seq(
-          30L,
-          41L
-        )
-      )
       val plan = ReadPlan.of(narrowed, _ => Map.empty, applyDeletes = false)
       assert(plan.specs.map(_.segmentId) == Seq(30L))
     }
@@ -431,7 +425,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
           42L -> 21L
         )
       )
-      val narrowed = snapshot.narrow(Seq(21L))
+      val narrowed = snapshot.retainDataSegments(Set(30L))
       assert(narrowed.segments.map(_.id) == Seq(30L, 41L, 42L))
       val deletes = DeleteFileListing
         .of(narrowed, true, "", store)

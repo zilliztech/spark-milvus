@@ -3,17 +3,16 @@ package com.zilliz.spark.connector
 /** The single Milvus-to-Spark type contract and its Arrow value conversion.
   * `SparkTypes.toStructField` owns type, nullability and Milvus field metadata.
   * Unsupported Milvus or Spark types fail instead of becoming binary or null.
-  * ArrowConverter turns supported values into InternalRow for row readers.
-  * ArrowValueTypes owns the metadata and layout checks shared with writers; the
-  * ColumnVector implementations consume the same batches on the columnar route.
+  * ColumnVector implementations expose Arrow batch values to Spark.
+  * ArrowValueTypes supplies the type metadata and layout checks for writers.
   * MilvusArrayColumn and Utf8FromBinaryColumn cover the supported fields whose
   * stored Arrow type differs from their Spark type. `ArrowAllocator` keeps the
   * process root alive and creates a bounded child for each read task; the final
   * partition reader owns that child. `ConstantColumn` supplies one value for
   * every row, `RowOffsetColumn` supplies consecutive row positions, and
   * `SelectedRowsColumn` presents selected rows of another column, children
-  * included, without copying its buffers. `RowIdentity` defines the
-  * `_milvus_row_id` struct that binds a row to its snapshot and stored
-  * position; `RowIdColumn` produces it for a batch.
+  * included, without copying its buffers. `RowIdentity` defines the hidden
+  * `_milvus_row_id` column and its struct that binds a physical row to its
+  * snapshot and stored position; `RowIdColumn` produces it for a batch.
   */
 package object types

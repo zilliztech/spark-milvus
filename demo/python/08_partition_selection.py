@@ -5,23 +5,20 @@ from common import bounded_rows, demo_session
 
 
 def main():
-    with demo_session(__doc__) as (spark, args, options):
-        # These are IDs recorded in the snapshot, not names resolved by a service.
-        # The sample contains partition 20 and fields 100/101/102.
-        # A custom options JSON can replace these selections for another snapshot.
+    with demo_session(__doc__, filtering=True) as (spark, args, options):
+        # The sample contains partition 20.
         selected = (spark.read.format("milvus").options(**options)
-                    .option("milvus.partitions", options.get("milvus.partitions", "20"))
-                    .option("fieldIDs", options.get("fieldIDs", "100,102"))
-                    .option("milvus.extra.columns", "_segment_id,_row_offset,_timestamp")
-                    .load())
+                    .load()
+                    .where(args.where or "_partition_id IN (20)")
+                    .select("id", "category", "_partition_id", "_segment_id", "_row_offset", "_timestamp"))
         selected.printSchema()
         rows = bounded_rows(selected, args)
         selected.orderBy("id").show(20, truncate=False)
         if args.explain:
             selected.explain()
 
-        if args.fixture:
-            assert "vector" not in selected.columns
+        if args.fixture and args.where is None:
+            assert {row._partition_id for row in rows} == {20}
             assert {row.id for row in rows} == {row["id"] for row in args.expected_rows}
             assert {row._segment_id for row in rows} == {30, 31}
             assert {row._timestamp for row in rows} == {100}

@@ -12,14 +12,12 @@ package com.zilliz.milvus.storage
   * fixed snapshots. It requires snapshot format version 4 or 6, including for
   * empty snapshots. Legacy storage formats are rejected before planning.
   * Segment roles and source channels survive materialization; L0 segments
-  * remain delete sources through narrowing. The Milvus-allocated snapshot id
+  * remain delete sources through scan pruning. The Milvus-allocated snapshot id
   * and the collection schema version are kept, so that a row identity can be
   * bound to its snapshot and a write can report the schema it was based on.
   *
-  * SnapshotSelection validates partition selections from neutral segment
-  * descriptors, retaining every segment in the selected partitions and the
-  * collection-wide delete sources. Snapshot.retainDataSegments separately
-  * applies optimizer pruning while preserving applicable delete sources.
+  * Snapshot.retainDataSegments keeps the data segments selected by the scan
+  * planner and the delete sources that apply to those segments.
   * PhysicalColumnGroups carries already-resolved files and column names for
   * consumers of the low-level reader, without compatibility interpretation.
   */

@@ -13,72 +13,6 @@ import com.zilliz.milvus.storage.read.plan.ReadLimits
   */
 class MilvusOptionTest extends AnyFunSuite with Matchers {
 
-  test("Parse extra columns configuration with canonical names") {
-    val options = Map(
-      MilvusOption.MilvusExtraColumns ->
-        "_segment_id, _row_offset, _timestamp"
-    )
-
-    val milvusOption = MilvusOption(options)
-
-    milvusOption.extraColumns should contain allOf (
-      MilvusOption.MilvusExtraColumnSegmentID,
-      MilvusOption.MilvusExtraColumnRowOffset,
-      MilvusOption.MilvusExtraColumnTimestamp
-    )
-    milvusOption.extraColumns.size shouldBe 3
-  }
-
-  test("Parse legacy extra column aliases as canonical requests") {
-    val options = Map(
-      MilvusOption.MilvusExtraColumns ->
-        "$segment_id, segment_id, $row_offset, row_offset, _timestamp"
-    )
-
-    val milvusOption = MilvusOption(options)
-
-    milvusOption.extraColumns should contain allOf (
-      "_segment_id",
-      "_row_offset",
-      "_timestamp"
-    )
-    milvusOption.extraColumns.size shouldBe 3
-    milvusOption.extraColumns should not contain "segment_id"
-    milvusOption.extraColumns should not contain "row_offset"
-  }
-
-  test("extra columns reject partition, unknown names and empty entries") {
-    Seq("partition", "unknown", "_segment_id,,_row_offset").foreach { value =>
-      val error = intercept[IllegalArgumentException] {
-        MilvusOption(
-          Map(MilvusOption.MilvusExtraColumns -> value)
-        )
-      }
-      error.getMessage should include(MilvusOption.MilvusExtraColumns)
-      error.getMessage should include(value)
-    }
-  }
-
-  test("Parse empty extra columns") {
-    val options = Map(
-      MilvusOption.MilvusExtraColumns -> ""
-    )
-
-    val milvusOption = MilvusOption(options)
-
-    milvusOption.extraColumns shouldBe empty
-  }
-
-  test("Parse fieldIDs configuration") {
-    val options = Map(
-      MilvusOption.ReaderFieldIDs -> "100,101,102"
-    )
-
-    val milvusOption = MilvusOption(options)
-
-    milvusOption.fieldIDs shouldBe "100,101,102"
-  }
-
   test("Options map is preserved") {
     val options = Map(
       "custom.option" -> "custom_value"
@@ -199,14 +133,8 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
       MilvusOption.SnapshotMode -> ((options: Map[String, String]) =>
         MilvusOption.isSnapshotMode(options)
       ),
-      MilvusOption.ReadApplyDeletes -> ((options: Map[String, String]) =>
-        MilvusOption.readApplyDeletes(options)
-      ),
       MilvusOption.ReadVectorRaw -> ((options: Map[String, String]) =>
         MilvusOption.readVectorRaw(options)
-      ),
-      MilvusOption.ReadColumnar -> ((options: Map[String, String]) =>
-        MilvusOption.readColumnar(options)
       )
     ).foreach { case (key, parse) =>
       Seq("truthy", "", "   ").foreach { value =>
@@ -218,47 +146,19 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
     }
   }
 
-  test("partition selectors parse strict distinct ids") {
-    MilvusOption.selectedPartitionIds(
-      Map(MilvusOption.MilvusPartitions -> "20, 21,20")
-    ) shouldBe Seq(20L, 21L)
-    Seq(
-      "20,,21",
-      "   ",
-      "",
-      "20,nope",
-      "20,-1"
-    ).foreach { value =>
-      val error = intercept[IllegalArgumentException] {
-        MilvusOption.selectedPartitionIds(
-          Map(MilvusOption.MilvusPartitions -> value)
-        )
-      }
-      error.getMessage should include(MilvusOption.MilvusPartitions)
-      if (value.trim.isEmpty) error.getMessage should include("empty")
-      else error.getMessage should include(value)
-    }
-  }
-
-  test("reader field ids are strict and case insensitive") {
-    MilvusOption.readerFieldIds(
-      Map(MilvusOption.ReaderFieldIDs.toUpperCase -> "101, 300")
-    ) shouldBe Seq(101L, 300L)
-
-    val error = intercept[IllegalArgumentException] {
-      MilvusOption.readerFieldIds(
-        Map(MilvusOption.ReaderFieldIDs -> "101,field")
+  test("physical and live reads reject an explicit delete flag") {
+    for {
+      base <- Seq(
+        Map.empty[String, String],
+        Map(MilvusOption.ReadMode -> "physical")
       )
-    }
-    error.getMessage should include(MilvusOption.ReaderFieldIDs)
-    error.getMessage should include("field")
-
-    val blank = intercept[IllegalArgumentException] {
-      MilvusOption.readerFieldIds(
-        Map(MilvusOption.ReaderFieldIDs -> "   ")
+      value <- Seq("true", "false", "")
+    } {
+      val error = intercept[IllegalArgumentException](
+        MilvusOption(base + ("MILVUS.READ.APPLY.DELETES" -> value))
       )
+      error.getMessage shouldBe "Unsupported option 'milvus.read.apply.deletes'"
     }
-    blank.getMessage should include(MilvusOption.ReaderFieldIDs)
   }
 
   test("resource limits parse once with strict case-insensitive keys") {
