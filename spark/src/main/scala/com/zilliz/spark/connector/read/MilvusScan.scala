@@ -1,7 +1,6 @@
 package com.zilliz.spark.connector.read
 
 import java.util.OptionalLong
-import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
 import org.apache.hadoop.conf.Configuration
@@ -48,12 +47,14 @@ class MilvusScan(
     private[connector] val snapshot: Snapshot,
     private[connector] val pushedExpression: Option[PredicateExpr] = None,
     private[read] val pushedLimit: Option[Int] = None,
-    private[read] val planningSchema: StructType = null
+    private[read] val planningSchema: StructType = null,
+    private[read] val neededFieldIds: Seq[Long] = Seq.empty
 ) extends SegmentScan
     with SupportsReportStatistics
     with SupportsRuntimeV2Filtering
     with Logging {
   private val milvusOption = MilvusOption(options)
+  private val physicalRead = MilvusOption.isPhysicalRead(options)
   override def collectionSchema = snapshot.schema
   override def segmentOptions: Map[String, String] = milvusOption.options.toMap
   override def segmentPredicate: Option[PredicateExpr] = pushedExpression
@@ -99,11 +100,7 @@ class MilvusScan(
     ReadOperationalMetrics.planned(planInputPartitions().length.toLong)
 
   override def columnarSupportMode(): Scan.ColumnarSupportMode =
-    // SUPPORTED makes Spark skip the reader factory's per-partition check.
-    // The core evaluator consumes Arrow batches before either reader exposes
-    // them, so an accepted predicate does not force row materialization.
-    if (MilvusOption.readColumnar(options)) Scan.ColumnarSupportMode.SUPPORTED
-    else Scan.ColumnarSupportMode.UNSUPPORTED
+    Scan.ColumnarSupportMode.SUPPORTED
 
   /** The primary key, when the scan reads it. Spark resolves these references
     * against the scan output, and Spark 4.2 does so whenever it plans the scan
@@ -189,10 +186,8 @@ class MilvusScan(
     logInfo(
       s"Planning ${snapshot.segments.size} segment(s) of ${snapshot.name} from ${snapshot.origin}"
     )
-    // The delete files are listed here, which opens every V3 segment's
-    // manifest; none of them is read here. The store is the driver's, rooted
-    // at the snapshot's bucket.
-    val applyDeletes = MilvusOption.readApplyDeletes(options)
+    // Live scans list applicable delete files on the driver. Physical scans
+    // only need the data segments' fixed manifest versions.
     def listDeletes(
         store: ObjectStore,
         endpoint: String = ""
@@ -200,7 +195,7 @@ class MilvusScan(
       DeleteFileListing
         .of(
           snapshot,
-          applyDeletes,
+          applyDeletes = !physicalRead,
           bucket.getOrElse(""),
           store,
           endpoint
@@ -218,7 +213,7 @@ class MilvusScan(
       primaryKeyFilter.exists(_.values.nonEmpty) && cachedBloomPruner == null
     val needsDeleteStore =
       cachedDeleteListing == null &&
-        DeleteFileListing.requiresStore(snapshot, applyDeletes)
+        DeleteFileListing.requiresStore(snapshot, applyDeletes = !physicalRead)
 
     // Validate metadata that needs no storage before optional Bloom loading.
     // There are no delete paths to normalize in this case, so resolving an
@@ -302,9 +297,9 @@ class MilvusScan(
     val plan = ReadPlan.of(
       snapshot,
       properties = _ => planProperties,
-      applyDeletes = MilvusOption.readApplyDeletes(options),
+      applyDeletes = !physicalRead,
       deletes = deletes,
-      neededFieldIds = MilvusOption.readerFieldIds(options),
+      neededFieldIds = neededFieldIds,
       limits = milvusOption.readLimits
     )
     plan.specs.map(task => MilvusInputPartition(task): InputPartition).toArray
@@ -324,18 +319,11 @@ class MilvusScan(
       OperationalMetrics.phase(operation, "reading")
       new MilvusPartitionReaderFactory(
         schema,
-        MilvusPartitionReaderFactory.readerOptions(options.asScala.toMap),
+        MilvusOption.readVectorRaw(options),
         pushedExpression,
         pushedLimit,
         snapshotId =
-          if (
-            milvusOption.extraColumns.contains(MilvusOption.MilvusRowIdColumn)
-          )
-            snapshot.id.getOrElse(
-              throw new IllegalStateException(
-                s"snapshot ${snapshot.name} has no id for '${MilvusOption.MilvusRowIdColumn}'"
-              )
-            )
+          if (physicalRead) snapshot.id.getOrElse(0L)
           else 0L,
         operationToken = Some(operation)
       )

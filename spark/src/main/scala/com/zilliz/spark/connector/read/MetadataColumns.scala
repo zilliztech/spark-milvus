@@ -1,39 +1,83 @@
 package com.zilliz.spark.connector.read
 
-import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.connector.metric.CustomTaskMetric
-import org.apache.spark.sql.connector.read.PartitionReader
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{LongType, StructField, StructType}
 import org.apache.spark.sql.vectorized.ColumnVector
 
-import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.milvus.storage.schema.{FieldMetadata, SchemaMapper}
 import com.zilliz.spark.connector.types.{
   ConstantColumn,
   RowIdColumn,
-  RowOffsetColumn
+  RowIdentity,
+  RowOffsetColumn,
+  SparkTypes
 }
+import io.milvus.grpc.schema.{CollectionSchema, DataType => MilvusDataType}
 
-/** The columns synthesized from the physical read position: which segment
-  * produced a row, its offset within that segment, and `_milvus_row_id`, which
-  * binds both to the snapshot that was read.
+/** Metadata synthesized from the task's Milvus partition, segment and physical
+  * row offset, including the row identity bound to the snapshot that was read.
   *
-  * `_timestamp` is also a metadata extra column at the Spark API, but it is
-  * stored data (Milvus field id 1). It therefore passes through the normal
-  * column binding instead of being synthesized here.
+  * `_timestamp` is also a hidden column at the Spark API, but it is stored data
+  * (Milvus field id 1). It therefore passes through the normal column binding
+  * instead of being synthesized here.
   */
 object MetadataColumns {
 
-  private val SyntheticColumns = Set(
-    MilvusOption.MilvusExtraColumnSegmentID,
-    MilvusOption.MilvusExtraColumnRowOffset,
-    MilvusOption.MilvusRowIdColumn
+  val PartitionId = "_partition_id"
+  val SegmentId = "_segment_id"
+  val RowOffset = "_row_offset"
+  val Timestamp = "_timestamp"
+
+  val partitionIdField: StructField =
+    StructField(PartitionId, LongType, nullable = false)
+
+  private val positionFields = Seq(
+    partitionIdField,
+    StructField(SegmentId, LongType, nullable = false),
+    StructField(RowOffset, LongType, nullable = false)
   )
 
-  def isSyntheticColumn(name: String): Boolean = SyntheticColumns(name)
+  /** Spark resolves ordinary columns first. A visible collection field with the
+    * same name (including case variants) shadows the metadata column.
+    */
+  def hiddenFields(
+      visible: StructType,
+      collection: CollectionSchema,
+      physicalRead: Boolean = false
+  ): Seq[StructField] = {
+    def available(name: String): Boolean =
+      !visible.fieldNames.exists(_.equalsIgnoreCase(name))
+    val positions = positionFields.filter(field => available(field.name))
+    val timestamps =
+      if (available(Timestamp)) Seq(timestampField(collection)) else Nil
+    val identity =
+      if (physicalRead && available(RowIdentity.ColumnName))
+        Seq(RowIdentity.field)
+      else Nil
+    positions ++ timestamps ++ identity
+  }
 
-  /** Whether this requested column is synthesized rather than stored. */
-  def isMetadataColumn(name: String, requested: Set[String]): Boolean =
-    requested.contains(name) && isSyntheticColumn(name)
+  private def timestampField(collection: CollectionSchema): StructField = {
+    val timestamp =
+      (collection.fields ++ SchemaMapper.missingSystemFields(collection))
+        .find(_.fieldID == SchemaMapper.TimestampFieldId)
+        .get
+    require(
+      timestamp.dataType == MilvusDataType.Int64,
+      s"Snapshot field id 1 must be the Int64 timestamp, got ${timestamp.dataType}"
+    )
+    SparkTypes
+      .toStructField(timestamp, rawVectors = false)
+      .copy(name = Timestamp)
+  }
+
+  private val syntheticNames =
+    positionFields.map(_.name).toSet + RowIdentity.ColumnName
+
+  /** A stored collection field with the same name carries its own field ID. */
+  def isSynthetic(field: StructField): Boolean =
+    syntheticNames(field.name) && !field.metadata.contains(
+      FieldMetadata.MilvusFieldIdMetadataKey
+    )
 
   /** The column for `name`, or nothing when it is a real field the data
     * carries.
@@ -44,15 +88,18 @@ object MetadataColumns {
     */
   def columnFor(
       name: String,
+      partitionId: Long,
       segmentId: Long,
       startOffset: Long,
       snapshotId: Long = 0L
   ): Option[ColumnVector] = name match {
-    case MilvusOption.MilvusExtraColumnSegmentID =>
+    case PartitionId =>
+      Some(ConstantColumn.ofLong(partitionId))
+    case SegmentId =>
       Some(ConstantColumn.ofLong(segmentId))
-    case MilvusOption.MilvusExtraColumnRowOffset =>
+    case RowOffset =>
       Some(new RowOffsetColumn(startOffset))
-    case MilvusOption.MilvusRowIdColumn =>
+    case RowIdentity.ColumnName =>
       Some(
         new RowIdColumn(
           requireSnapshotId(snapshotId, segmentId),
@@ -69,77 +116,10 @@ object MetadataColumns {
   private def requireSnapshotId(snapshotId: Long, segmentId: Long): Long = {
     if (snapshotId <= 0L) {
       throw new IllegalStateException(
-        s"segment $segmentId was planned without a snapshot id, so it cannot produce '${MilvusOption.MilvusRowIdColumn}'"
+        s"segment $segmentId was planned without a snapshot id, so it cannot produce '${RowIdentity.ColumnName}'"
       )
     }
     snapshotId
   }
 
-  /** Splices the metadata columns into a row reader's output.
-    *
-    * The reader underneath produces the data columns in `schema` order with the
-    * metadata ones absent, so the two walk together: a metadata column is
-    * filled in from the partition, anything else is taken from the next value
-    * the reader produced.
-    *
-    * Returns the reader unchanged when the schema asks for none of them, which
-    * is the common case and should cost nothing.
-    */
-  def wrapRows(
-      underlying: RowOffsetReader,
-      schema: StructType,
-      requested: Set[String],
-      segmentId: Long,
-      snapshotId: Long = 0L
-  ): PartitionReader[InternalRow] = {
-    val anyRequested =
-      schema.fieldNames.exists(name => isMetadataColumn(name, requested))
-    if (!anyRequested) return underlying
-
-    new PartitionReader[InternalRow] {
-      override def next(): Boolean = underlying.next()
-
-      override def get(): InternalRow = {
-        val row = underlying.get()
-        val values = new Array[Any](schema.fields.length)
-        var readIndex = 0
-        schema.fields.zipWithIndex.foreach { case (field, writeIndex) =>
-          field.name match {
-            case MilvusOption.MilvusExtraColumnSegmentID
-                if requested.contains(field.name) =>
-              values(writeIndex) = segmentId
-            case MilvusOption.MilvusExtraColumnRowOffset
-                if requested.contains(field.name) =>
-              values(writeIndex) = underlying.lastReturnedRowOffset
-            case MilvusOption.MilvusRowIdColumn
-                if requested.contains(field.name) =>
-              values(writeIndex) = InternalRow(
-                requireSnapshotId(snapshotId, segmentId),
-                segmentId,
-                underlying.lastReturnedRowOffset
-              )
-            case _ =>
-              values(writeIndex) = row.get(readIndex, field.dataType)
-              readIndex += 1
-          }
-        }
-        InternalRow.fromSeq(values.toSeq)
-      }
-
-      override def close(): Unit = underlying.close()
-
-      override def currentMetricsValues(): Array[CustomTaskMetric] =
-        underlying.currentMetricsValues()
-    }
-  }
-}
-
-/** A row reader that can say where the row it just returned sat in the segment.
-  *
-  * Only `_row_offset` needs it, and only the reader knows it: it is the batch's
-  * start offset plus the row's index within the batch, and both are the
-  * reader's own bookkeeping.
-  */
-trait RowOffsetReader extends PartitionReader[InternalRow] {
-  def lastReturnedRowOffset: Long
 }

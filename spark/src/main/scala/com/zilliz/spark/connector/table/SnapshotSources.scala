@@ -25,22 +25,15 @@ import com.zilliz.spark.connector.options.{
   */
 object SnapshotSources {
 
-  def forRead(
-      milvusOption: MilvusOption,
-      withSegments: Boolean
-  ): SnapshotSource = {
+  def forRead(milvusOption: MilvusOption): SnapshotSource = {
     MilvusOption.validateSnapshotModeOptions(milvusOption.options)
-    val selectedPartitions =
-      MilvusOption.selectedPartitionIds(milvusOption.options)
-    val source = OptionParsing
+    OptionParsing
       .value(milvusOption.options, MilvusOption.SnapshotPath)
       .map(_.trim)
       .filter(_.nonEmpty) match {
       case Some(path) => catalogSource(milvusOption, path)
       case None       => new OptionStringsSnapshotSource(milvusOption)
     }
-    if (withSegments) narrowed(source, selectedPartitions)
-    else source
   }
 
   private def catalogSource(
@@ -82,17 +75,6 @@ object SnapshotSources {
       endpoint
     )
   }
-
-  private[connector] def narrowed(
-      source: SnapshotSource,
-      partitionIds: Seq[Long]
-  ): SnapshotSource =
-    SnapshotSource(
-      source
-        .snapshot()
-        .fold(throw _, identity)
-        .narrow(partitionIds)
-    )
 
   /** Builds one snapshot while owning one driver-side store. The store closes
     * after all metadata has been materialized, on both success and failure.

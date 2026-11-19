@@ -9,34 +9,55 @@ import java.io.{
 import java.nio.charset.StandardCharsets
 import scala.jdk.CollectionConverters._
 
+import org.apache.hadoop.conf.Configuration
 import org.apache.spark.sql.types.{LongType, StructField, StructType}
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 
-import com.zilliz.milvus.storage.expr.{FieldRef, IsNotNull, PredicateExpr}
+import com.zilliz.milvus.storage.expr.{FieldRef, IsNotNull}
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
-import com.zilliz.milvus.storage.snapshot.SegmentLayout
+import com.zilliz.milvus.storage.snapshot.{
+  SegmentLayout,
+  Snapshot,
+  SnapshotOrigin
+}
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.types.ArrowAllocator
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
   test(
-    "serialized reader factories retain read options without service or storage identities"
+    "the scan serializes a reader factory without service or storage identities"
   ) {
     val input = Map(
-      "MILVUS.READ.COLUMNAR" -> "false",
       MilvusOption.ReadVectorRaw -> "true",
-      MilvusOption.MilvusExtraColumns -> "_segment_id",
       "milvus.token" -> "driver-only-test-token",
       "milvus.client.key" -> "driver-only-client-key",
       "milvus.uri" -> "https://driver-only-service",
-      "fs.secret_access_key" -> "partition-only-storage-secret"
+      "fs.access_key_value" -> "partition-only-storage-secret"
     )
-    val retained = MilvusPartitionReaderFactory.readerOptions(input)
-    assert(!MilvusOption.readColumnar(retained))
-    assert(MilvusOption.readVectorRaw(retained))
-    assert(MilvusOption.extraColumns(retained) == Seq("_segment_id"))
-    val factory = new MilvusPartitionReaderFactory(StructType(Nil), retained)
+    val snapshot = Snapshot(
+      name = "t",
+      collectionId = 1L,
+      createdAt = None,
+      schema = milvusSchema,
+      partitionIds = Seq.empty,
+      segments = Seq.empty,
+      origin = SnapshotOrigin.Options,
+      bucket = ""
+    )
+    val scan = new MilvusScan(
+      schema,
+      new CaseInsensitiveStringMap(input.asJava),
+      snapshot
+    ) {
+      override private[read] def hadoopConfFor(path: String): Configuration = {
+        val conf = new Configuration(false)
+        conf.set("fs.s3a.secret.key", "driver-only-hadoop-secret")
+        conf
+      }
+    }
+    val factory = scan.createReaderFactory()
     val bytes = new ByteArrayOutputStream()
     val output = new ObjectOutputStream(bytes)
     try output.writeObject(factory)
@@ -57,41 +78,7 @@ class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
     val restored =
       try serialized.readObject().asInstanceOf[MilvusPartitionReaderFactory]
       finally serialized.close()
-    assert(!restored.supportColumnarReads(v3()))
-  }
-
-  test("requestedExtraColumns normalizes legacy aliases") {
-    val requested = MilvusPartitionReaderFactory.requestedExtraColumns(
-      Map(
-        MilvusOption.MilvusExtraColumns ->
-          "$segment_id,segment_id,$row_offset,row_offset,_timestamp"
-      )
-    )
-
-    assert(
-      requested == Set(
-        MilvusOption.MilvusExtraColumnSegmentID,
-        MilvusOption.MilvusExtraColumnRowOffset,
-        MilvusOption.MilvusExtraColumnTimestamp
-      )
-    )
-  }
-
-  test("metadata classification is limited to requested extra columns") {
-    val requested = Set(MilvusOption.MilvusExtraColumnSegmentID)
-
-    assert(
-      !MilvusPartitionReaderFactory.isMetadataExtraField(
-        MilvusOption.MilvusExtraColumnTimestamp,
-        requested
-      )
-    )
-    assert(
-      MilvusPartitionReaderFactory.isMetadataExtraField(
-        MilvusOption.MilvusExtraColumnSegmentID,
-        requested
-      )
-    )
+    assert(restored.supportColumnarReads(v3()))
   }
 
   private val milvusSchema = CollectionSchema(
@@ -120,28 +107,20 @@ class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
   private def v3() =
     MilvusInputPartition(task(SegmentLayout.Manifest("files/seg")))
 
-  private def factory(
-      columnar: Boolean,
-      pushedExpression: Option[PredicateExpr] = None
-  ) = new MilvusPartitionReaderFactory(
-    schema,
-    Map(MilvusOption.ReadColumnar -> columnar.toString),
-    pushedExpression
-  )
-
-  test(
-    "columnar is the default; milvus.read.columnar=false takes the row path"
-  ) {
-    val byDefault = new MilvusPartitionReaderFactory(schema, Map.empty)
-    assert(byDefault.supportColumnarReads(v3()))
-    assert(!factory(columnar = false).supportColumnarReads(v3()))
-    assert(factory(columnar = true).supportColumnarReads(v3()))
+  test("snapshot partitions support only columnar reads") {
+    val factory = new MilvusPartitionReaderFactory(schema, rawVectors = false)
+    assert(factory.supportColumnarReads(v3()))
+    val failure = intercept[UnsupportedOperationException] {
+      factory.createReader(v3())
+    }
+    assert(failure.getMessage.contains("columnar"))
   }
 
   test("a pushed-down predicate keeps V3 reads columnar") {
-    val withPredicate = factory(
-      columnar = true,
-      Some(IsNotNull(FieldRef(100L, DataType.Int64)))
+    val withPredicate = new MilvusPartitionReaderFactory(
+      schema,
+      rawVectors = false,
+      pushedExpression = Some(IsNotNull(FieldRef(100L, DataType.Int64)))
     )
     assert(withPredicate.supportColumnarReads(v3()))
   }

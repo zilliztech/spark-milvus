@@ -11,7 +11,6 @@ import org.apache.arrow.vector.{
 }
 import org.apache.arrow.vector.types.pojo.Schema
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -30,7 +29,7 @@ import com.zilliz.spark.connector.metrics.{
   ReadOperationalMetrics,
   ReadProgress
 }
-import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.types.SparkTypes
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
@@ -215,7 +214,6 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
       arrowColumnFor: String => String = identity,
       collection: CollectionSchema = milvusSchema,
       rawVectors: Boolean = false,
-      requestedExtraColumns: Set[String] = Set.empty,
       pushedExpression: Option[PredicateExpr] = None,
       columnNameFor: Long => Option[String] = (_: Long) => None,
       progress: ReadProgress = new ReadProgress
@@ -226,8 +224,8 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
     deleted,
     arrowColumnFor,
     rawVectors = rawVectors,
+    partitionId = 20L,
     segmentId = 30L,
-    requestedExtraColumns = requestedExtraColumns,
     pushedExpression = pushedExpression,
     columnNameFor = columnNameFor,
     progress = progress
@@ -259,8 +257,7 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
     )
     val observed = new ObservedPartitionReader(
       new LimitedBatchReader(base, 2, Some(progress)),
-      progress,
-      (batch: ColumnarBatch) => batch.numRows().toLong
+      progress
     )
     try {
       observed.next() shouldBe true
@@ -453,6 +450,7 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
         val column = r.get().column(2)
         column.getUTF8String(0).toString shouldBe """{"a":1}"""
         column.isNullAt(1) shouldBe true
+        column.getUTF8String(1) shouldBe null
         column.getUTF8String(2).toString shouldBe ""
         column.getUTF8String(3).toString shouldBe """{"名":"值"}"""
       } finally r.close()
@@ -601,11 +599,14 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
   test("metadata columns combine read position with the stored timestamp") {
     val allocator = new RootAllocator(Long.MaxValue)
     try {
+      val hidden =
+        StructType(MetadataColumns.hiddenFields(sparkSchema, milvusSchema))
       val schema = StructType(
         sparkSchema.fields.toSeq ++ Seq(
-          StructField(MilvusOption.MilvusExtraColumnSegmentID, LongType),
-          StructField(MilvusOption.MilvusExtraColumnRowOffset, LongType),
-          StructField(MilvusOption.MilvusExtraColumnTimestamp, LongType)
+          hidden(MetadataColumns.SegmentId),
+          hidden(MetadataColumns.RowOffset),
+          hidden(MetadataColumns.Timestamp),
+          hidden(MetadataColumns.PartitionId)
         )
       )
       val first =
@@ -615,13 +616,8 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
         Seq(first, second),
         schema = schema,
         arrowColumnFor = name =>
-          if (name == MilvusOption.MilvusExtraColumnTimestamp) "Timestamp"
-          else name,
-        requestedExtraColumns = Set(
-          MilvusOption.MilvusExtraColumnSegmentID,
-          MilvusOption.MilvusExtraColumnRowOffset,
-          MilvusOption.MilvusExtraColumnTimestamp
-        )
+          if (name == MetadataColumns.Timestamp) "Timestamp"
+          else name
       )
       try {
         r.next() shouldBe true
@@ -630,10 +626,12 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
         // Row offsets count from the start of the segment, not of the batch.
         (0 until 2).map(batch.column(4).getLong) shouldBe Seq(0L, 1L)
         (0 until 2).map(batch.column(5).getLong) shouldBe Seq(100L, 101L)
+        (0 until 2).map(batch.column(6).getLong) shouldBe Seq(20L, 20L)
 
         r.next() shouldBe true
         r.get().column(4).getLong(0) shouldBe 2L
         r.get().column(5).getLong(0) shouldBe 100L
+        r.get().column(6).getLong(0) shouldBe 20L
       } finally r.close()
     } finally allocator.close()
   }
@@ -646,14 +644,14 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
         fields = Seq(
           FieldSchema(
             fieldID = 102L,
-            name = MilvusOption.MilvusExtraColumnSegmentID,
+            name = MetadataColumns.SegmentId,
             dataType = DataType.Int64
           )
         )
       )
       val root = VectorSchemaRoot.create(namedSchema(collection), allocator)
       val values = root
-        .getVector(MilvusOption.MilvusExtraColumnSegmentID)
+        .getVector(MetadataColumns.SegmentId)
         .asInstanceOf[BigIntVector]
       values.allocateNew(1)
       values.setSafe(0, 77L)
@@ -661,13 +659,7 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
       val r = reader(
         Seq(root),
         schema = StructType(
-          Seq(
-            StructField(
-              MilvusOption.MilvusExtraColumnSegmentID,
-              LongType,
-              nullable = false
-            )
-          )
+          collection.fields.map(field => SparkTypes.toStructField(field))
         ),
         collection = collection
       )
@@ -691,6 +683,7 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
         (_, _) => false,
         identity,
         rawVectors = false,
+        partitionId = 20L,
         segmentId = 30L,
         taskAllocatorOwner = Some(owner)
       )
@@ -721,6 +714,7 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
       (_, _) => false,
       identity,
       rawVectors = false,
+      partitionId = 20L,
       segmentId = 30L,
       taskAllocatorOwner = Some(owner),
       progress = progress

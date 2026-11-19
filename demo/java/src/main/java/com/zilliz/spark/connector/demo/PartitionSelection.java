@@ -1,6 +1,5 @@
 package com.zilliz.spark.connector.demo;
 
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -13,15 +12,13 @@ import org.apache.spark.sql.Row;
 /** Select snapshot partitions and fields, and inspect physical row metadata. */
 public final class PartitionSelection {
     public static void main(String[] args) throws Exception {
-        try (DemoSupport demo = DemoSupport.open(args, "PartitionSelection", true, false)) {
-            // These IDs are recorded in the snapshot. The fixture contains partition
-            // 20 and fields 100/101/102; custom options can replace them.
+        try (DemoSupport demo = DemoSupport.open(args, "PartitionSelection", true, true)) {
+            // The sample contains partition 20.
             Dataset<Row> selected = demo.spark.read().format("milvus")
                 .options(demo.options)
-                .option("milvus.partitions", demo.options.getOrDefault("milvus.partitions", "20"))
-                .option("fieldIDs", demo.options.getOrDefault("fieldIDs", "100,102"))
-                .option("milvus.extra.columns", "_segment_id,_row_offset,_timestamp")
-                .load();
+                .load()
+                .where(demo.where == null ? "_partition_id IN (20)" : demo.where)
+                .select("id", "category", "_partition_id", "_segment_id", "_row_offset", "_timestamp");
             selected.printSchema();
             List<Row> rows = demo.boundedRows(selected);
             selected.orderBy("id").show(20, false);
@@ -29,12 +26,12 @@ public final class PartitionSelection {
                 selected.explain();
             }
 
-            if (demo.fixture) {
-                DemoSupport.require(!Arrays.asList(selected.columns()).contains("vector"),
-                    "fieldIDs should exclude the vector column");
+            if (demo.fixture && demo.where == null) {
                 Set<Long> ids = new HashSet<>();
                 Map<Long, Set<Long>> offsets = new HashMap<>();
                 for (Row row : rows) {
+                    DemoSupport.require(row.getLong(row.fieldIndex("_partition_id")) == 20L,
+                        "Expected a row from Milvus partition 20");
                     ids.add(row.getLong(row.fieldIndex("id")));
                     long segmentId = ((Number) row.getAs("_segment_id")).longValue();
                     offsets.computeIfAbsent(segmentId, key -> new HashSet<>())

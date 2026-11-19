@@ -1,9 +1,9 @@
 package com.zilliz.spark.connector.read
 
-import java.{util => ju}
-import scala.jdk.CollectionConverters._
+import scala.util.control.NonFatal
 
 import org.apache.spark.internal.Logging
+import org.apache.spark.sql.connector.expressions.{Literal, NamedReference}
 import org.apache.spark.sql.connector.expressions.filter.Predicate
 import org.apache.spark.sql.connector.read.{
   Scan,
@@ -12,14 +12,15 @@ import org.apache.spark.sql.connector.read.{
   SupportsPushDownRequiredColumns,
   SupportsPushDownV2Filters
 }
-import org.apache.spark.sql.types.{StructField, StructType}
+import org.apache.spark.sql.types.{LongType, NullType, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import com.zilliz.milvus.storage.expr.{And, PredicateExpr}
-import com.zilliz.milvus.storage.schema.FieldMetadata
+import com.zilliz.milvus.storage.schema.{FieldMetadata, SchemaMapper}
 import com.zilliz.milvus.storage.snapshot.Snapshot
 import com.zilliz.spark.connector.expr.SparkPredicateTranslator
 import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.types.RowIdentity
 
 class MilvusScanBuilder(
     schema: StructType,
@@ -43,25 +44,26 @@ class MilvusScanBuilder(
   }
 
   override def isPartiallyPushed: Boolean = true
-  private var currentOptions = options
-  private val milvusOption = MilvusOption(options)
-  private val extraColumns = milvusOption.extraColumns
-  private val configuredReaderFieldIds =
-    MilvusOption.readerFieldIds(options)
+  private val availableSchema = StructType(
+    schema.fields.toSeq ++ MetadataColumns.hiddenFields(
+      schema,
+      snapshot.schema,
+      physicalRead = MilvusOption.isPhysicalRead(options)
+    )
+  )
+  private val fieldsByName =
+    availableSchema.fields.map(field => field.name -> field).toMap
+  private val hasPartitionMetadata =
+    fieldsByName
+      .get(MetadataColumns.PartitionId)
+      .exists(MetadataColumns.isSynthetic)
 
   private var pushedPredicateArray: Array[Predicate] = Array.empty[Predicate]
   private var pushedExpression: Option[PredicateExpr] = None
   private var predicateFieldIds: Set[Long] = Set.empty
-
-  // None means Spark did not prune the scan, so the native reader keeps its
-  // existing all-fields behavior. Some(empty) is a real empty projection and
-  // still needs either a predicate field or one fallback physical field to
-  // drive the Arrow batches and their row counts.
-  private var projectedFieldIds: Option[Seq[Long]] = None
-  private var emptyProjectionFallbackId: Option[Long] = None
+  private var partitionIds: Option[Set[Long]] = None
 
   override def pruneColumns(requiredSchema: StructType): Unit = {
-    val fieldsByName = schema.fields.map(field => field.name -> field).toMap
     val requestedFields = requiredSchema.fields.map { field =>
       fieldsByName.getOrElse(
         field.name,
@@ -72,118 +74,127 @@ class MilvusScanBuilder(
       )
     }
 
-    def fieldId(field: StructField): Long = {
-      val metadata = field.metadata
-      if (
-        !metadata.contains(
-          FieldMetadata.MilvusFieldIdMetadataKey
-        )
-      ) {
-        throw new IllegalArgumentException(
-          s"Field '${field.name}' has no ${FieldMetadata.MilvusFieldIdMetadataKey} metadata; " +
-            "the scan cannot bind it to the fixed snapshot"
-        )
-      }
-      metadata.getLong(FieldMetadata.MilvusFieldIdMetadataKey)
+    if (snapshot.id.isEmpty && requestedFields.contains(RowIdentity.field)) {
+      throw new IllegalArgumentException(
+        s"Snapshot '${snapshot.name}' has no snapshot_info.id, so its rows cannot carry " +
+          s"'${RowIdentity.ColumnName}'. Read a snapshot file that Milvus created."
+      )
     }
+    currentSchema = StructType(requestedFields)
+  }
 
-    val requestedDataFields = requestedFields.filterNot(field =>
-      extraColumns.contains(field.name) &&
-        MetadataColumns.isSyntheticColumn(field.name)
+  private def fieldId(field: StructField): Long = {
+    require(
+      field.metadata.contains(FieldMetadata.MilvusFieldIdMetadataKey),
+      s"Field '${field.name}' has no ${FieldMetadata.MilvusFieldIdMetadataKey} metadata; " +
+        "the scan cannot bind it to the fixed snapshot"
     )
-    val scanFields = requestedFields.toSeq
-    val neededFieldIds = requestedDataFields.map(fieldId).toSeq
-
-    // A metadata-only or empty projection still needs one physical column so
-    // the native reader can produce batches and their row counts. This field
-    // is not added to Spark's output schema.
-    if (neededFieldIds.isEmpty) {
-      val fallbackId = schema.fields
-        .filterNot(field =>
-          extraColumns.contains(field.name) &&
-            MetadataColumns.isSyntheticColumn(field.name)
-        )
-        .map(fieldId)
-        .sorted
-        .headOption
-        .getOrElse(
-          throw new IllegalArgumentException(
-            "The fixed snapshot schema has no physical field to drive an empty or metadata-only projection"
-          )
-        )
-      emptyProjectionFallbackId = Some(fallbackId)
-    } else {
-      emptyProjectionFallbackId = None
-    }
-    projectedFieldIds = Some(neededFieldIds.distinct)
-    currentSchema = StructType(scanFields)
-    refreshReaderFieldIds()
+    field.metadata.getLong(FieldMetadata.MilvusFieldIdMetadataKey)
   }
 
   override def pushPredicates(
       predicates: Array[Predicate]
   ): Array[Predicate] = {
-    val accepted =
-      Array.newBuilder[(Predicate, SparkPredicateTranslator.Translated)]
+    val accepted = Array.newBuilder[Predicate]
+    val expressions = Seq.newBuilder[SparkPredicateTranslator.Translated]
+    val partitionFilters = Seq.newBuilder[Set[Long]]
     val residual = Array.newBuilder[Predicate]
     predicates.foreach { predicate =>
-      SparkPredicateTranslator.translate(predicate, schema) match {
-        case Some(translated) => accepted += predicate -> translated
-        case None             => residual += predicate
+      matchingPartitionIds(predicate) match {
+        case Some(ids) =>
+          accepted += predicate
+          partitionFilters += ids
+        case None =>
+          SparkPredicateTranslator.translate(predicate, availableSchema) match {
+            case Some(translated) =>
+              accepted += predicate
+              expressions += translated
+            case None => residual += predicate
+          }
       }
     }
-    val translated = accepted.result()
-    pushedPredicateArray = translated.map(_._1)
+    val translated = expressions.result()
+    pushedPredicateArray = accepted.result()
+    partitionIds = partitionFilters.result().reduceLeftOption(_ intersect _)
     pushedExpression = translated.iterator
-      .map(_._2.expr)
+      .map(_.expr)
       .reduceLeftOption[PredicateExpr](And.apply)
-    predicateFieldIds = translated.iterator.flatMap(_._2.fieldIds).toSet
-    refreshReaderFieldIds()
+    predicateFieldIds = translated.iterator.flatMap(_.fieldIds).toSet
     residual.result()
   }
 
   override def pushedPredicates(): Array[Predicate] =
     pushedPredicateArray.clone()
 
-  /** Recompute the native projection from the two independently mutable Spark
-    * callbacks. Spark normally pushes predicates before pruning columns, but
-    * the DataSource contract does not make correctness depend on that order.
+  /** Exact partition matches for a top-level equality or IN. A null literal
+    * cannot make either predicate true on a non-null partition ID.
     */
-  private def refreshReaderFieldIds(): Unit = {
-    val baseFieldIds = projectedFieldIds
-      .orElse(
-        if (configuredReaderFieldIds.nonEmpty) Some(configuredReaderFieldIds)
-        else None
-      )
-    baseFieldIds.foreach { projected =>
-      val selected = (projected ++ predicateFieldIds.toSeq.sorted).distinct
-      val neededFieldIds =
-        if (selected.nonEmpty) selected
-        else emptyProjectionFallbackId.toSeq
-      logInfo(s"Milvus field ids required by the scan: $neededFieldIds")
-      val tmpMap = new ju.HashMap[String, String]()
-      options.asScala.foreach { case (key, value) =>
-        if (!key.equalsIgnoreCase(MilvusOption.ReaderFieldIDs)) {
-          tmpMap.put(key, value)
-        }
+  private def matchingPartitionIds(predicate: Predicate): Option[Set[Long]] = {
+    if (!hasPartitionMetadata || predicate == null) return None
+    try {
+      val operator = predicate.name()
+      if (operator != "=" && operator != "IN") return None
+      predicate.children() match {
+        case Array(ref: NamedReference, values @ _*)
+            if ref
+              .fieldNames()
+              .sameElements(Array(MetadataColumns.PartitionId)) &&
+              (operator == "IN" || values.size == 1) =>
+          val ids = Set.newBuilder[Long]
+          values.foreach {
+            case value: Literal[_] =>
+              (value.dataType(), value.value()) match {
+                case (LongType, id: Long)        => ids += id
+                case (LongType | NullType, null) => // NULL cannot match.
+                case _                           => return None
+              }
+            case _ => return None
+          }
+          Some(ids.result())
+        case _ => None
       }
-      tmpMap.put(
-        MilvusOption.ReaderFieldIDs,
-        neededFieldIds.mkString(",")
-      )
-      currentOptions = new CaseInsensitiveStringMap(tmpMap)
+    } catch {
+      // As in SparkPredicateTranslator, malformed V2 extension nodes are residuals.
+      case NonFatal(_) => None
+    }
+  }
+
+  /** Projection and filter callbacks can arrive in either order. An empty or
+    * position-only output still needs a physical column for batch counts.
+    */
+  private def neededFieldIds: Seq[Long] = {
+    val projected =
+      currentSchema.fields.filterNot(MetadataColumns.isSynthetic).map(fieldId)
+    val selected = (projected.toSeq ++ predicateFieldIds.toSeq.sorted).distinct
+    if (selected.nonEmpty) selected
+    else {
+      // Count rows using the declared timestamp or primary key, even when the
+      // visible Spark schema contains only vectors. Both also serve live deletes.
+      val fallback = snapshot.schema.fields
+        .find(_.fieldID == SchemaMapper.TimestampFieldId)
+        .orElse(snapshot.primaryKeyField)
+        .orElse(snapshot.schema.fields.sortBy(_.fieldID).headOption)
+        .fold(SchemaMapper.TimestampFieldId)(_.fieldID)
+      Seq(fallback)
     }
   }
 
   override def build(): Scan = {
-    refreshReaderFieldIds()
+    val selectedSnapshot = partitionIds.fold(snapshot) { ids =>
+      val segments =
+        snapshot.dataSegments.iterator.filter(s => ids(s.partitionId))
+      snapshot.retainDataSegments(segments.map(_.id).toSet)
+    }
+    val readIds = neededFieldIds
+    logInfo(s"Milvus field ids required by the scan: $readIds")
     new MilvusScan(
       currentSchema,
-      currentOptions,
-      snapshot,
+      options,
+      selectedSnapshot,
       pushedExpression,
       pushedLimit,
-      planningSchema = schema
+      planningSchema = availableSchema,
+      neededFieldIds = readIds
     )
   }
 }

@@ -2,8 +2,8 @@ package com.zilliz.spark.connector.read
 
 import java.io.IOException
 
-import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read.PartitionReader
+import org.apache.spark.sql.vectorized.{ColumnVector, ColumnarBatch}
 import org.scalatest.funsuite.AnyFunSuite
 
 import com.zilliz.spark.connector.metrics.{
@@ -14,7 +14,7 @@ import com.zilliz.spark.connector.metrics.{
 }
 
 class ObservedPartitionReaderTest extends AnyFunSuite {
-  private class Rows extends PartitionReader[InternalRow] {
+  private class Batches extends PartitionReader[ColumnarBatch] {
     private var index = 0
     var gets = 0
     var closes = 0
@@ -22,35 +22,30 @@ class ObservedPartitionReaderTest extends AnyFunSuite {
       index += 1
       index <= 3
     }
-    override def get(): InternalRow = {
+    override def get(): ColumnarBatch = {
       gets += 1
-      InternalRow(index.toLong)
+      new ColumnarBatch(Array.empty[ColumnVector], 2)
     }
     override def close(): Unit = { closes += 1 }
   }
 
-  private def observed(
-      reader: PartitionReader[InternalRow],
-      progress: ReadProgress
-  ) =
-    new ObservedPartitionReader(reader, progress, (_: InternalRow) => 1L)
-
   test(
     "output counts get consumption once and early close has a distinct terminal reason"
   ) {
-    val source = new Rows
+    val source = new Batches
     val progress = new ReadProgress
-    val reader = observed(source, progress)
+    val reader = new ObservedPartitionReader(source, progress)
     assert(reader.next())
-    assert(reader.get().getLong(0) == 1L)
-    assert(reader.get().getLong(0) == 1L)
+    val batch = reader.get()
+    assert(batch.numRows() == 2)
+    assert(reader.get() eq batch)
     assert(reader.next())
     reader.close()
     reader.close()
     assert(!reader.next())
     assert(source.gets == 1)
     assert(source.closes == 1)
-    assert(progress.values(ReadOperationalMetrics.EmittedRows) == 1L)
+    assert(progress.values(ReadOperationalMetrics.EmittedRows) == 2L)
     assert(progress.values(ReadOperationalMetrics.CompletedSegments) == 1L)
     assert(
       progress.values(
@@ -67,7 +62,7 @@ class ObservedPartitionReaderTest extends AnyFunSuite {
   test("cancelled readers do not count as successfully consumed") {
     var cancelled = false
     val progress = new ReadProgress(isCancelled = () => cancelled)
-    val reader = observed(new Rows, progress)
+    val reader = new ObservedPartitionReader(new Batches, progress)
     assert(reader.next())
     reader.get()
     cancelled = true
@@ -84,11 +79,11 @@ class ObservedPartitionReaderTest extends AnyFunSuite {
     val primary = new IOException("read failed")
     val cleanup = new IOException("cleanup failed")
     val progress = new ReadProgress
-    val source = new Rows {
+    val source = new Batches {
       override def next(): Boolean = throw primary
       override def close(): Unit = { super.close(); throw cleanup }
     }
-    val reader = observed(source, progress)
+    val reader = new ObservedPartitionReader(source, progress)
     assert(intercept[IOException](reader.next()) eq primary)
     assert(intercept[IOException](reader.close()) eq cleanup)
     reader.close()
@@ -114,10 +109,10 @@ class ObservedPartitionReaderTest extends AnyFunSuite {
   ) {
     val cleanup = new IOException("cleanup failed")
     val progress = new ReadProgress
-    val source = new Rows {
+    val source = new Batches {
       override def close(): Unit = { super.close(); throw cleanup }
     }
-    val reader = observed(source, progress)
+    val reader = new ObservedPartitionReader(source, progress)
     while (reader.next()) reader.get()
     assert(
       progress.values(
@@ -145,13 +140,16 @@ class ObservedPartitionReaderTest extends AnyFunSuite {
   }
 
   test("a zero partition limit emits nothing and never advances its source") {
-    val source = new Rows {
+    val source = new Batches {
       override def next(): Boolean =
         fail("the zero limit must not advance its source")
     }
     val progress = new ReadProgress
     val reader =
-      observed(new LimitedRowReader(source, 0, Some(progress)), progress)
+      new ObservedPartitionReader(
+        new LimitedBatchReader(source, 0, Some(progress)),
+        progress
+      )
     assert(!reader.next())
     reader.close()
     assert(progress.values(ReadOperationalMetrics.EmittedRows) == 0L)

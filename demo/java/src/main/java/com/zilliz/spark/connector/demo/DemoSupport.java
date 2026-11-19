@@ -26,9 +26,8 @@ import org.apache.spark.sql.SparkSession;
 public final class DemoSupport implements AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Set<String> READ_OPTIONS = Set.of(
-        "milvus.snapshot.path", "milvus.partitions",
-        "fieldIDs", "milvus.extra.columns", "milvus.read.apply.deletes",
-        "milvus.read.vector.raw", "milvus.read.columnar", "milvus.read.batch.max.rows",
+        "milvus.snapshot.path", "milvus.read.mode",
+        "milvus.read.vector.raw", "milvus.read.batch.max.rows",
         "milvus.read.batch.max.bytes", "milvus.read.arrow.max.bytes");
 
     public SparkSession spark;

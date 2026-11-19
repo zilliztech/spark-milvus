@@ -9,11 +9,7 @@ import org.scalatest.matchers.should.Matchers
 import com.zilliz.milvus.storage.codec.FloatConverter
 import io.milvus.grpc.schema.DataType
 
-/** The columnar side of the vector column typing. Every case checks against
-  * `FloatConverter`, which is what the row path uses, so the two paths cannot
-  * drift: the same stored bytes have to read back as the same values whichever
-  * one the scan took.
-  */
+/** Checks the element types and values exposed for each stored vector type. */
 class MilvusVectorColumnTest extends AnyFunSuite with Matchers {
 
   private def withVector(byteWidth: Int, rows: Seq[Array[Byte]])(
@@ -56,7 +52,7 @@ class MilvusVectorColumnTest extends AnyFunSuite with Matchers {
     }
   }
 
-  test("a half-precision vector decodes the same way the row path does") {
+  test("a half-precision vector exposes float elements") {
     val values = Seq(1.0f, -2.5f, 0.0f, 65504.0f)
     val bytes = values.flatMap(FloatConverter.toFloat16Bytes).toArray
     withVector(8, Seq(bytes)) { vector =>
@@ -75,7 +71,7 @@ class MilvusVectorColumnTest extends AnyFunSuite with Matchers {
     }
   }
 
-  test("a bfloat16 vector decodes the same way the row path does") {
+  test("a bfloat16 vector exposes float elements") {
     val values = Seq(1.0f, -2.5f, 0.0f, 100.0f)
     val bytes = values.flatMap(FloatConverter.toBFloat16Bytes).toArray
     withVector(8, Seq(bytes)) { vector =>
@@ -94,8 +90,6 @@ class MilvusVectorColumnTest extends AnyFunSuite with Matchers {
     }
   }
 
-  // Signed, and Spark has no byte array type that survives the round trip, so
-  // the row path widens to Short and this has to agree.
   test("an int8 vector widens to short, sign and all") {
     val bytes = Array[Byte](127, -128, 0, -1)
     withVector(4, Seq(bytes)) { vector =>

@@ -1,5 +1,6 @@
 package com.zilliz.spark.connector.write
 
+import java.nio.{ByteBuffer, ByteOrder}
 import java.nio.file.{Files, Path, Paths}
 import java.time.Instant
 import java.util.{Comparator, UUID}
@@ -10,13 +11,15 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import org.apache.arrow.memory.RootAllocator
 import org.apache.arrow.vector.VectorSchemaRoot
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
-import org.apache.spark.sql.catalyst.util.GenericArrayData
+import org.apache.spark.sql.catalyst.util.{ArrayBasedMapData, GenericArrayData}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.functions.{col, lit, when}
 import org.apache.spark.sql.types.{
   ArrayType,
+  BinaryType,
   FloatType,
   LongType,
+  MapType,
   StructField,
   StructType
 }
@@ -69,6 +72,11 @@ class ColumnReplaceExampleTest extends AnyFunSuite with BeforeAndAfterAll {
         name = "embedding",
         dataType = DataType.FloatVector,
         typeParams = Seq(KeyValuePair("dim", "2"))
+      ),
+      FieldSchema(
+        fieldID = 103L,
+        name = "sparse",
+        dataType = DataType.SparseFloatVector
       )
     )
   )
@@ -240,7 +248,11 @@ class ColumnReplaceExampleTest extends AnyFunSuite with BeforeAndAfterAll {
         Seq(
           StructField("id", LongType, nullable = false),
           StructField("score", LongType, nullable = true),
-          StructField("embedding", ArrayType(FloatType, containsNull = false))
+          StructField("embedding", ArrayType(FloatType, containsNull = false)),
+          StructField(
+            "sparse",
+            MapType(LongType, FloatType, valueContainsNull = false)
+          )
         )
       ),
       collection,
@@ -255,7 +267,12 @@ class ColumnReplaceExampleTest extends AnyFunSuite with BeforeAndAfterAll {
         schema,
         place.storage,
         rows.map { case (id, score, vector) =>
-          InternalRow(id, score, new GenericArrayData(vector.toArray[Any]))
+          InternalRow(
+            id,
+            score,
+            new GenericArrayData(vector.toArray[Any]),
+            ArrayBasedMapData(Array[Any](id), Array[Any](1.5f))
+          )
         }
       )
       items
@@ -289,7 +306,8 @@ class ColumnReplaceExampleTest extends AnyFunSuite with BeforeAndAfterAll {
           {"fieldID": 100, "name": "id", "data_type": "Int64", "is_primary_key": true},
           {"fieldID": 101, "name": "score", "data_type": "Int64", "nullable": true},
           {"fieldID": 102, "name": "embedding", "data_type": "FloatVector",
-           "type_params": [{"key": "dim", "value": "2"}]}]}},
+           "type_params": [{"key": "dim", "value": "2"}]},
+          {"fieldID": 103, "name": "sparse", "data_type": "SparseFloatVector"}]}},
         "format_version": 4
       }"""
       )
@@ -345,7 +363,6 @@ class ColumnReplaceExampleTest extends AnyFunSuite with BeforeAndAfterAll {
       .format("milvus")
       .options(options)
       .option(MilvusOption.ReadMode, MilvusOption.ReadModePhysical)
-      .option(MilvusOption.ReadIncludeRowId, "true")
       .option(MilvusOption.ReadVectorRaw, "false")
       .load()
       .select(RowIdentity.ColumnName, "id", "score", "embedding")
@@ -592,6 +609,66 @@ class ColumnReplaceExampleTest extends AnyFunSuite with BeforeAndAfterAll {
 
   test("concurrent local writes give the result address to one operation") {
     local(runConcurrentClaims)
+  }
+
+  test(
+    "count and stored positions use a snapshot whose files omit the timestamp"
+  ) {
+    local { place =>
+      val source = spark.read
+        .format("milvus")
+        .options(place.options)
+        .option(MilvusOption.ReadMode, MilvusOption.ReadModePhysical)
+        .schema("embedding ARRAY<FLOAT>")
+        .load()
+      assert(source.count() == 4L)
+      val positions = source.select("_segment_id", "_row_offset").collect()
+      assert(
+        positions.toSet == Set(
+          Row(41L, 0L),
+          Row(41L, 1L),
+          Row(42L, 0L),
+          Row(42L, 1L)
+        )
+      )
+    }
+  }
+
+  test(
+    "raw vector reads return the stored bytes for dense and sparse vectors"
+  ) {
+    local { place =>
+      val session = spark.newSession()
+      session.conf.set("spark.sql.codegen.wholeStage", "false")
+      def vectors(options: Map[String, String]): DataFrame =
+        session.read
+          .format("milvus")
+          .options(options)
+          .load()
+          .where("id = 2")
+          .select("embedding", "sparse")
+      val decoded = vectors(place.options)
+      val row = decoded.head()
+      assert(row.getSeq[Float](0) == Seq(0.2f, 0.3f))
+      assert(row.getMap[Long, Float](1) == Map(2L -> 1.5f))
+      val raw = vectors(place.options + (MilvusOption.ReadVectorRaw -> "true"))
+      assert(raw.schema.fields.forall(_.dataType == BinaryType))
+      val bytes = raw.head()
+      val dense = ByteBuffer
+        .allocate(8)
+        .order(ByteOrder.LITTLE_ENDIAN)
+        .putFloat(0.2f)
+        .putFloat(0.3f)
+        .array()
+      val sparse = ByteBuffer
+        .allocate(8)
+        .order(ByteOrder.LITTLE_ENDIAN)
+        .putInt(2)
+        .putFloat(1.5f)
+        .array()
+      assert(bytes.getAs[Array[Byte]](0).sameElements(dense))
+      assert(bytes.getAs[Array[Byte]](1).sameElements(sparse))
+    }
   }
 
   Seq(true, false).foreach { useCrt =>

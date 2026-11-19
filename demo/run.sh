@@ -90,7 +90,7 @@ HELP
       echo "  --options FILE     Snapshot options JSON; default: committed sample"
       echo "  --max-rows N       Driver verification limit (default/max: 10000)"
     case "$EXAMPLE" in
-      FilterProject)
+      FilterProject|PartitionSelection)
         echo "  --where SQL        Predicate applied before processing" ;;
     esac
     exit 0

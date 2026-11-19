@@ -1,9 +1,8 @@
 package com.zilliz.spark.connector.table
 
-import org.apache.spark.sql.types.{StructField, StructType}
+import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.milvus.storage.snapshot.Snapshot
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.types.SparkTypes
@@ -19,41 +18,26 @@ private[connector] object MilvusTables {
       sparkSchema: Option[StructType]
   ): MilvusTable = {
     val milvusOption = validate(options)
-    MilvusTable(
-      resolve(
-        milvusOption,
-        withSegments = true
-      ),
-      milvusOption,
-      sparkSchema
-    )
+    MilvusTable(resolve(milvusOption), milvusOption, sparkSchema)
   }
 
-  /** The Spark schema of the snapshot's collection schema, one column per
-    * field. Segments are not materialized for this.
+  /** The Spark schema derived from the resolved snapshot's collection schema.
     */
   def inferSchema(options: CaseInsensitiveStringMap): StructType = {
     val milvusOption = validate(options)
-    val snapshot = resolve(
-      milvusOption,
-      withSegments = false
-    )
+    val snapshot = resolve(milvusOption)
     sparkSchemaOf(
       snapshot.schema,
-      MilvusOption.readVectorRaw(options),
-      MilvusOption.readerFieldIds(options)
+      MilvusOption.readVectorRaw(options)
     )
   }
 
   /** The snapshot this table is about, resolved once. A failure here is the
     * table's failure: there is no schema or plan without it.
     */
-  private def resolve(
-      milvusOption: MilvusOption,
-      withSegments: Boolean
-  ): Snapshot =
+  private def resolve(milvusOption: MilvusOption): Snapshot =
     SnapshotSources
-      .forRead(milvusOption, withSegments)
+      .forRead(milvusOption)
       .snapshot()
       .fold(
         {
@@ -80,11 +64,9 @@ private[connector] object MilvusTables {
 
   private[connector] def sparkSchemaOf(
       schema: CollectionSchema,
-      rawVectors: Boolean,
-      selectedFieldIds: Seq[Long]
+      rawVectors: Boolean
   ): StructType = {
-    val allFields = SchemaMapper.missingSystemFields(schema) ++ schema.fields
-    val fieldsById = allFields.groupBy(_.fieldID)
+    val fieldsById = schema.fields.groupBy(_.fieldID)
     val duplicateIds = fieldsById
       .collect {
         case (id, fields) if fields.size > 1 => id
@@ -96,39 +78,17 @@ private[connector] object MilvusTables {
         s"Snapshot schema contains duplicate field id(s): ${duplicateIds.mkString(", ")}"
       )
     }
-    val missingIds = selectedFieldIds.filterNot(fieldsById.contains)
-    if (missingIds.nonEmpty) {
-      throw new IllegalArgumentException(
-        s"Option '${MilvusOption.ReaderFieldIDs}' requests unknown field id(s) ${missingIds
-            .mkString(", ")}; " +
-          s"snapshot field ids are ${fieldsById.keys.toSeq.sorted.mkString(", ")}"
-      )
-    }
-    val selectedFields =
-      if (selectedFieldIds.isEmpty) schema.fields
-      else selectedFieldIds.map(id => fieldsById(id).head)
-    val fields = selectedFields.map(SparkTypes.toStructField(_, rawVectors))
-    rejectCaseInsensitiveDuplicates(fields)
-    StructType(fields)
-  }
-
-  /** Selecting system field 1 ("Timestamp") next to a user field named
-    * "timestamp" gives two columns Spark cannot tell apart, since it resolves
-    * names case-insensitively. That is refused with the alternative named.
-    */
-  private[connector] def rejectCaseInsensitiveDuplicates(
-      fields: Seq[StructField]
-  ): Unit = {
+    val fields = schema.fields.map(SparkTypes.toStructField(_, rawVectors))
     val clashes = fields
       .groupBy(_.name.toLowerCase(java.util.Locale.ROOT))
       .collect { case (_, same) if same.size > 1 => same.map(_.name) }
       .toSeq
     if (clashes.nonEmpty) {
       throw new IllegalArgumentException(
-        s"Option '${MilvusOption.ReaderFieldIDs}' selects fields whose names differ only in case: " +
-          s"${clashes.map(_.mkString(" and ")).mkString("; ")}; " +
-          s"read the Milvus timestamp through '${MilvusOption.MilvusExtraColumns}=${MilvusOption.MilvusExtraColumnTimestamp}' instead"
+        s"Snapshot schema contains field names that collide under case-insensitive resolution: " +
+          clashes.map(_.mkString(" and ")).mkString(", ")
       )
     }
+    StructType(fields)
   }
 }

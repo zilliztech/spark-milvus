@@ -4,15 +4,16 @@ These examples cover reading Collection data and updating existing field values
 with Spark. For writes, start with [Column replacement](#column-replacement).
 
 The runnable reader examples below use existing Storage V3 snapshots with
-Spark 4.0.1, Scala 2.13 and Java 21. The committed sample includes 14 visible
-rows after applying deletes; examples check results against that fixed input.
+Spark 4.0.1, Scala 2.13 and Java 21. In the committed sample the default read
+returns 14 live rows. The basic read example also sets `milvus.read.mode=physical`
+and reads all 16 stored rows, including the two marked deleted.
 
 | Python | Java | Operation |
 |---|---|---|
 | `01_read_snapshot.py` | `ReadSnapshot` | Read and validate snapshot rows |
 | `02_filter_project.py` | `FilterProject` | Filter and project fields |
 | `03_sql_analytics.py` | `SqlAnalytics` | Aggregate through Spark SQL |
-| `08_partition_selection.py` | `PartitionSelection` | Select a partition and expose row metadata |
+| `08_partition_selection.py` | `PartitionSelection` | Prune partitions with `WHERE _partition_id IN (...)` and read row metadata |
 | `00_snapshot_path.py` | `SnapshotPath` | Look up the path of an already existing snapshot |
 
 ## Run a reader example
@@ -44,10 +45,14 @@ For a cluster, use an existing snapshot with shared object-storage access:
 ```bash
 export MASTER=spark://cluster.example:7077
 ./demo/run.sh python 02_filter_project.py --options /private/read-options.json --where 'category = 1'
+./demo/run.sh java PartitionSelection --options /private/read-options.json --where '_partition_id IN (10, 11)'
 ```
 
 The options file is a JSON object containing `milvus.snapshot.path` and the
-necessary `fs.*` settings. See [reference](../docs/reference.md) and
+necessary `fs.*` settings. To include rows marked deleted in a custom read, add
+`"milvus.read.mode": "physical"` to that file. To inspect the original vector bytes
+in `ReadSnapshot` or `01_read_snapshot.py`, add `"milvus.read.vector.raw": "true"`.
+See [reference](../docs/reference.md) and
 [cluster setup](../docs/cluster-setup.md). Do not commit credentials. Use
 `--help` on each example for its arguments. Verification collects at most
 10,000 rows and is intended for small samples.

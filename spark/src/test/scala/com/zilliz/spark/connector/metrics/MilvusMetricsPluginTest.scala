@@ -2,6 +2,7 @@ package com.zilliz.spark.connector.metrics
 
 import org.apache.spark.sql.connector.read.PartitionReader
 import org.apache.spark.sql.execution.SQLExecution
+import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.TaskContext
 import org.scalatest.concurrent.Eventually
@@ -57,14 +58,17 @@ class MilvusMetricsPluginTest extends AnyFunSuite with Eventually {
             progress.end(ReadEndReason.Exhausted)
             progress.close()
           } else {
-            val underlying = new PartitionReader[Int] {
-              private var value = 0
-              override def next(): Boolean = { value += 1; value <= 10 }
-              override def get(): Int = value
-              override def close(): Unit = resourcesClosed.add(1L)
+            val underlying = new PartitionReader[ColumnarBatch] {
+              private val batch = new ColumnarBatch(Array.empty, 1)
+              private var batches = 0
+              override def next(): Boolean = { batches += 1; batches <= 10 }
+              override def get(): ColumnarBatch = batch
+              override def close(): Unit = {
+                batch.close()
+                resourcesClosed.add(1L)
+              }
             }
-            val observed =
-              new ObservedPartitionReader(underlying, progress, (_: Int) => 1L)
+            val observed = new ObservedPartitionReader(underlying, progress)
             (1 to 5).foreach { _ =>
               require(observed.next())
               observed.get()

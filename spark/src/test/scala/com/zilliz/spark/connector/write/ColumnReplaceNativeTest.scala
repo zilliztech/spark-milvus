@@ -84,7 +84,6 @@ class ColumnReplaceNativeTest extends AnyFunSuite with BeforeAndAfterAll {
       .format("milvus")
       .options(options)
       .option(MilvusOption.ReadMode, MilvusOption.ReadModePhysical)
-      .option(MilvusOption.ReadIncludeRowId, "true")
       .load()
 
   /** The update of the design example: matched rows take the new value, NULL
@@ -168,7 +167,9 @@ class ColumnReplaceNativeTest extends AnyFunSuite with BeforeAndAfterAll {
 
   test("a physical read returns every stored row with its identity") {
     fixture { (_, options) =>
-      val rows = physical(options)
+      val frame = physical(options)
+      assert(!frame.selectExpr("*").columns.contains(RowIdentity.ColumnName))
+      val rows = frame
         .select(RowIdentity.ColumnName, "id")
         .collect()
       assert(rows.map(_.getLong(1)).sorted.toSeq == storedIds)
@@ -353,7 +354,7 @@ class ColumnReplaceNativeTest extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
-  test("row and columnar reads give the same identities, filtered or not") {
+  test("filtered physical rows retain their stored positions") {
     fixture { (_, options) =>
       def identities(frame: DataFrame): Map[Long, (Long, Long, Long)] =
         frame
@@ -364,20 +365,12 @@ class ColumnReplaceNativeTest extends AnyFunSuite with BeforeAndAfterAll {
             row.getLong(0) -> ((id.getLong(0), id.getLong(1), id.getLong(2)))
           }
           .toMap
-      val columnar = identities(physical(options))
-      assert(columnar.size == storedIds.size)
-      assert(
-        identities(
-          physical(options + (MilvusOption.ReadColumnar -> "false"))
-        ) == columnar
-      )
-      // A pushed predicate excludes rows inside a batch; the survivors keep
-      // their stored positions.
       val filtered = identities(physical(options).filter(col("id") % 2 === 1))
-      assert(filtered.nonEmpty && filtered.keySet.forall(_ % 2 == 1))
-      assert(filtered == columnar.filter { case (id, _) =>
-        filtered.contains(id)
-      })
+      val expected = storedIds
+        .filter(_ % 2 == 1L)
+        .map(id => id -> ((1L, id / 100L, id % 100L)))
+        .toMap
+      assert(filtered == expected)
     }
   }
 

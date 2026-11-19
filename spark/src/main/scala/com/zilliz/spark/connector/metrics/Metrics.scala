@@ -43,11 +43,6 @@ final class CopiesMetric
     )
 final class CopiedBytesMetric
     extends SumMetric(ScanMetrics.CopiedBytes, "bytes those copies produced")
-final class RowsMaterializedMetric
-    extends SumMetric(
-      ScanMetrics.RowsMaterialized,
-      "rows turned into InternalRow"
-    )
 final class ArrowAllocatedMaxMetric
     extends MaxBytesMetric(
       ScanMetrics.ArrowAllocatedMax,
@@ -73,10 +68,7 @@ final class TaskMetric(metricName: String, metricValue: Long)
   override def value(): Long = metricValue
 }
 
-/** The metrics a scan declares and the readers report: what `core.read.exec`
-  * counted on the crossing plus the rows the read layer turned into
-  * `InternalRow`.
-  */
+/** Native reader counters that each snapshot scan reports to Spark. */
 object ScanMetrics {
   val JniCalls = "milvus.jni.calls"
   val JniNanos = "milvus.jni.nanos"
@@ -84,7 +76,6 @@ object ScanMetrics {
   val ArrowBytes = "milvus.arrow.bytes"
   val Copies = "milvus.copies"
   val CopiedBytes = "milvus.copied.bytes"
-  val RowsMaterialized = "milvus.rows.materialized"
   val ArrowAllocatedMax = "milvus.arrow.allocated.max"
 
   def supported: Array[CustomMetric] = Array(
@@ -94,21 +85,16 @@ object ScanMetrics {
     new ArrowBytesMetric,
     new CopiesMetric,
     new CopiedBytesMetric,
-    new RowsMaterializedMetric,
     new ArrowAllocatedMaxMetric
   ) ++ ReadOperationalMetrics.supported
 
-  def taskValues(
-      metrics: ReadMetrics,
-      rowsMaterialized: Long
-  ): Array[CustomTaskMetric] = Array(
+  def taskValues(metrics: ReadMetrics): Array[CustomTaskMetric] = Array(
     new TaskMetric(JniCalls, metrics.jniCalls),
     new TaskMetric(JniNanos, metrics.jniNanos),
     new TaskMetric(ArrowBatches, metrics.batches),
     new TaskMetric(ArrowBytes, metrics.arrowBytes),
     new TaskMetric(Copies, metrics.copies),
     new TaskMetric(CopiedBytes, metrics.copiedBytes),
-    new TaskMetric(RowsMaterialized, rowsMaterialized),
     new TaskMetric(ArrowAllocatedMax, metrics.allocatedMax)
   )
 }

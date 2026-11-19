@@ -70,7 +70,7 @@ class HadoopEndpointSnapshotTest
         MilvusOption.SnapshotPath -> s"https://s3.example.com/b/$key"
       )
       val snapshot = SnapshotSources
-        .forRead(MilvusOption(options), withSegments = false)
+        .forRead(MilvusOption(options))
         .snapshot()
         .fold(e => throw e, identity)
       snapshot.schema.name shouldBe "endpoint_case"

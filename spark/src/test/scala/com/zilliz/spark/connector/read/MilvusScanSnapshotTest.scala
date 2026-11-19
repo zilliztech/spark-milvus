@@ -237,7 +237,7 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
     val snapshot =
       snapshotOf(segments = Seq(data, l0), schemaBytes = collection.toByteArray)
     val raw = new ju.HashMap[String, String]()
-    raw.put(MilvusOption.ReadApplyDeletes, "false")
+    raw.put(MilvusOption.ReadMode, MilvusOption.ReadModePhysical)
     raw.put("fs.storage_type", "local")
     raw.put("fs.root_path", "/segment-contract-unused")
     val options = new CaseInsensitiveStringMap(raw)
@@ -277,27 +277,84 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
     builder.build()
   }
 
+  test(
+    "partition IN plans only matching data segments and distinguishes a stored field of the same name"
+  ) {
+    import org.apache.spark.sql.connector.expressions.{Expression, Expressions}
+    import org.apache.spark.sql.connector.expressions.filter.Predicate
+
+    val raw = new ju.HashMap[String, String]()
+    raw.put(MilvusOption.ReadMode, MilvusOption.ReadModePhysical)
+    raw.put("fs.storage_type", "local")
+    raw.put("fs.root_path", "/unused-partition-pruning-test")
+    val options = new CaseInsensitiveStringMap(raw)
+    def scan(fieldName: String, values: Long*): MilvusScan = {
+      val snapshot = snapshotOf(
+        partitionIds = Seq(10L, 11L, 12L),
+        segments = Seq(
+          plannedSegment(30L, 10L, 3L),
+          plannedSegment(31L, 11L, 4L),
+          plannedSegment(32L, 11L, 2L),
+          plannedSegment(33L, 12L, 1L)
+        ),
+        schemaBytes = ProtoSchema(
+          name = "t",
+          fields = Seq(
+            FieldSchema(
+              fieldID = 100L,
+              name = fieldName,
+              dataType = MilvusDataType.Int64
+            )
+          )
+        ).toByteArray
+      )
+      val builder = MilvusTable(snapshot, MilvusOption(options), None)
+        .newScanBuilder(options)
+        .asInstanceOf[MilvusScanBuilder]
+      val filter = new Predicate(
+        "IN",
+        (Seq[Expression](Expressions.column("_partition_id")) ++
+          values.map(Expressions.literal)).toArray
+      )
+      assert(builder.pushPredicates(Array(filter)).isEmpty)
+      builder.build().asInstanceOf[MilvusScan]
+    }
+
+    val selected = scan("id", 10L, 11L, 99L)
+    assert(selected.segmentPredicate.isEmpty)
+    assert(
+      selected.segmentPartitions().map(_.task.segmentId) == Seq(30L, 31L, 32L)
+    )
+    assert(selected.estimateStatistics().numRows().getAsLong == 9L)
+    assert(scan("id", 99L).segmentPartitions().isEmpty)
+
+    val stored = scan("_partition_id", 10L, 11L)
+    assert(stored.segmentPredicate.nonEmpty)
+    assert(
+      stored.segmentPartitions().map(_.task.segmentId) == Seq(
+        30L,
+        31L,
+        32L,
+        33L
+      )
+    )
+  }
+
   private def snapshotTableSchema(
       baseSchema: StructType,
-      extraColumns: String,
       snapshotSchemaJson: Option[String] = Some(vectorSnapshotSchemaJson),
-      snapshotSchemaBytes: Option[String] = None,
-      selectedFieldIds: Option[String] = None
+      snapshotSchemaBytes: Option[String] = None
   ): StructType = {
     val options = scala.collection.mutable.Map(
       MilvusOption.SnapshotMode -> "true",
       MilvusOption.SnapshotManifests -> "[]",
-      MilvusOption.SnapshotCollectionId -> "10",
-      MilvusOption.MilvusExtraColumns -> extraColumns
+      MilvusOption.SnapshotCollectionId -> "10"
     )
     snapshotSchemaJson.foreach(json =>
       options += MilvusOption.SnapshotSchemaJson -> json
     )
     snapshotSchemaBytes.foreach(bytes =>
       options += MilvusOption.SnapshotSchemaBytes -> bytes
-    )
-    selectedFieldIds.foreach(ids =>
-      options += MilvusOption.ReaderFieldIDs -> ids
     )
     val milvusOption = MilvusOption(options.toMap)
     val snapshot = new OptionStringsSnapshotSource(milvusOption)
@@ -696,58 +753,6 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
   }
 
   test(
-    "table schema emits canonical metadata extra column names from legacy aliases"
-  ) {
-    val schema = snapshotTableSchema(
-      StructType(Seq(StructField("binary_vec", BinaryType, nullable = false))),
-      "segment_id,row_offset,_timestamp"
-    )
-
-    assert(
-      schema.fieldNames.toSeq == Seq(
-        "binary_vec",
-        "_segment_id",
-        "_row_offset",
-        "_timestamp"
-      )
-    )
-    assert(
-      schema("_timestamp").metadata.getLong(
-        FieldMetadata.MilvusFieldIdMetadataKey
-      ) == 1L
-    )
-  }
-
-  test(
-    "table schema rejects user field conflicting with canonical metadata column"
-  ) {
-    val err = intercept[IllegalArgumentException] {
-      snapshotTableSchema(
-        StructType(Seq(StructField("_segment_id", LongType, nullable = false))),
-        "_segment_id"
-      )
-    }
-
-    assert(err.getMessage.contains("_segment_id"))
-    assert(err.getMessage.contains("metadata extra column"))
-  }
-
-  test(
-    "table schema rejects legacy metadata aliases in provided schema"
-  ) {
-    val err = intercept[IllegalArgumentException] {
-      snapshotTableSchema(
-        StructType(Seq(StructField("segment_id", LongType, nullable = false))),
-        "segment_id"
-      )
-    }
-
-    assert(err.getMessage.contains("segment_id"))
-    assert(err.getMessage.contains("legacy alias"))
-    assert(err.getMessage.contains("_segment_id"))
-  }
-
-  test(
     "snapshot mode injects milvus.data_type metadata into provided external schema"
   ) {
     val schema = snapshotTableSchema(
@@ -758,8 +763,7 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
           StructField("int8_vec", ArrayType(ShortType), nullable = true),
           StructField("json_payload", StringType, nullable = true)
         )
-      ),
-      "_timestamp"
+      )
     )
 
     assert(
@@ -797,7 +801,6 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
         FieldMetadata.MilvusDataTypeMetadataKey
       ) == 23L
     )
-    assert(schema.fieldNames.toSeq.last == "_timestamp")
   }
 
   test(
@@ -813,8 +816,7 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
             metadata = metadata("custom.flag" -> 7L)
           )
         )
-      ),
-      ""
+      )
     )
 
     assert(schema("binary_vec").metadata.getLong("custom.flag") == 7L)
@@ -830,48 +832,20 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
     )
   }
 
-  test("fieldIDs and an external schema must describe the same projection") {
+  test("an external schema can select and reorder collection fields") {
     val selected = snapshotTableSchema(
       StructType(
         Seq(
           StructField("float_vec", ArrayType(FloatType), nullable = true),
           StructField("binary_vec", BinaryType, nullable = true)
         )
-      ),
-      extraColumns = "",
-      selectedFieldIds = Some("101,100")
+      )
     )
     assert(selected.fieldNames.toSeq == Seq("float_vec", "binary_vec"))
-
-    val error = intercept[IllegalArgumentException] {
-      snapshotTableSchema(
-        StructType(
-          Seq(StructField("binary_vec", BinaryType, nullable = true))
-        ),
-        extraColumns = "",
-        selectedFieldIds = Some("101")
-      )
-    }
-    assert(error.getMessage.contains(MilvusOption.ReaderFieldIDs))
-    assert(error.getMessage.contains("schema ids=100"))
-  }
-
-  test("schema inference applies fieldIDs in their requested order") {
-    val rawOptions = new ju.HashMap[String, String]()
-    rawOptions.put(MilvusOption.SnapshotMode, "true")
-    rawOptions.put(MilvusOption.SnapshotSchemaBytes, vectorSnapshotSchemaBytes)
-    rawOptions.put(MilvusOption.ReaderFieldIDs, "103,100")
-
-    val schema = new com.zilliz.spark.connector.sources.MilvusDataSource()
-      .inferSchema(new CaseInsensitiveStringMap(rawOptions))
-
-    assert(schema.fieldNames.toSeq == Seq("json_payload", "binary_vec"))
     assert(
-      schema.fields
-        .map(
-          _.metadata.getLong(FieldMetadata.MilvusFieldIdMetadataKey)
-        )
-        .toSeq == Seq(103L, 100L)
+      selected.fields
+        .map(_.metadata.getLong(FieldMetadata.MilvusFieldIdMetadataKey))
+        .toSeq == Seq(101L, 100L)
     )
   }
 
@@ -886,7 +860,6 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
           StructField("int8_vec", ArrayType(ShortType), nullable = true)
         )
       ),
-      extraColumns = "",
       snapshotSchemaJson = None,
       snapshotSchemaBytes = Some(vectorSnapshotSchemaBytes)
     )
@@ -938,8 +911,7 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
               )
             )
           )
-        ),
-        ""
+        )
       )
     }
 
@@ -952,7 +924,6 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
     val err = intercept[IllegalArgumentException] {
       snapshotTableSchema(
         StructType(Seq(StructField("binary_vec", BinaryType, nullable = true))),
-        extraColumns = "",
         snapshotSchemaJson = Some("not-json"),
         snapshotSchemaBytes = None
       )
@@ -966,7 +937,6 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
     val err = intercept[IllegalArgumentException] {
       snapshotTableSchema(
         StructType(Seq(StructField("binary_vec", BinaryType, nullable = true))),
-        extraColumns = "",
         snapshotSchemaJson = None,
         snapshotSchemaBytes = Some("not-base64%%")
       )
@@ -977,84 +947,93 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
   }
 
   test(
-    "snapshot schema allows user fields named legacy metadata aliases"
+    "the stored timestamp can be pushed down with only synthetic metadata projected"
   ) {
-    val options = Map(
-      MilvusOption.SnapshotMode -> "true",
-      MilvusOption.SnapshotManifests -> "[]",
-      MilvusOption.SnapshotCollectionId -> "10",
-      MilvusOption.MilvusExtraColumns -> "segment_id,row_offset"
-    )
-    val collectionSchema = io.milvus.grpc.schema.CollectionSchema(
-      name = "c",
+    import org.apache.spark.sql.connector.expressions.{Expression, Expressions}
+    import org.apache.spark.sql.connector.expressions.filter.Predicate
+
+    val options =
+      new CaseInsensitiveStringMap(ju.Collections.emptyMap[String, String]())
+    val collection = ProtoSchema(
+      name = "t",
       fields = Seq(
-        io.milvus.grpc.schema.FieldSchema(
-          fieldID = 100,
-          name = "segment_id",
-          dataType = io.milvus.grpc.schema.DataType.Int64,
-          nullable = false
-        ),
-        io.milvus.grpc.schema.FieldSchema(
-          fieldID = 101,
-          name = "row_offset",
-          dataType = io.milvus.grpc.schema.DataType.Int64,
-          nullable = false
+        FieldSchema(
+          fieldID = 100L,
+          name = "id",
+          dataType = MilvusDataType.Int64
         )
       )
     )
-
-    val schema = MilvusTable(
-      snapshotOf(schemaBytes = collectionSchema.toByteArray),
-      MilvusOption(options),
-      None
-    ).schema()
-
-    assert(
-      schema.fieldNames.toSeq == Seq(
-        "segment_id",
-        "row_offset",
-        "_segment_id",
-        "_row_offset"
-      )
+    val snapshot = snapshotOf(schemaBytes = collection.toByteArray)
+    val table = MilvusTable(snapshot, MilvusOption(options), None)
+    val builder = table.newScanBuilder(options).asInstanceOf[MilvusScanBuilder]
+    def equalTo(name: String, value: Long): Predicate = new Predicate(
+      "=",
+      Array[Expression](Expressions.column(name), Expressions.literal(value))
     )
+    val timestampFilter = equalTo("_timestamp", 100L)
+    val segmentFilter = equalTo("_segment_id", 30L)
+    val offsetFilter = equalTo("_row_offset", 1L)
+    assert(
+      builder
+        .pushPredicates(Array(timestampFilter, segmentFilter, offsetFilter))
+        .sameElements(Array(segmentFilter, offsetFilter))
+    )
+    assert(builder.pushedPredicates().sameElements(Array(timestampFilter)))
+    builder.pruneColumns(
+      StructType(Seq(StructField("_segment_id", LongType, nullable = false)))
+    )
+    val scan = builder.build().asInstanceOf[MilvusScan]
+    assert(scan.segmentPredicate.nonEmpty)
+    assert(scan.neededFieldIds == Seq(1L))
+    assert(scan.readSchema().fieldNames.toSeq == Seq("_segment_id"))
   }
 
   test(
-    "scan pruning preserves canonical metadata fields requested by legacy aliases"
+    "empty and position-only projections prefer the timestamp or primary key over a visible vector"
   ) {
-    val rawOptions = new ju.HashMap[String, String]()
-    rawOptions.put(
-      MilvusOption.MilvusExtraColumns,
-      "segment_id,row_offset,_timestamp"
-    )
-    val fieldId100 = metadata(FieldMetadata.MilvusFieldIdMetadataKey -> 100L)
-    val fieldId1 = metadata(FieldMetadata.MilvusFieldIdMetadataKey -> 1L)
-    val schema = StructType(
-      Seq(
-        StructField("pk", LongType, nullable = false, fieldId100),
-        StructField("_segment_id", LongType, nullable = false),
-        StructField("_row_offset", LongType, nullable = false),
-        StructField("_timestamp", LongType, nullable = false, fieldId1)
+    val options =
+      new CaseInsensitiveStringMap(ju.Collections.emptyMap[String, String]())
+    val vector = ProtoSchema
+      .parseFrom(
+        java.util.Base64.getDecoder.decode(vectorSnapshotSchemaBytes)
       )
+      .fields
+      .head
+    val pk = FieldSchema(
+      fieldID = 104L,
+      name = "id",
+      dataType = MilvusDataType.Int64,
+      isPrimaryKey = true
     )
-    val builder = new MilvusScanBuilder(
-      schema,
-      new CaseInsensitiveStringMap(rawOptions),
-      snapshotOf()
+    val timestamp = FieldSchema(
+      fieldID = 1L,
+      name = "Timestamp",
+      dataType = MilvusDataType.Int64
     )
-
-    builder.pruneColumns(
-      schema
-    )
-
-    assert(
-      builder.build().readSchema().fieldNames.toSeq == Seq(
-        "pk",
-        "_segment_id",
-        "_row_offset",
-        "_timestamp"
+    val visible = StructType(Seq(StructField(vector.name, BinaryType)))
+    for {
+      (fields, expectedId) <- Seq(
+        Seq(vector, pk, timestamp) -> timestamp.fieldID,
+        Seq(vector, pk) -> pk.fieldID,
+        Seq(vector) -> vector.fieldID
       )
-    )
+      projection <- Seq(
+        StructType(Nil),
+        StructType(Seq(MetadataColumns.partitionIdField))
+      )
+    } {
+      val snapshot = snapshotOf(schemaBytes =
+        ProtoSchema(name = "t", fields = fields).toByteArray
+      )
+      val table = MilvusTable(snapshot, MilvusOption(options), Some(visible))
+      val builder =
+        table.newScanBuilder(options).asInstanceOf[MilvusScanBuilder]
+      builder.pruneColumns(projection)
+      val scan = builder.build().asInstanceOf[MilvusScan]
+      assert(scan.neededFieldIds == Seq(expectedId))
+      assert(scan.readSchema().fieldNames.toSeq == projection.fieldNames.toSeq)
+    }
   }
 
   test("reordered non-contiguous field ids reach every V3 task") {
@@ -1462,7 +1441,7 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
         )
       )
       configurations.foreach { case (endpoint, hadoop, declared) =>
-        Seq(false, true).foreach { applyDeletes =>
+        Seq(false, true).foreach { physical =>
           val segments = Seq(101L, 202L).zipWithIndex.map {
             case (value, index) =>
               plannedSegment(
@@ -1485,7 +1464,8 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
           )
           val raw = new ju.HashMap[String, String]()
           raw.put(StorageProperties.UseIam, "true")
-          raw.put(MilvusOption.ReadApplyDeletes, applyDeletes.toString)
+          if (physical)
+            raw.put(MilvusOption.ReadMode, MilvusOption.ReadModePhysical)
           declared.foreach { case (key, value) => raw.put(key, value) }
           val options = new CaseInsensitiveStringMap(raw)
           val schema =
@@ -1509,7 +1489,7 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
                 _.asInstanceOf[MilvusInputPartition].task.segmentId
               )
               .toSeq == Seq(31L),
-            s"endpoint=$endpoint, applyDeletes=$applyDeletes"
+            s"endpoint=$endpoint, physical=$physical"
           )
         }
       }
@@ -1537,13 +1517,14 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
       segments = Seq(plannedSegment(30L, 20L, 1L)),
       schemaBytes = collection.toByteArray
     )
-    Seq(false, true).foreach { applyDeletes =>
+    Seq(false, true).foreach { physical =>
       Seq(
         new IOException("planning store unavailable"),
         new IllegalArgumentException("planning storage configuration invalid")
       ).foreach { failure =>
         val raw = new ju.HashMap[String, String]()
-        raw.put(MilvusOption.ReadApplyDeletes, applyDeletes.toString)
+        if (physical)
+          raw.put(MilvusOption.ReadMode, MilvusOption.ReadModePhysical)
         val options = new CaseInsensitiveStringMap(raw)
         val schema = MilvusTable(snapshot, MilvusOption(options), None).schema()
         val scan = new MilvusScan(
@@ -1561,7 +1542,7 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
           override private[read] def openPlanningStore(): ObjectStore =
             throw failure
         }
-        if (applyDeletes) {
+        if (!physical) {
           assert(intercept[Exception](scan.planInputPartitions()) eq failure)
         } else {
           assert(

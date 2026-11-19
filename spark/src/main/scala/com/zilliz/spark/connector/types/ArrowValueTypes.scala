@@ -10,7 +10,7 @@ import org.apache.spark.sql.types.{DataType, FloatType, LongType, StructField}
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
-/** Type metadata and layout checks shared by Arrow readers and writers. */
+/** Milvus type metadata and Arrow layout checks for writing Spark values. */
 object ArrowValueTypes {
   def milvusDataType(field: StructField): Option[MilvusDataType] = {
     Option(field.metadata)

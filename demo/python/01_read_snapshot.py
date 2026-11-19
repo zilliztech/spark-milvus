@@ -6,8 +6,7 @@ from common import bounded_rows, check_fixture_rows, demo_session
 
 def main():
     with demo_session(__doc__) as (spark, args, options):
-        # The snapshot supplies the schema and segment locations. Storage access
-        # and delete handling belong to the connector; no Milvus service is used.
+        # Spark converts the snapshot's columnar batches to rows for collect() and show().
         documents = spark.read.format("milvus").options(**options).load()
         documents.printSchema()
         rows = bounded_rows(documents, args)
@@ -18,8 +17,11 @@ def main():
         if args.fixture:
             check_fixture_rows(rows, args.expected_rows)
             assert {row.id for row in rows}.isdisjoint({3002, 3105})
-            print("14 live rows; snapshot deletes remove IDs 3002 and 3105.")
-        print(f"Visible rows: {len(rows)}")
+            stored = (spark.read.format("milvus").options(**options)
+                      .option("milvus.read.mode", "physical").load())
+            assert stored.count() == 16
+            print("The sample has 16 stored rows and 14 live rows. IDs 3002 and 3105 are marked deleted.")
+        print(f"Rows read: {len(rows)}")
 
 
 if __name__ == "__main__":

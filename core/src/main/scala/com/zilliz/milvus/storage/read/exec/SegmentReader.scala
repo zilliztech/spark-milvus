@@ -313,9 +313,7 @@ object SegmentReader {
     withExpectedRows(segmentId, expectedRows, reader)
   }
 
-  /** Apply the task's EOF row-count contract to any reader implementation. Kept
-    * separate from the native reader so row and columnar Spark consumers get
-    * the same check, and so the contract is testable without JNI.
+  /** Check the task's expected row count when its segment reader reaches EOF.
     */
   private[exec] def withExpectedRows(
       segmentId: Long,

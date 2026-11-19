@@ -103,6 +103,9 @@ class MilvusDataSourceTest extends AnyFunSuite with BeforeAndAfterAll {
   test("V3 projection, nullable fields and deletes match the fixed oracle") {
     val frame = read()
     assert(actual(frame) == ids)
+    val physical =
+      read(first + (MilvusOption.ReadMode -> MilvusOption.ReadModePhysical))
+    assert(actual(physical) == (ids + 3002L))
     assert(
       frame.filter("category IS NULL").select("id").head().getLong(0) == 3001L
     )
@@ -120,7 +123,7 @@ class MilvusDataSourceTest extends AnyFunSuite with BeforeAndAfterAll {
     )
     assert(frame.filter("category IS NOT NULL").count() == 6)
     assert(frame.filter("id IN (3000, 3002, 3105, 3107)").count() == 1)
-    val selected = read(first + (MilvusOption.ReaderFieldIDs -> "100,102"))
+    val selected = frame.select("id", "category")
     assert(selected.columns.toSet == Set("id", "category"))
     assert(actual(selected) == ids)
     frame.createOrReplaceTempView("v3_fixture")

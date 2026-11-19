@@ -56,7 +56,7 @@ final case class Snapshot(
 
   def v3Segments: Seq[Segment] = segments.filter(_.storageVersion == 3)
 
-  /** Retains only the named data segments after an optimization such as R9.
+  /** Retains the data segments selected by a partition or primary-key filter.
     * Delete-only segments are not candidates for data pruning: partition L0
     * sources remain for retained data in that partition, and collection-wide L0
     * sources remain whenever any data segment remains.
@@ -77,31 +77,6 @@ final case class Snapshot(
         retainedPartitions
       )
     copy(partitionIds = orderedPartitions, segments = retainedSegments)
-  }
-
-  /** All segments in the selected partitions, in snapshot order. Every
-    * requested partition must exist; an accidental empty read is therefore a
-    * planning error. Collection-wide delete-only segments are also retained
-    * because those deletes still apply.
-    */
-  def narrow(selectedPartitionIds: Seq[Long]): Snapshot = {
-    if (selectedPartitionIds.isEmpty) return this
-    val selected = SnapshotSelection.select(
-      name,
-      partitionIds,
-      segments.map(segment =>
-        SnapshotSelection
-          .Segment(segment.partitionId, segment.hasData)
-      ),
-      selectedPartitionIds
-    )
-    copy(
-      partitionIds = selected.partitionIds,
-      segments = segments.zipWithIndex.collect {
-        case (segment, position) if selected.segmentPositions(position) =>
-          segment
-      }
-    )
   }
 }
 

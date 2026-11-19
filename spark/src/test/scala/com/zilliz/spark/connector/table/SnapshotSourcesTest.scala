@@ -3,14 +3,7 @@ package com.zilliz.spark.connector.table
 import org.scalatest.funsuite.AnyFunSuite
 
 import com.zilliz.milvus.storage.io.{FileInfo, ObjectStore}
-import com.zilliz.milvus.storage.snapshot.{
-  DeleteFiles,
-  Segment,
-  SegmentLayout,
-  Snapshot,
-  SnapshotOrigin,
-  SnapshotSource
-}
+import com.zilliz.milvus.storage.snapshot.{Snapshot, SnapshotOrigin}
 import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.CollectionSchema
 
@@ -79,42 +72,6 @@ class SnapshotSourcesTest extends AnyFunSuite {
 
     assert(source.snapshot() == Left(closeError))
     assert(store.closed)
-  }
-
-  test(
-    "the common source wrapper retains all data segments in selected partitions"
-  ) {
-    val first = Segment(
-      id = 10L,
-      partitionId = 1L,
-      rows = Some(1L),
-      storageVersion = 3,
-      deletes = DeleteFiles.Empty,
-      layout = SegmentLayout.Manifest("first", 1L)
-    )
-    val second = Segment(
-      id = 20L,
-      partitionId = 2L,
-      rows = Some(1L),
-      storageVersion = 3,
-      deletes = DeleteFiles.Empty,
-      layout = SegmentLayout.Manifest("second", 1L)
-    )
-    val third =
-      second.copy(id = 21L, layout = SegmentLayout.Manifest("third", 1L))
-    val resolved = snapshot.copy(
-      partitionIds = Seq(1L, 2L),
-      segments = Seq(first, second, third)
-    )
-
-    val selected = SnapshotSources
-      .narrowed(SnapshotSource(resolved), Seq(2L))
-      .snapshot()
-      .toOption
-      .get
-
-    assert(selected.partitionIds == Seq(2L))
-    assert(selected.dataSegments.map(_.id) == Seq(20L, 21L))
   }
 
   test("option-string snapshot ids are strict and case insensitive") {

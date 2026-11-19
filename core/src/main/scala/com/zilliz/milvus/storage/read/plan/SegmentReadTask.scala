@@ -51,8 +51,8 @@ object DeleteSource {
       )
   }
 
-  /** Deletes are off for this read (`milvus.read.apply.deletes=false`), or
-    * nothing was deleted from this segment.
+  /** A physical read includes every stored row. A live read also needs no
+    * delete source when nothing was deleted from this segment.
     */
   case object None extends DeleteSource {
     override def materializedPlan: DeletePlan = DeletePlan.empty

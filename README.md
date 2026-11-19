@@ -164,10 +164,14 @@ libraryDependencies ++= Seq(
 
 The connector is a Spark DataSource named `milvus`. It discovers the schema
 from the supplied Snapshot and reads the Collection data files directly from
-object storage. No session extension or plugin is required.
+object storage. No session extension or plugin is required. Snapshot scans
+return Arrow columnar batches. Spark converts them to rows for operations such
+as `show()` and `collect()`.
 
 Choose either the Scala or PySpark example below. Both print the Collection's
-schema and five rows from the selected Snapshot. Replace the S3 path, endpoint
+schema and up to five live rows from the selected Snapshot. To read all stored
+rows, including rows marked deleted, add `.option("milvus.read.mode", "physical")`
+before `.load()`. Replace the S3 path, endpoint
 and region with your own values; the bucket is part of the `s3://` path.
 
 These examples use `fs.use_iam=true`: the native storage library obtains AWS
@@ -242,8 +246,15 @@ rows.createOrReplaceTempView("milvus_collection")
 spark.sql("SELECT id, embedding FROM milvus_collection WHERE category = 1").show()
 ```
 
-Vector fields are available as column values; the default read converts most
-vector types into Spark arrays or maps. See
+To locate rows in the snapshot, use
+`rows.select("id", "_partition_id", "_segment_id", "_row_offset")`.
+The stored Milvus system timestamp is available as `_timestamp`. These
+[hidden metadata columns](docs/reference.md#hidden-metadata-columns) are
+available by name and omitted from `SELECT *`.
+
+The default read converts most vector types into Spark arrays or maps. To read
+their stored bytes, set `.option("milvus.read.vector.raw", "true")` before
+`.load()`. See
 [supported types](docs/reference.md#supported-data-types).
 
 ## Writing Collection data
@@ -258,9 +269,9 @@ and making them visible to online queries. The original Snapshot continues to
 read the original values; the connector does not create a new Snapshot.
 
 Read in physical mode when computing values to write back. This includes every
-stored row, even rows marked deleted. Set `milvus.read.include_row_id=true` to
-add `_milvus_row_id` and preserve each row's identity. The write must receive
-every stored row exactly once.
+stored row, even rows marked deleted. Explicitly select the hidden
+`_milvus_row_id` column and keep it through your transformations. The write
+must receive every stored row exactly once with its original identity.
 
 For example, trim an existing, unindexed string field named `description`.
 Place this inside the Scala example's `try` block, using its `spark` and
@@ -273,7 +284,6 @@ val source = spark.read
   .format("milvus")
   .options(snapshotOptions)
   .option("milvus.read.mode", "physical")
-  .option("milvus.read.include_row_id", "true")
   .load()
 
 val prepared = source.select(

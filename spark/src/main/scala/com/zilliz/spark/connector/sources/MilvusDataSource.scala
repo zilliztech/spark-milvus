@@ -27,6 +27,7 @@ case class MilvusDataSource() extends TableProvider with DataSourceRegister {
       properties: ju.Map[String, String]
   ): Table = {
     val options = new CaseInsensitiveStringMap(properties)
+    MilvusOption.rejectUnsupportedOptions(options)
     if (MilvusOption.writeOperation(options).nonEmpty)
       ColumnReplaceTables.load(options, Option(schema))
     else if (MilvusOption.isWriteResultRead(options))
@@ -34,13 +35,15 @@ case class MilvusDataSource() extends TableProvider with DataSourceRegister {
     else MilvusTables.load(options, Option(schema))
   }
 
-  override def inferSchema(options: CaseInsensitiveStringMap): StructType =
+  override def inferSchema(options: CaseInsensitiveStringMap): StructType = {
+    MilvusOption.rejectUnsupportedOptions(options)
     if (MilvusOption.writeOperation(options).nonEmpty)
       throw new IllegalArgumentException(
         s"'${MilvusOption.WriteOperation}' is a write option; remove it to read"
       )
     else if (MilvusOption.isWriteResultRead(options)) WriteResultTable.Schema
     else MilvusTables.inferSchema(options)
+  }
 
   override def supportsExternalMetadata = true
 
