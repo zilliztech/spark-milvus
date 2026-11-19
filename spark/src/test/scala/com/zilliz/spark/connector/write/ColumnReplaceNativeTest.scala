@@ -4,11 +4,15 @@ import java.nio.file.{Files, Path}
 import java.util.Comparator
 import scala.jdk.CollectionConverters._
 
+import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
 import com.fasterxml.jackson.databind.node.{ArrayNode, ObjectNode}
-import com.fasterxml.jackson.databind.ObjectMapper
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import org.apache.spark.sql.catalyst.util.GenericArrayData
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.connector.write.WriterCommitMessage
 import org.apache.spark.sql.functions.{col, lit, when}
 import org.apache.spark.sql.types.{LongType, StructField, StructType}
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.BeforeAndAfterAll
 
@@ -332,34 +336,169 @@ class ColumnReplaceNativeTest extends AnyFunSuite with BeforeAndAfterAll {
   }
 
   test(
-    "a revision committed after the snapshot makes that segment fail and keeps the record"
+    "a revision committed after the snapshot makes the DataFrame write fail and keeps the record"
   ) {
     fixture { (root, options) =>
       val frame = prepared(physical(options))
-      // Another writer moves segment 31 past the pinned revision first.
       write(frame, options, root.resolve("first"))
-      val result = root.resolve("second")
-      val error = intercept[Exception](write(frame, options, result))
-      assert(rootMessage(error).contains("Could not confirm"))
+      val second = root.resolve("second")
+      val error = intercept[Exception](write(frame, options, second))
+      assert(rootMessage(error).contains("Manifest commit phase failed"))
       val failure =
-        mapper.readTree(Files.readAllBytes(result.resolve("_failure.json")))
+        mapper.readTree(Files.readAllBytes(second.resolve("_failure.json")))
       assert(failure.get("stage").asText() == "commit")
       val states = failure
         .get("segments")
         .elements()
         .asScala
-        .map(s => s.get("segment_id").asLong() -> s.get("state").asText())
+        .map { segment =>
+          segment.get("segment_id").asLong() -> segment.get("state").asText()
+        }
         .toMap
-      assert(states.values.toSet == Set("not_committed"))
-      assert(!Files.exists(result.resolve("_result.json")))
-      val outputs = mapper
-        .readTree(Files.readAllBytes(result.resolve("_commit_plan.json")))
-        .get("segments")
-        .findValuesAsText("path")
-        .asScala
-      // At least one segment reached commit. Its files must survive abort.
-      assert(outputs.exists(path => Files.isRegularFile(root.resolve(path))))
+      assert(states == Map(30L -> "not_committed", 31L -> "not_committed"))
+      assert(Files.notExists(second.resolve("_result.json")))
       assert(latestVersion(root, 30L) == 3L && latestVersion(root, 31L) == 3L)
+    }
+  }
+
+  /** Write and adopt real task output from a copy of revision 1 of each
+    * segment. Tests can change storage after the files exist and before the
+    * driver commits.
+    */
+  private def failedManifestCommit(
+      root: Path,
+      options: Map[String, String],
+      segmentIds: Seq[Long]
+  )(
+      beforeCommit: Seq[PlannedSegment] => Unit
+  ): (Map[Long, Seq[Path]], Map[Long, JsonNode]) = {
+    val result = root.resolve("failed-write")
+    val schema = physical(options + (MilvusOption.ReadVectorRaw -> "false"))
+      .select(RowIdentity.ColumnName, "vector", "category")
+      .schema
+    val template = ColumnReplaceTables.plan(
+      new CaseInsensitiveStringMap(
+        (options ++ Map(
+          MilvusOption.WriteOperation -> "replace_columns",
+          "path" -> result.toString
+        )).asJava
+      ),
+      schema
+    )
+    val original = template.segments.head
+    val source = root.resolve(original.basePath)
+    val files = Files.walk(source)
+    val segments =
+      try {
+        val entries = files.iterator().asScala.toVector
+        segmentIds.map { id =>
+          val base = s"files/insert_log/10/20/$id"
+          entries.foreach { path =>
+            val target = root.resolve(base).resolve(source.relativize(path))
+            if (Files.isDirectory(path)) Files.createDirectories(target)
+            else Files.copy(path, target)
+          }
+          original.copy(id = id, basePath = base, sourceVersion = 1L)
+        }
+      } finally files.close()
+    val plan = template.copy(segments = segments)
+    val batch =
+      new ColumnReplaceWrite(plan, ColumnReplaceTask.of(plan, schema))
+        .toBatch()
+    val writer = batch.createBatchWriterFactory(() => 1).createWriter(0, 0L)
+    val message =
+      try {
+        segments.foreach { segment =>
+          (0L until segment.rows).foreach { offset =>
+            writer.write(
+              InternalRow(
+                InternalRow(plan.snapshot.id, segment.id, offset),
+                new GenericArrayData(Array(1.0f, 2.0f)),
+                offset
+              )
+            )
+          }
+        }
+        writer.commit().asInstanceOf[ColumnReplaceCommitMessage]
+      } finally writer.close()
+    val outputs = message.segments.map { segment =>
+      val paths = segment.columnGroups.flatMap(_.files).map(root.resolve(_))
+      assert(
+        paths.size >= 2,
+        s"segment ${segment.segmentId} should have output for both columns"
+      )
+      paths.foreach(path => assert(Files.isRegularFile(path), path))
+      segment.segmentId -> paths
+    }.toMap
+    assert(outputs.keySet == segments.map(_.id).toSet)
+    beforeCommit(segments)
+    val messages = Array[WriterCommitMessage](message)
+    val error = intercept[IllegalStateException](batch.commit(messages))
+    assert(error.getMessage.contains("Manifest commit phase failed"))
+    batch.abort(messages)
+    val failure =
+      mapper.readTree(Files.readAllBytes(result.resolve("_failure.json")))
+    assert(failure.get("stage").asText() == "commit")
+    val outcomes = failure
+      .get("segments")
+      .elements()
+      .asScala
+      .map(s => s.get("segment_id").asLong() -> s)
+      .toMap
+    assert(outcomes.keySet == segments.map(_.id).toSet)
+    assert(Files.notExists(result.resolve("_result.json")))
+    (outputs, outcomes)
+  }
+
+  test(
+    "abort retains files from conflicting commits and removes files from every skipped segment"
+  ) {
+    fixture { (root, options) =>
+      // The fixture already has revision 2. Twelve stale plans cannot all be
+      // claimed by the eight workers before the first conflict stops the queue.
+      val (outputs, outcomes) =
+        failedManifestCommit(root, options, 40L until 52L)(_ => ())
+      val (skipped, attempted) = outcomes.partition { case (_, entry) =>
+        entry.get("error").asText().contains("not attempted")
+      }
+      assert(skipped.size >= 4 && attempted.nonEmpty)
+      assert(
+        attempted.values.forall(
+          _.get("error").asText().contains("another writer")
+        )
+      )
+      outputs.foreach { case (id, paths) =>
+        assert(outcomes(id).get("state").asText() == "not_committed")
+        paths.foreach { path =>
+          if (skipped.contains(id)) assert(Files.notExists(path), path)
+          else assert(Files.isRegularFile(path), path)
+        }
+        assert(latestVersion(root, id) == 2L)
+      }
+    }
+  }
+
+  test(
+    "abort removes every output when transaction begin cannot read the pinned revision"
+  ) {
+    fixture { (root, options) =>
+      val id = 70L
+      val (outputs, outcomes) = failedManifestCommit(root, options, Seq(id)) {
+        segments =>
+          val segment = segments.head
+          Files.delete(
+            root
+              .resolve(segment.basePath)
+              .resolve(s"_metadata/manifest-${segment.sourceVersion}.avro")
+          )
+      }
+      val outcome = outcomes(id)
+      assert(outcome.get("source_version").asLong() == 1L)
+      assert(outcome.get("state").asText() == "not_committed")
+      assert(outcome.get("error").asText().contains("manifest-1.avro"))
+      assert(!outcome.has("candidate_version") && !outcome.has("version"))
+      outputs(id).foreach(path => assert(Files.notExists(path), path))
+      assert(latestVersion(root, id) == 2L)
     }
   }
 

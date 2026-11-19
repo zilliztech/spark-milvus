@@ -778,6 +778,36 @@ class ColumnReplaceExampleTest extends AnyFunSuite with BeforeAndAfterAll {
     local(runLargeReceipt)
   }
 
+  test("the failure record distinguishes candidate and committed revisions") {
+    local { place =>
+      val name = "column-demo/failed"
+      val location =
+        WriteResultLocation.resolve(place.path(name), place.storage)
+      val unknown = SegmentOutcome(1L, 7L, SegmentState.Unknown, None, None)
+      val confirmed =
+        SegmentOutcome(2L, 2L, SegmentState.Committed, Some(3L), None)
+      val skipped =
+        SegmentOutcome(3L, 1L, SegmentState.NotAttempted, None, None)
+      val overflow = unknown.copy(segmentId = 4L, sourceVersion = Long.MaxValue)
+      WriteResultRecords.writeFailure(
+        location,
+        "operation",
+        Instant.now().toString,
+        "commit",
+        "some segment manifest commits could not be confirmed",
+        Seq(unknown, confirmed, skipped, overflow)
+      )
+      val records =
+        mapper.readTree(place.read(s"$name/_failure.json")).get("segments")
+      assert(records.get(0).get("candidate_version").asLong() == 8L)
+      assert(!records.get(0).has("version"))
+      assert(records.get(1).get("version").asLong() == 3L)
+      assert(!records.get(1).has("candidate_version"))
+      assert(!records.get(2).has("candidate_version"))
+      assert(!records.get(3).has("candidate_version"))
+    }
+  }
+
   Seq(true, false).foreach { useCrt =>
     test(
       s"a receipt larger than one upload part is one conditional request with fs.s3.use_crt=$useCrt"

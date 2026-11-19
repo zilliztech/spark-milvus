@@ -31,7 +31,11 @@ import com.zilliz.milvus.storage.snapshot.{
   Snapshot,
   SnapshotOrigin
 }
-import com.zilliz.milvus.storage.write.{ColumnGroupFiles, ManifestTransaction}
+import com.zilliz.milvus.storage.write.{
+  ColumnGroupFiles,
+  ManifestTransaction,
+  WriterResources
+}
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.types.{RowIdentity, SparkTypes}
 import io.milvus.grpc.common.KeyValuePair
@@ -303,6 +307,74 @@ class ColumnReplacePlanTest extends AnyFunSuite with Matchers {
       version = sourceVersion + 1L
     )
 
+  test("a failure rebuilding column groups never submits a manifest commit") {
+    val plan = committed(30L, 2L).planned
+    val invalid = plan.copy(columnGroups =
+      plan.columnGroups.map(_.copy(format = "unknown"))
+    )
+    val outcome = SegmentCommits.commitOne(
+      invalid,
+      Map.empty[String, String],
+      Seq("101", "102")
+    )
+    outcome.state shouldBe SegmentState.NotAttempted
+    outcome.version shouldBe None
+    outcome.error.get should include("only parquet column groups")
+  }
+
+  test(
+    "losing the response after a manifest is written leaves its owner unknown"
+  ) {
+    val plan = committed(30L, 2L).planned
+    var stored = Option.empty[ManifestTransaction.Revision]
+    var inspected = Vector.empty[Long]
+    val outcome = SegmentCommits.commitOne(
+      plan,
+      (version: Long) => {
+        inspected :+= version
+        stored.get
+      }
+    ) { submit =>
+      submit(() => {
+        stored = Some(
+          ManifestTransaction.Revision(3L, plan.columnGroups.flatMap(_.files))
+        )
+        throw new IllegalStateException("commit response lost")
+      })
+    }
+    inspected shouldBe Vector(3L)
+    outcome.state shouldBe SegmentState.Unknown
+    outcome.version shouldBe None
+    outcome.error.get should include("commit response lost")
+  }
+
+  test(
+    "a cleanup failure after acknowledgement preserves the committed revision"
+  ) {
+    val plan = committed(30L, 2L).planned
+    var inspected = false
+    val outcome = SegmentCommits.commitOne(
+      plan,
+      (_: Long) => {
+        inspected = true
+        throw new IllegalStateException(
+          "unexpected manifest read after acknowledgement"
+        )
+      }
+    ) { submit =>
+      WriterResources.closing(
+        throw new IllegalStateException("group cleanup failed")
+      ) {
+        submit(() => 3L)
+      }
+    }
+    inspected shouldBe false
+    outcome.state shouldBe SegmentState.Committed
+    outcome.version shouldBe Some(3L)
+    outcome.error.get should include("group cleanup failed")
+    outcome.successful shouldBe false
+  }
+
   test("a conflicting manifest revision cannot confirm a failed commit") {
     val plan = committed(30L, 2L).planned
     val ours = plan.columnGroups.flatMap(_.files)
@@ -330,10 +402,11 @@ class ColumnReplacePlanTest extends AnyFunSuite with Matchers {
     wrongVersion.version shouldBe None
 
     val unreadable = SegmentCommits.afterFailure(plan, failed) { _ =>
-      throw new IllegalStateException("manifest unavailable")
+      throw new IllegalStateException()
     }
     unreadable.state shouldBe SegmentState.Unknown
     unreadable.version shouldBe None
+    unreadable.error.get should endWith("java.lang.IllegalStateException")
   }
 
   private val receipt = WriteResult(

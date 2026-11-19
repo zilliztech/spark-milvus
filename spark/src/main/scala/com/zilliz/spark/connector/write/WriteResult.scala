@@ -63,8 +63,8 @@ sealed abstract class SegmentState(val name: String)
 object SegmentState {
   case object Committed extends SegmentState("committed")
   case object NotCommitted extends SegmentState("not_committed")
-  // The failure record groups skipped and rejected commits together. Only a
-  // skipped commit allows abort to reclaim its task files.
+  // Skipped and rejected commits share the on-disk state. A skipped segment
+  // never submitted its manifest transaction.
   private[write] case object NotAttempted
       extends SegmentState(NotCommitted.name)
   case object Unknown extends SegmentState("unknown")
@@ -76,7 +76,10 @@ final case class SegmentOutcome(
     state: SegmentState,
     version: Option[Long],
     error: Option[String]
-)
+) {
+  private[write] def successful: Boolean =
+    state == SegmentState.Committed && error.isEmpty
+}
 
 /** The receipt of one completed column replacement: which snapshot it read,
   * which fields it replaced, and for every segment the manifest revision it
@@ -458,6 +461,11 @@ object WriteResultRecords {
       segment.put("segment_id", outcome.segmentId)
       segment.put("source_version", outcome.sourceVersion)
       segment.put("state", outcome.state.name)
+      if (
+        outcome.state == SegmentState.Unknown && outcome.sourceVersion < Long.MaxValue
+      ) {
+        segment.put("candidate_version", outcome.sourceVersion + 1L)
+      }
       outcome.version.foreach(segment.put("version", _))
       outcome.error.foreach(segment.put("error", _))
     }

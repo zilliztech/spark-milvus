@@ -144,8 +144,7 @@ supported either.
 
 Segments commit separately, so there is no collection-wide atomic switch. When
 the write fails after some segments committed, those segments keep their new
-revisions and the failure record lists the state of every segment. A failed
-attempt never deletes a file that a manifest references or may reference.
+revisions and the failure record lists the state of every segment.
 
 ## The write result address
 
@@ -194,17 +193,23 @@ earlier protocol then finds the address occupied, and a write that loses the
 guard to one stops before any task starts. Every independent write still needs
 its own address.
 
-A segment is `committed` when storage acknowledges its manifest commit. A
-commit pinned to revision `v` can only produce `v + 1`. If storage reports an
-error, the driver inspects that revision. A revision with none of the write's
-output filenames establishes that another writer committed it, so the segment
-is `not_committed`. An overlapping filename cannot establish who committed the
-revision. The driver records `unknown` in that case, or if the revision is
-missing or unreadable. A write with either outcome has no success receipt.
+A segment is `committed` when storage acknowledges its manifest commit.
+If releasing native resources subsequently fails, the write stops and
+`_failure.json` still records that segment's acknowledged `version` and error.
+Segments left in the queue or whose transaction failed during preparation are
+`not_committed`. Abort removes their task files.
 
-After a failed write, the driver retains files from attempted manifest commits.
-This includes files another writer's revision could reference. Files from
-segments whose commits never started can be removed during abort.
+A submitted commit pinned to revision `v` can only produce `v + 1`. If it
+throws, the driver inspects that revision. If the revision contains none of the
+write's output filenames, another writer committed it and the segment is
+`not_committed`. If any filenames overlap, or the revision is missing or
+unreadable, the segment is `unknown`. Its failure record includes
+`candidate_version` for inspection. If the driver is interrupted while a worker
+is still running, it also records that segment as `unknown`.
+
+Abort retains task files from submitted commits, including when another writer
+won the pinned revision. That revision alone cannot rule out later references
+to those files.
 
 ### Receipt
 

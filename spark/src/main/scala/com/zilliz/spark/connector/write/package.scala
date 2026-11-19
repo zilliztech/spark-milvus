@@ -12,9 +12,12 @@ package com.zilliz.spark.connector
   * publishes the receipt. `WriteResult` owns the records under the write result
   * address, including the claim that gives an address to one write, and
   * `WriteResultTable` reads a receipt back. Only an acknowledged manifest
-  * transaction can supply a revision to the receipt. After a commit failure,
-  * file references help identify a conflicting revision but cannot establish
-  * who committed it. The driver retains files from attempted transactions. A
+  * transaction can supply a revision to the receipt. The driver records that
+  * revision even if releasing native resources fails. Abort removes task files
+  * for queued segments and transactions that failed during preparation. It
+  * retains files once the native commit was submitted. If submission failed
+  * without an acknowledgement, file references can identify a conflicting
+  * revision. An unresolved outcome records the candidate revision. A
   * conditional create of `_operation.json` claims the address before tasks
   * start, and `_result.json` is also published by conditional creation. An
   * ambiguous create failure is resolved by reading the complete record back.
