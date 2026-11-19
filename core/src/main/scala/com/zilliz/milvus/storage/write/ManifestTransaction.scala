@@ -44,25 +44,63 @@ object ManifestTransaction {
       change: Change,
       stats: Seq[Stat] = Seq.empty,
       readVersion: Long = -1L
-  ): Long = {
+  ): Long =
+    withPrepared(basePath, properties, groups, change, stats, readVersion)(
+      submit => submit()
+    )
+
+  /** Submits a fully staged native transaction and returns the acknowledged
+    * manifest revision. Valid only inside the callback to [[withPrepared]].
+    */
+  private[zilliz] type PreparedCommit = () => Long
+
+  /** Stages all changes before handing the caller the commit operation. The
+    * FAIL resolver rejects concurrent advancement of the selected revision. All
+    * resources stay open until the callback returns, so an acknowledgement can
+    * be recorded before cleanup.
+    */
+  private[zilliz] def withPrepared(
+      basePath: String,
+      properties: Map[String, String],
+      groups: WrittenColumnGroups,
+      change: Change,
+      stats: Seq[Stat] = Seq.empty,
+      readVersion: Long = -1L
+  )(submit: PreparedCommit => Long): Long = {
     require(
       readVersion == -1L || readVersion > 0L,
       "readVersion must be latest (-1) or a committed manifest version"
     )
-    run(basePath, properties, readVersion) { transaction =>
-      change match {
-        case AppendFiles =>
-          transaction.appendFiles(groups.nativeHandle)
-        case ReplaceColumns(columns) =>
-          columns.foreach(transaction.dropColumn)
-          transaction.addColumnGroups(groups.nativeHandle)
-      }
-      stats.foreach { stat =>
-        transaction.updateStat(
-          stat.key,
-          stat.files.toArray,
-          stat.metadata
-        )
+    NativeStorageLibrary.load()
+    val nativeProperties = new MilvusStorageProperties()
+    WriterResources.closing(nativeProperties.free()) {
+      nativeProperties.create(properties)
+      val transaction = new MilvusStorageTransaction()
+      WriterResources.closing(transaction.destroy()) {
+        transaction.begin(basePath, nativeProperties.getPtr, readVersion, 0, 1)
+        change match {
+          case AppendFiles =>
+            transaction.appendFiles(groups.nativeHandle)
+          case ReplaceColumns(columns) =>
+            columns.foreach(transaction.dropColumn)
+            transaction.addColumnGroups(groups.nativeHandle)
+        }
+        stats.foreach { stat =>
+          transaction.updateStat(
+            stat.key,
+            stat.files.toArray,
+            stat.metadata
+          )
+        }
+        submit { () =>
+          val version = transaction.commit()
+          if (version < 0) {
+            throw new IllegalStateException(
+              s"committing the manifest at $basePath failed (version $version)"
+            )
+          }
+          version
+        }
       }
     }
   }
@@ -73,8 +111,8 @@ object ManifestTransaction {
   final case class Revision(version: Long, files: Seq[String])
 
   /** Revision `version` of the manifest at `basePath`, or the latest one for
-    * -1. A caller that lost the outcome of a commit reads the revision the
-    * commit would have produced and looks for its own files in it.
+    * -1. The data file list can rule out a commit. It does not identify the
+    * transaction that produced the revision.
     */
   def revision(
       basePath: String,
@@ -101,37 +139,5 @@ object ManifestTransaction {
         )
       } finally manifest.close()
     } finally nativeProperties.free()
-  }
-
-  /** One transaction from `readVersion` with the FAIL resolver: any revision
-    * committed after `readVersion` rejects the commit instead of rebasing a
-    * stale result onto it. Ordinary writes read latest; legacy column
-    * replacement pins the snapshot revision.
-    */
-  private def run(
-      basePath: String,
-      properties: Map[String, String],
-      readVersion: Long
-  )(record: MilvusStorageTransaction => Unit): Long = {
-    NativeStorageLibrary.load()
-    val nativeProperties = new MilvusStorageProperties()
-    var transaction: MilvusStorageTransaction = null
-    val version =
-      try {
-        nativeProperties.create(properties)
-        transaction = new MilvusStorageTransaction()
-        transaction.begin(basePath, nativeProperties.getPtr, readVersion, 0, 1)
-        record(transaction)
-        transaction.commit()
-      } finally {
-        try if (transaction != null) transaction.destroy()
-        finally nativeProperties.free()
-      }
-    if (version < 0) {
-      throw new IllegalStateException(
-        s"committing the manifest at $basePath failed (version $version)"
-      )
-    }
-    version
   }
 }

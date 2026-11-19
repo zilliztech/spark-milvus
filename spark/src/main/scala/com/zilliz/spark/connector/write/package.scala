@@ -11,15 +11,21 @@ package com.zilliz.spark.connector
   * commits every segment's manifest from the snapshot's pinned revision and
   * publishes the receipt. `WriteResult` owns the records under the write result
   * address, including the claim that gives an address to one write, and
-  * `WriteResultTable` reads a receipt back. A conditional create of
-  * `_operation.json` claims the address before tasks start, and `_result.json`
-  * is also published by conditional creation. An ambiguous create failure is
-  * resolved by reading the complete record back. Unsupported conditional writes
-  * fail without falling back to an existence check. Every record is uploaded by
-  * one request, so a failed upload leaves no partial record. Addresses claimed
-  * by the earlier manifest protocol remain occupied, and a claim also creates a
-  * guard record at that protocol's claim key so that connectors using it reject
-  * the address in turn.
+  * `WriteResultTable` reads a receipt back. Only an acknowledged manifest
+  * transaction can supply a revision to the receipt. The driver records that
+  * revision even if releasing native resources fails. Abort removes task files
+  * for queued segments and transactions that failed during preparation. It
+  * retains files once the native commit was submitted. If submission failed
+  * without an acknowledgement, file references can identify a conflicting
+  * revision. An unresolved outcome records the candidate revision. A
+  * conditional create of `_operation.json` claims the address before tasks
+  * start, and `_result.json` is also published by conditional creation. An
+  * ambiguous create failure is resolved by reading the complete record back.
+  * Unsupported conditional writes fail without falling back to an existence
+  * check. Every record is uploaded by one request, so a failed upload leaves no
+  * partial record. Addresses claimed by the earlier manifest protocol remain
+  * occupied, and a claim also creates a guard record at that protocol's claim
+  * key so that connectors using it reject the address in turn.
   *
   * Operational metrics distinguish rows accepted by a task attempt, complete
   * files adopted by Spark, confirmed segment manifest revisions and a confirmed

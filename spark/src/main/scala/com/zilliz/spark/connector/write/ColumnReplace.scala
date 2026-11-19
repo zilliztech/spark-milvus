@@ -2,8 +2,7 @@ package com.zilliz.spark.connector.write
 
 import java.{util => ju}
 import java.time.Instant
-import java.util.concurrent.{Callable, Executors, ThreadFactory}
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.{Executors, ThreadFactory}
 import java.util.UUID
 import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
@@ -633,23 +632,36 @@ final class ColumnReplaceBatchWrite(
         commits
       )
       enter(WritePhase.Committing)
-      val committed = SegmentCommits.commitAll(
+      // A worker can enter storage as soon as the pool starts. If the driver is
+      // interrupted, commitAll identifies the segments still waiting for a worker.
+      outcomes = commits.map { commit =>
+        commit.segmentId -> SegmentOutcome(
+          commit.segmentId,
+          commit.sourceVersion,
+          SegmentState.Unknown,
+          None,
+          Some("the manifest commit did not report its outcome")
+        )
+      }.toMap
+      val columns = plan.targets.map(_.fieldId.toString)
+      SegmentCommits.commitAll(
         commits,
-        plan.storage,
-        plan.targets.map(_.fieldId.toString),
         outcome => {
           synchronized { outcomes += outcome.segmentId -> outcome }
+          if (
+            outcome.state == SegmentState.Committed && outcome.error.nonEmpty
+          ) {
+            metrics.cleanupFailed()
+          }
           metrics.segmentOutcome(outcome.segmentId, outcome.state.name)
           report()
         }
-      )
-      outcomes = committed.map(outcome => outcome.segmentId -> outcome).toMap
-      val failed = committed.filter(_.state != SegmentState.Committed)
-      if (failed.nonEmpty) {
+      )(commit => SegmentCommits.commitOne(commit, plan.storage, columns))
+      val committed = commits.map(commit => outcomes(commit.segmentId))
+      committed.find(outcome => !outcome.successful).foreach { first =>
         throw new IllegalStateException(
-          s"${failed.size} of ${commits.size} segment manifest(s) did not commit; " +
-            s"first: segment ${failed.head.segmentId} ${failed.head.state.name}: ${failed.head.error
-                .getOrElse("")}. " +
+          s"Manifest commit phase failed for segment ${first.segmentId} " +
+            s"(${first.state.name}): ${first.error.getOrElse("no outcome reported")}. " +
             s"Committed segments keep their new revisions; see ${plan.result.failureKey}"
         )
       }
@@ -681,6 +693,9 @@ final class ColumnReplaceBatchWrite(
     report()
     OperationalMetrics.finish(token, "success")
   } catch {
+    case interrupted: InterruptedException =>
+      failed(interrupted)
+      throw interrupted
     case NonFatal(failure) =>
       failed(failure)
       throw failure
@@ -700,11 +715,11 @@ final class ColumnReplaceBatchWrite(
             message.segments
           }
           .flatten
-        // A file stays when a manifest references it or may reference it.
+        // Even a rejected commit's files may be referenced by another writer.
         val removable = written.filter(segment =>
           outcomes
             .get(segment.segmentId)
-            .forall(_.state == SegmentState.NotCommitted)
+            .forall(_.state == SegmentState.NotAttempted)
         )
         deleteQuietly(removable.flatMap(_.columnGroups.flatMap(_.files)))
         val recorded = plan.segments.map { segment =>
@@ -726,9 +741,10 @@ final class ColumnReplaceBatchWrite(
         val (stage, message) =
           if (outcomes.isEmpty)
             "write" -> "the job failed before any segment manifest was committed"
-          else if (recorded.forall(_.state == SegmentState.Committed))
+          else if (recorded.forall(_.successful))
             "publish" -> "every segment manifest committed, but receipt publication could not be confirmed"
-          else "commit" -> "some segment manifests did not commit"
+          else
+            "commit" -> "the segment manifest commit phase failed"
         try
           WriteResultRecords.writeFailure(
             plan.result,
@@ -843,47 +859,70 @@ final class ColumnReplaceBatchWrite(
 private[write] object SegmentCommits {
   private val Parallelism = 8
 
-  /** Commits each segment from its pinned revision, a few at a time, and stops
-    * starting new commits after the first failure. A segment whose commit was
-    * never started is not committed.
+  /** Workers claim one segment at a time. Closing the queue prevents further
+    * claims and reports exactly which segments never reached a worker. A caller
+    * interrupted while a worker is in storage keeps its unknown outcome.
     */
   def commitAll(
       commits: Seq[PlannedCommit],
-      storage: Map[String, String],
-      columns: Seq[String],
-      reportOutcome: SegmentOutcome => Unit = _ => ()
-  ): Seq[SegmentOutcome] = {
-    val stop = new AtomicBoolean(false)
-    val pool = Executors.newFixedThreadPool(
-      math.max(1, math.min(Parallelism, commits.size)),
-      daemonThreads
-    )
-    try {
-      commits
-        .map { commit =>
-          pool.submit(new Callable[SegmentOutcome] {
-            override def call(): SegmentOutcome = {
-              val outcome =
-                if (stop.get())
-                  SegmentOutcome(
-                    commit.segmentId,
-                    commit.sourceVersion,
-                    SegmentState.NotCommitted,
-                    None,
-                    Some("not attempted after an earlier segment failed")
-                  )
-                else {
-                  val outcome = commitOne(commit, storage, columns)
-                  if (outcome.state != SegmentState.Committed) stop.set(true)
-                  outcome
-                }
-              reportOutcome(outcome)
-              outcome
-            }
-          })
+      reportOutcome: SegmentOutcome => Unit,
+      parallelism: Int = Parallelism
+  )(commitOne: PlannedCommit => SegmentOutcome): Unit = {
+    if (commits.isEmpty) return
+    val pending = commits.iterator
+    val gate = new Object
+    var stopped = false
+    var closed = false
+
+    def claim(): Option[PlannedCommit] = gate.synchronized {
+      if (stopped || !pending.hasNext) None else Some(pending.next())
+    }
+
+    val worker = new Runnable {
+      override def run(): Unit = try {
+        var next = claim()
+        while (next.nonEmpty) {
+          val outcome = commitOne(next.get)
+          gate.synchronized {
+            if (!outcome.successful) stopped = true
+            if (!closed) reportOutcome(outcome)
+          }
+          next = claim()
         }
-        .map(_.get())
-    } finally pool.shutdownNow()
+      } finally {
+        // A failed worker can leave its last commit unconfirmed.
+        gate.synchronized { stopped = true }
+      }
+    }
+
+    val count = math.min(parallelism, commits.size)
+    val pool = Executors.newFixedThreadPool(count, daemonThreads)
+    WriterResources.closing {
+      try
+        gate.synchronized {
+          stopped = true
+          closed = true
+          pending.foreach { commit =>
+            reportOutcome(
+              SegmentOutcome(
+                commit.segmentId,
+                commit.sourceVersion,
+                SegmentState.NotAttempted,
+                None,
+                Some("not attempted before segment commits stopped")
+              )
+            )
+          }
+        }
+      finally pool.shutdown()
+    } {
+      if (Thread.interrupted())
+        throw new InterruptedException(
+          "segment commits interrupted before dispatch"
+        )
+      val workers = Vector.fill(count)(pool.submit(worker))
+      workers.foreach(_.get())
+    }
   }
 
   private[write] def commitOne(
@@ -891,91 +930,116 @@ private[write] object SegmentCommits {
       storage: Map[String, String],
       columns: Seq[String]
   ): SegmentOutcome =
-    try {
+    commitOne(
+      commit,
+      version =>
+        ManifestTransaction.revision(commit.manifestBasePath, storage, version)
+    ) { submit =>
       val groups = WrittenColumnGroups.of(commit.columnGroups)
-      val version = WriterResources.closing(groups.close()) {
-        ManifestTransaction.commit(
+      WriterResources.closing(groups.close()) {
+        ManifestTransaction.withPrepared(
           commit.manifestBasePath,
           storage,
           groups,
           ManifestTransaction.ReplaceColumns(columns),
           readVersion = commit.sourceVersion
-        )
+        )(submit)
       }
+    }
+
+  private[write] def commitOne(
+      commit: PlannedCommit,
+      readRevision: Long => ManifestTransaction.Revision
+  )(
+      write: (ManifestTransaction.PreparedCommit => Long) => Unit
+  ): SegmentOutcome = {
+    var submitted = false
+    var acknowledged = Option.empty[Long]
+    try {
+      write { prepared =>
+        submitted = true
+        val version = prepared()
+        acknowledged = Some(version)
+        version
+      }
+      require(
+        acknowledged.nonEmpty,
+        "manifest commit returned without an acknowledgement"
+      )
       SegmentOutcome(
         commit.segmentId,
         commit.sourceVersion,
         SegmentState.Committed,
-        Some(version),
+        acknowledged,
         None
       )
     } catch {
-      case NonFatal(failure) => afterFailure(commit, storage, failure)
-    }
-
-  /** What a failed commit left. A commit pinned to revision `v` can only have
-    * produced revision `v + 1`, so that revision, if it exists, either
-    * references this write's files (the commit landed and its response was
-    * lost) or another writer's (the commit lost the race).
-    */
-  private def afterFailure(
-      commit: PlannedCommit,
-      storage: Map[String, String],
-      failure: Throwable
-  ): SegmentOutcome = {
-    val error = Option(failure.getMessage).getOrElse(failure.toString)
-    try {
-      val latest =
-        ManifestTransaction.revision(commit.manifestBasePath, storage)
-      val produced = commit.sourceVersion + 1L
-      if (latest.version < produced)
-        SegmentOutcome(
-          commit.segmentId,
-          commit.sourceVersion,
-          SegmentState.NotCommitted,
-          None,
-          Some(error)
-        )
-      else {
-        val candidate =
-          if (latest.version == produced) latest
-          else
-            ManifestTransaction.revision(
-              commit.manifestBasePath,
-              storage,
-              produced
+      case NonFatal(failure) =>
+        acknowledged match {
+          case Some(version) =>
+            SegmentOutcome(
+              commit.segmentId,
+              commit.sourceVersion,
+              SegmentState.Committed,
+              Some(version),
+              Some(
+                s"revision $version was acknowledged, but cleanup failed: ${failureMessage(failure)}"
+              )
             )
-        val ours = commit.columnGroups.flatMap(_.files).map(fileName).toSet
-        if (candidate.files.map(fileName).exists(ours))
-          SegmentOutcome(
-            commit.segmentId,
-            commit.sourceVersion,
-            SegmentState.Committed,
-            Some(produced),
-            Some(s"committed although the commit reported: $error")
-          )
-        else
-          SegmentOutcome(
-            commit.segmentId,
-            commit.sourceVersion,
-            SegmentState.NotCommitted,
-            None,
-            Some(s"revision $produced was committed by another writer: $error")
-          )
-      }
-    } catch {
-      case NonFatal(inspection) =>
-        SegmentOutcome(
-          commit.segmentId,
-          commit.sourceVersion,
-          SegmentState.Unknown,
-          None,
-          Some(
-            s"$error; the manifest could not be inspected afterwards: ${inspection.getMessage}"
-          )
-        )
+          case None if submitted => afterFailure(commit, failure)(readRevision)
+          case None =>
+            SegmentOutcome(
+              commit.segmentId,
+              commit.sourceVersion,
+              SegmentState.NotAttempted,
+              None,
+              Some(
+                s"manifest commit was not submitted: ${failureMessage(failure)}"
+              )
+            )
+        }
     }
   }
+
+  /** Inspect the one revision a pinned commit could have produced. Data file
+    * references can rule out this write. Even a complete file match leaves the
+    * transaction identity unknown.
+    */
+  private[write] def afterFailure(
+      commit: PlannedCommit,
+      failure: Throwable
+  )(readRevision: Long => ManifestTransaction.Revision): SegmentOutcome = {
+    val error = failureMessage(failure)
+    val (state, detail) =
+      try {
+        val produced = Math.addExact(commit.sourceVersion, 1L)
+        val candidate = readRevision(produced)
+        require(
+          candidate.version == produced,
+          s"expected manifest revision $produced, got ${candidate.version}"
+        )
+        // Native manifests and task output can spell a path differently. A
+        // matching filename conservatively leaves the outcome unresolved.
+        val ours = commit.columnGroups.flatMap(_.files).map(fileName).toSet
+        if (candidate.files.exists(file => ours.contains(fileName(file))))
+          SegmentState.Unknown -> s"revision $produced may reference this write's files"
+        else
+          SegmentState.NotCommitted -> s"revision $produced was committed by another writer"
+      } catch {
+        case NonFatal(inspection) =>
+          SegmentState.Unknown -> s"the manifest could not be inspected afterwards: ${failureMessage(inspection)}"
+      }
+    SegmentOutcome(
+      commit.segmentId,
+      commit.sourceVersion,
+      state,
+      None,
+      Some(s"$error; $detail")
+    )
+  }
+
+  private def failureMessage(failure: Throwable): String =
+    Option(failure.getMessage).getOrElse(failure.toString)
 
   private def fileName(path: String): String =
     path.substring(path.lastIndexOf('/') + 1)
