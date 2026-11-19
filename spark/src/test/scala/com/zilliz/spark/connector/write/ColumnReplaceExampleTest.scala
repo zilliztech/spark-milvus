@@ -612,6 +612,29 @@ class ColumnReplaceExampleTest extends AnyFunSuite with BeforeAndAfterAll {
   }
 
   test(
+    "count and stored positions use a snapshot whose files omit the timestamp"
+  ) {
+    local { place =>
+      val source = spark.read
+        .format("milvus")
+        .options(place.options)
+        .option(MilvusOption.ReadMode, MilvusOption.ReadModePhysical)
+        .schema("embedding ARRAY<FLOAT>")
+        .load()
+      assert(source.count() == 4L)
+      val positions = source.select("_segment_id", "_row_offset").collect()
+      assert(
+        positions.toSet == Set(
+          Row(41L, 0L),
+          Row(41L, 1L),
+          Row(42L, 0L),
+          Row(42L, 1L)
+        )
+      )
+    }
+  }
+
+  test(
     "raw vector reads return the stored bytes for dense and sparse vectors"
   ) {
     local { place =>

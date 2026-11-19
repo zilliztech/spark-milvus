@@ -42,7 +42,7 @@ object MetadataColumns {
   def hiddenFields(
       visible: StructType,
       collection: CollectionSchema,
-      rowIdentityAvailable: Boolean = false
+      physicalRead: Boolean = false
   ): Seq[StructField] = {
     def available(name: String): Boolean =
       !visible.fieldNames.exists(_.equalsIgnoreCase(name))
@@ -50,7 +50,7 @@ object MetadataColumns {
     val timestamps =
       if (available(Timestamp)) Seq(timestampField(collection)) else Nil
     val identity =
-      if (rowIdentityAvailable && available(RowIdentity.ColumnName))
+      if (physicalRead && available(RowIdentity.ColumnName))
         Seq(RowIdentity.field)
       else Nil
     positions ++ timestamps ++ identity

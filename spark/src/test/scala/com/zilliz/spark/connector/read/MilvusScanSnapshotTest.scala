@@ -989,6 +989,53 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
     assert(scan.readSchema().fieldNames.toSeq == Seq("_segment_id"))
   }
 
+  test(
+    "empty and position-only projections prefer the timestamp or primary key over a visible vector"
+  ) {
+    val options =
+      new CaseInsensitiveStringMap(ju.Collections.emptyMap[String, String]())
+    val vector = ProtoSchema
+      .parseFrom(
+        java.util.Base64.getDecoder.decode(vectorSnapshotSchemaBytes)
+      )
+      .fields
+      .head
+    val pk = FieldSchema(
+      fieldID = 104L,
+      name = "id",
+      dataType = MilvusDataType.Int64,
+      isPrimaryKey = true
+    )
+    val timestamp = FieldSchema(
+      fieldID = 1L,
+      name = "Timestamp",
+      dataType = MilvusDataType.Int64
+    )
+    val visible = StructType(Seq(StructField(vector.name, BinaryType)))
+    for {
+      (fields, expectedId) <- Seq(
+        Seq(vector, pk, timestamp) -> timestamp.fieldID,
+        Seq(vector, pk) -> pk.fieldID,
+        Seq(vector) -> vector.fieldID
+      )
+      projection <- Seq(
+        StructType(Nil),
+        StructType(Seq(MetadataColumns.partitionIdField))
+      )
+    } {
+      val snapshot = snapshotOf(schemaBytes =
+        ProtoSchema(name = "t", fields = fields).toByteArray
+      )
+      val table = MilvusTable(snapshot, MilvusOption(options), Some(visible))
+      val builder =
+        table.newScanBuilder(options).asInstanceOf[MilvusScanBuilder]
+      builder.pruneColumns(projection)
+      val scan = builder.build().asInstanceOf[MilvusScan]
+      assert(scan.neededFieldIds == Seq(expectedId))
+      assert(scan.readSchema().fieldNames.toSeq == projection.fieldNames.toSeq)
+    }
+  }
+
   test("reordered non-contiguous field ids reach every V3 task") {
     val collection = io.milvus.grpc.schema.CollectionSchema.parseFrom(
       java.util.Base64.getDecoder.decode(vectorSnapshotSchemaBytes)

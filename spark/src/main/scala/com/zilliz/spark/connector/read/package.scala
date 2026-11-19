@@ -11,11 +11,12 @@ package com.zilliz.spark.connector
   * batches. Each segment task receives the field IDs required by Spark
   * projection and predicates. MetadataColumns binds the hidden timestamp to
   * stored field 1 and supplies partition, segment and row position from each
-  * task. A physical scan synthesizes `_milvus_row_id` when Spark projects that
-  * hidden column, using the snapshot ID and the stored position. Operational
-  * read metrics distinguish decoded rows, mutually exclusive deletion and
-  * predicate exclusions, and rows handed to Spark after a pushed limit. Reader
-  * state records exhaustion, early stops and failures once; planning reports
-  * the current segment count without accumulating replans.
+  * task. When Spark projects `_milvus_row_id` on a physical read, planning
+  * requires a positive snapshot ID and the reader combines it with the stored
+  * position. Operational read metrics distinguish decoded rows, mutually
+  * exclusive deletion and predicate exclusions, and rows handed to Spark after
+  * a pushed limit. Reader state records exhaustion, early stops and failures
+  * once; planning reports the current segment count without accumulating
+  * replans.
   */
 package object read

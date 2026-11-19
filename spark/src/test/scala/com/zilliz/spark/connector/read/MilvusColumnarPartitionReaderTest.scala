@@ -450,6 +450,7 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
         val column = r.get().column(2)
         column.getUTF8String(0).toString shouldBe """{"a":1}"""
         column.isNullAt(1) shouldBe true
+        column.getUTF8String(1) shouldBe null
         column.getUTF8String(2).toString shouldBe ""
         column.getUTF8String(3).toString shouldBe """{"名":"值"}"""
       } finally r.close()

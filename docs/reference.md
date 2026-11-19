@@ -290,7 +290,7 @@ live and physical reads.
 | `_segment_id` | `LongType`, non-null | ID of the data segment containing the row. |
 | `_row_offset` | `LongType`, non-null | Zero-based physical row position within the segment. Filtering deleted rows can leave gaps. |
 | `_timestamp` | `LongType`, snapshot nullability | Stored Milvus system timestamp (field ID `1`). |
-| `_milvus_row_id` | Non-null struct of three non-null `LongType` fields: `snapshot_id`, `segment_id`, `row_offset` | Row identity for column replacement. Available on physical reads of a snapshot with a positive `snapshot_info.id`. Carry it unchanged through to the write. |
+| `_milvus_row_id` | Non-null struct of three non-null `LongType` fields: `snapshot_id`, `segment_id`, `row_offset` | Row identity for column replacement on a physical read. Requesting this column fails during scan planning if the snapshot lacks a positive `snapshot_info.id`. Carry it unchanged through to the write. |
 
 For example, `docs.select("*", "_segment_id", "_row_offset")` adds the physical
 location to every returned row. A visible collection field with the same name
@@ -346,9 +346,13 @@ decimal byte counts such as `33554432`, not size strings such as `32m`.
 
 #### Spark predicate pushdown
 
-Partition pruning through [`_partition_id`](#hidden-metadata-columns) retains
-the delete records that apply to each selected segment. Conditions on the hidden
-`_timestamp` column support the same pushdown as other stored `LongType` fields.
+The connector prunes partitions when Spark passes a top-level equality or
+`IN` predicate on the hidden [`_partition_id`](#hidden-metadata-columns).
+For example, `_partition_id IN (10, 11)` prunes segments and retains their
+applicable delete records. Spark evaluates range comparisons such as
+`_partition_id > 10`, and partition conditions that still contain `OR` or
+`NOT` after optimization. Conditions on the hidden `_timestamp` column
+support the same pushdown as other stored `LongType` fields.
 
 Spark SQL and DataFrame `where` conditions use DataSource V2 predicate
 pushdown. Bool fields support equality, inequality, null-safe equality (`<=>`),
@@ -359,8 +363,9 @@ conditions. These operators preserve Spark SQL three-valued NULL semantics.
 Each predicate tree is pushed only when the connector supports the whole tree.
 Spark evaluates unsupported operators, casts, nested references and filters on
 JSON, Array, Geometry and vector fields. It also evaluates filters on
-`_segment_id` and `_row_offset`. Fields used only in predicates can be
-omitted from the result. The DataSource V1 Filter API is not supported.
+`_segment_id`, `_row_offset`, `_milvus_row_id` and its struct fields.
+Fields used only in predicates can be omitted from the result. The DataSource
+V1 Filter API is not supported.
 
 Spark predicates are the only filter on field values. Setting the removed
 `milvus.filter` option fails planning instead of returning unfiltered rows;

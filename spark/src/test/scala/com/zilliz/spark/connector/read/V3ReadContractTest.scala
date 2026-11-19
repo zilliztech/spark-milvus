@@ -345,13 +345,10 @@ class V3ReadContractTest extends AnyFunSuite with BeforeAndAfterAll {
     fixture { (root, options) =>
       val physicalOptions =
         options + (MilvusOption.ReadMode -> MilvusOption.ReadModePhysical)
-      def identityUnavailable(frame: DataFrame): Unit = {
-        val failure = intercept[AnalysisException] {
-          frame.select(RowIdentity.ColumnName).queryExecution.analyzed
-        }
-        assert(failure.getMessage.contains(RowIdentity.ColumnName))
+      val liveFailure = intercept[AnalysisException] {
+        read(options).select(RowIdentity.ColumnName).queryExecution.analyzed
       }
-      identityUnavailable(read(options))
+      assert(liveFailure.getMessage.contains(RowIdentity.ColumnName))
       val physical = read(physicalOptions)
       assert(
         physical.select("*").columns.toSeq == Seq("id", "vector", "category")
@@ -385,12 +382,38 @@ class V3ReadContractTest extends AnyFunSuite with BeforeAndAfterAll {
         )
         .head()
       assert(position.toSeq == Seq(31L, 5L))
+    }
+  }
+
+  test(
+    "physical reads require a snapshot id only when the hidden row identity is requested"
+  ) {
+    fixture { (root, options) =>
       metadata(root)(
         _.get("snapshot_info").asInstanceOf[ObjectNode].remove("id")
       )
+      val physicalOptions =
+        options + (MilvusOption.ReadMode -> MilvusOption.ReadModePhysical)
       val withoutId = read(physicalOptions)
       assert(withoutId.where("_segment_id = 30").count() == 8L)
-      identityUnavailable(withoutId)
+      val empty = read(
+        (physicalOptions - MilvusOption.SnapshotPath) ++ Map(
+          MilvusOption.SnapshotManifests -> "[]",
+          MilvusOption.SnapshotSchemaJson -> Files.readString(
+            root.resolve("snapshot.json")
+          )
+        )
+      )
+      assert(empty.collect().isEmpty)
+      for (frame <- Seq(withoutId, empty)) {
+        val failure = intercept[Exception] {
+          frame.select(RowIdentity.ColumnName).collect()
+        }
+        val detail = messages(failure)
+        assert(detail.contains("has no snapshot_info.id"), detail)
+        assert(detail.contains(RowIdentity.ColumnName), detail)
+        assert(detail.contains("snapshot file that Milvus created"), detail)
+      }
     }
   }
 
@@ -423,6 +446,14 @@ class V3ReadContractTest extends AnyFunSuite with BeforeAndAfterAll {
         .head()
         .getStruct(0)
       assert(identity.toSeq == Seq(1L, 30L, 2L))
+      metadata(root)(
+        _.get("snapshot_info").asInstanceOf[ObjectNode].remove("id")
+      )
+      val stored = read(physical)
+        .where("id = 3002")
+        .select(RowIdentity.ColumnName)
+        .head()
+      assert(stored.getLong(0) == 1L)
     }
   }
 

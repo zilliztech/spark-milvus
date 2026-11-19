@@ -73,8 +73,7 @@ case class MilvusTable(
       .hiddenFields(
         schema(),
         snapshot.schema,
-        rowIdentityAvailable = snapshot.id.isDefined && MilvusOption
-          .isPhysicalRead(milvusOption.options)
+        physicalRead = MilvusOption.isPhysicalRead(milvusOption.options)
       )
       .map { field =>
         new MetadataColumn {

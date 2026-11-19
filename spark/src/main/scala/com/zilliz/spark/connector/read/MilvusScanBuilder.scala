@@ -20,6 +20,7 @@ import com.zilliz.milvus.storage.schema.{FieldMetadata, SchemaMapper}
 import com.zilliz.milvus.storage.snapshot.Snapshot
 import com.zilliz.spark.connector.expr.SparkPredicateTranslator
 import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.types.RowIdentity
 
 class MilvusScanBuilder(
     schema: StructType,
@@ -47,8 +48,7 @@ class MilvusScanBuilder(
     schema.fields.toSeq ++ MetadataColumns.hiddenFields(
       schema,
       snapshot.schema,
-      rowIdentityAvailable =
-        snapshot.id.isDefined && MilvusOption.isPhysicalRead(options)
+      physicalRead = MilvusOption.isPhysicalRead(options)
     )
   )
   private val fieldsByName =
@@ -74,6 +74,12 @@ class MilvusScanBuilder(
       )
     }
 
+    if (snapshot.id.isEmpty && requestedFields.contains(RowIdentity.field)) {
+      throw new IllegalArgumentException(
+        s"Snapshot '${snapshot.name}' has no snapshot_info.id, so its rows cannot carry " +
+          s"'${RowIdentity.ColumnName}'. Read a snapshot file that Milvus created."
+      )
+    }
     currentSchema = StructType(requestedFields)
   }
 
@@ -162,12 +168,13 @@ class MilvusScanBuilder(
     val selected = (projected.toSeq ++ predicateFieldIds.toSeq.sorted).distinct
     if (selected.nonEmpty) selected
     else {
-      val fallback = schema.fields
-        .filterNot(MetadataColumns.isSynthetic)
-        .map(fieldId)
-        .sorted
-        .headOption
-        .getOrElse(SchemaMapper.TimestampFieldId)
+      // Count rows using the declared timestamp or primary key, even when the
+      // visible Spark schema contains only vectors. Both also serve live deletes.
+      val fallback = snapshot.schema.fields
+        .find(_.fieldID == SchemaMapper.TimestampFieldId)
+        .orElse(snapshot.primaryKeyField)
+        .orElse(snapshot.schema.fields.sortBy(_.fieldID).headOption)
+        .fold(SchemaMapper.TimestampFieldId)(_.fieldID)
       Seq(fallback)
     }
   }

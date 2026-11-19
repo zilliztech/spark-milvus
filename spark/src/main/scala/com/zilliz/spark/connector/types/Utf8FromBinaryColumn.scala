@@ -39,6 +39,7 @@ final class Utf8FromBinaryColumn(vector: VarBinaryVector)
   override def isNullAt(rowId: Int): Boolean = vector.isNull(rowId)
 
   override def getUTF8String(rowId: Int): UTF8String = {
+    if (isNullAt(rowId)) return null
     val bytes = vector.get(rowId)
     try {
       StandardCharsets.UTF_8
