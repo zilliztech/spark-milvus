@@ -13,6 +13,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.jni.storage.NativeStorageLibrary
+import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.testkit.LocalMilvusCollection
 import com.zilliz.spark.connector.types.RowIdentity
@@ -339,7 +340,7 @@ class ColumnReplaceNativeTest extends AnyFunSuite with BeforeAndAfterAll {
       write(frame, options, root.resolve("first"))
       val result = root.resolve("second")
       val error = intercept[Exception](write(frame, options, result))
-      assert(rootMessage(error).contains("did not commit"))
+      assert(rootMessage(error).contains("Could not confirm"))
       val failure =
         mapper.readTree(Files.readAllBytes(result.resolve("_failure.json")))
       assert(failure.get("stage").asText() == "commit")
@@ -350,7 +351,34 @@ class ColumnReplaceNativeTest extends AnyFunSuite with BeforeAndAfterAll {
         .map(s => s.get("segment_id").asLong() -> s.get("state").asText())
         .toMap
       assert(states.values.toSet == Set("not_committed"))
+      assert(!Files.exists(result.resolve("_result.json")))
+      val outputs = mapper
+        .readTree(Files.readAllBytes(result.resolve("_commit_plan.json")))
+        .get("segments")
+        .findValuesAsText("path")
+        .asScala
+      // At least one segment reached commit. Its files must survive abort.
+      assert(outputs.exists(path => Files.isRegularFile(root.resolve(path))))
       assert(latestVersion(root, 30L) == 3L && latestVersion(root, 31L) == 3L)
+    }
+  }
+
+  test("retrying a pinned plan cannot claim a previously committed revision") {
+    fixture { (root, options) =>
+      val result = root.resolve("first")
+      write(prepared(physical(options)), options, result)
+      val first = WriteResultRecords.parseResult(
+        Files.readString(result.resolve("_result.json"))
+      )
+      val segment = first.segments.head
+      val retried = SegmentCommits.commitOne(
+        segment.planned,
+        StorageProperties.from(options),
+        first.changedFields.map(_.fieldId.toString)
+      )
+      assert(retried.state == SegmentState.Unknown)
+      assert(retried.version.isEmpty)
+      assert(latestVersion(root, segment.planned.segmentId) == segment.version)
     }
   }
 

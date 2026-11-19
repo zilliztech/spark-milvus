@@ -633,6 +633,17 @@ final class ColumnReplaceBatchWrite(
         commits
       )
       enter(WritePhase.Committing)
+      // If a worker is interrupted before reporting, its transaction may still
+      // land. Abort can reclaim its files only if the worker confirms it skipped.
+      outcomes = commits.map { commit =>
+        commit.segmentId -> SegmentOutcome(
+          commit.segmentId,
+          commit.sourceVersion,
+          SegmentState.Unknown,
+          None,
+          Some("the manifest commit did not report its outcome")
+        )
+      }.toMap
       val committed = SegmentCommits.commitAll(
         commits,
         plan.storage,
@@ -647,7 +658,7 @@ final class ColumnReplaceBatchWrite(
       val failed = committed.filter(_.state != SegmentState.Committed)
       if (failed.nonEmpty) {
         throw new IllegalStateException(
-          s"${failed.size} of ${commits.size} segment manifest(s) did not commit; " +
+          s"Could not confirm ${failed.size} of ${commits.size} segment manifest commits; " +
             s"first: segment ${failed.head.segmentId} ${failed.head.state.name}: ${failed.head.error
                 .getOrElse("")}. " +
             s"Committed segments keep their new revisions; see ${plan.result.failureKey}"
@@ -700,11 +711,11 @@ final class ColumnReplaceBatchWrite(
             message.segments
           }
           .flatten
-        // A file stays when a manifest references it or may reference it.
+        // Even a rejected commit's files may be referenced by another writer.
         val removable = written.filter(segment =>
           outcomes
             .get(segment.segmentId)
-            .forall(_.state == SegmentState.NotCommitted)
+            .forall(_.state == SegmentState.NotAttempted)
         )
         deleteQuietly(removable.flatMap(_.columnGroups.flatMap(_.files)))
         val recorded = plan.segments.map { segment =>
@@ -728,7 +739,8 @@ final class ColumnReplaceBatchWrite(
             "write" -> "the job failed before any segment manifest was committed"
           else if (recorded.forall(_.state == SegmentState.Committed))
             "publish" -> "every segment manifest committed, but receipt publication could not be confirmed"
-          else "commit" -> "some segment manifests did not commit"
+          else
+            "commit" -> "some segment manifest commits could not be confirmed"
         try
           WriteResultRecords.writeFailure(
             plan.result,
@@ -868,7 +880,7 @@ private[write] object SegmentCommits {
                   SegmentOutcome(
                     commit.segmentId,
                     commit.sourceVersion,
-                    SegmentState.NotCommitted,
+                    SegmentState.NotAttempted,
                     None,
                     Some("not attempted after an earlier segment failed")
                   )
@@ -910,71 +922,51 @@ private[write] object SegmentCommits {
         None
       )
     } catch {
-      case NonFatal(failure) => afterFailure(commit, storage, failure)
+      case NonFatal(failure) =>
+        afterFailure(commit, failure)(version =>
+          ManifestTransaction.revision(
+            commit.manifestBasePath,
+            storage,
+            version
+          )
+        )
     }
 
-  /** What a failed commit left. A commit pinned to revision `v` can only have
-    * produced revision `v + 1`, so that revision, if it exists, either
-    * references this write's files (the commit landed and its response was
-    * lost) or another writer's (the commit lost the race).
+  /** Inspect the one revision a pinned commit could have produced. Data file
+    * references can rule out this write. Even a complete file match leaves the
+    * transaction identity unknown.
     */
-  private def afterFailure(
+  private[write] def afterFailure(
       commit: PlannedCommit,
-      storage: Map[String, String],
       failure: Throwable
-  ): SegmentOutcome = {
+  )(readRevision: Long => ManifestTransaction.Revision): SegmentOutcome = {
     val error = Option(failure.getMessage).getOrElse(failure.toString)
-    try {
-      val latest =
-        ManifestTransaction.revision(commit.manifestBasePath, storage)
-      val produced = commit.sourceVersion + 1L
-      if (latest.version < produced)
-        SegmentOutcome(
-          commit.segmentId,
-          commit.sourceVersion,
-          SegmentState.NotCommitted,
-          None,
-          Some(error)
+    val (state, detail) =
+      try {
+        val produced = Math.addExact(commit.sourceVersion, 1L)
+        val candidate = readRevision(produced)
+        require(
+          candidate.version == produced,
+          s"expected manifest revision $produced, got ${candidate.version}"
         )
-      else {
-        val candidate =
-          if (latest.version == produced) latest
-          else
-            ManifestTransaction.revision(
-              commit.manifestBasePath,
-              storage,
-              produced
-            )
+        // Native manifests and task output can spell a path differently. A
+        // matching filename conservatively leaves the outcome unresolved.
         val ours = commit.columnGroups.flatMap(_.files).map(fileName).toSet
-        if (candidate.files.map(fileName).exists(ours))
-          SegmentOutcome(
-            commit.segmentId,
-            commit.sourceVersion,
-            SegmentState.Committed,
-            Some(produced),
-            Some(s"committed although the commit reported: $error")
-          )
+        if (candidate.files.exists(file => ours.contains(fileName(file))))
+          SegmentState.Unknown -> s"revision $produced may reference this write's files"
         else
-          SegmentOutcome(
-            commit.segmentId,
-            commit.sourceVersion,
-            SegmentState.NotCommitted,
-            None,
-            Some(s"revision $produced was committed by another writer: $error")
-          )
+          SegmentState.NotCommitted -> s"revision $produced was committed by another writer"
+      } catch {
+        case NonFatal(inspection) =>
+          SegmentState.Unknown -> s"the manifest could not be inspected afterwards: ${inspection.getMessage}"
       }
-    } catch {
-      case NonFatal(inspection) =>
-        SegmentOutcome(
-          commit.segmentId,
-          commit.sourceVersion,
-          SegmentState.Unknown,
-          None,
-          Some(
-            s"$error; the manifest could not be inspected afterwards: ${inspection.getMessage}"
-          )
-        )
-    }
+    SegmentOutcome(
+      commit.segmentId,
+      commit.sourceVersion,
+      state,
+      None,
+      Some(s"$error; $detail")
+    )
   }
 
   private def fileName(path: String): String =

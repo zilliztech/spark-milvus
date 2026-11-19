@@ -73,8 +73,8 @@ object ManifestTransaction {
   final case class Revision(version: Long, files: Seq[String])
 
   /** Revision `version` of the manifest at `basePath`, or the latest one for
-    * -1. A caller that lost the outcome of a commit reads the revision the
-    * commit would have produced and looks for its own files in it.
+    * -1. The data file list can rule out a commit. It does not identify the
+    * transaction that produced the revision.
     */
   def revision(
       basePath: String,

@@ -21,6 +21,17 @@ def workflow(name):
 
 
 class WorkflowGateTest(unittest.TestCase):
+    def test_external_actions_and_reusable_workflows_are_pinned(self):
+        for path in (ROOT / ".github/workflows").iterdir():
+            if path.suffix not in {".yml", ".yaml"}:
+                continue
+            for name, job in workflow(path.name)["jobs"].items():
+                for entry in [job, *job.get("steps", [])]:
+                    uses = entry.get("uses")
+                    if uses and not uses.startswith("./"):
+                        with self.subTest(workflow=path.name, job=name, uses=uses):
+                            self.assertRegex(uses, r"@[0-9a-f]{40}\Z")
+
     def test_source_and_native_lanes_consume_the_exported_matrix(self):
         jobs = workflow("ci.yml")["jobs"]
         exporter = jobs["read-matrix"]
@@ -585,7 +596,7 @@ class WorkflowGateTest(unittest.TestCase):
         self.assertEqual(dependencies["if"], build["if"])
         self.assertEqual(branch_bundle["if"],
                          "steps.bundle-cache.outputs.cache-hit != 'true' && inputs.native_source_run_id != ''")
-        self.assertEqual(branch_bundle["uses"], "actions/download-artifact@v4")
+        self.assertEqual(branch_bundle["uses"].split("@")[0], "actions/download-artifact")
         self.assertEqual(branch_bundle["with"], {
             "name": "native-${{ matrix.platform }}",
             "path": "target/native-${{ matrix.platform }}",
@@ -602,11 +613,11 @@ class WorkflowGateTest(unittest.TestCase):
         self.assertLess(steps.index(build), steps.index(audit))
         # The dependency cache is restored and saved explicitly, and saved even
         # after a failed or timed-out build so the next attempt continues.
-        self.assertEqual(dependencies["uses"], "actions/cache/restore@v4")
+        self.assertEqual(dependencies["uses"].split("@")[0], "actions/cache/restore")
         self.assertEqual(dependencies["id"], "dependency-cache")
         self.assertEqual(trim["if"], "${{ !cancelled() && steps.native_build.outcome != 'skipped' }}")
         save = by_name["Save native dependencies"]
-        self.assertEqual(save["uses"], "actions/cache/save@v4")
+        self.assertEqual(save["uses"].split("@")[0], "actions/cache/save")
         # Not always(): a cache saved by a cancelled run would shadow a complete one.
         self.assertEqual(save["if"], "${{ !cancelled() && steps.native_build.outcome != 'skipped' "
                                      "&& steps.dependency-cache.outputs.cache-hit != 'true' }}")

@@ -16,7 +16,7 @@ jobs:
     outputs:
       consumer: ${{ steps.matrix.outputs.consumer }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ inputs.candidate_artifact }}
           path: candidate
@@ -38,23 +38,23 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
           submodules: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         id: runtime-java
         with:
           distribution: temurin
           java-version: '${{ matrix.java }}'
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           distribution: temurin
           java-version: '${{ matrix.buildJava }}'
-      - uses: sbt/setup-sbt@v1
+      - uses: sbt/setup-sbt@7e114eae4f32ec3f93c851c2793376a77f384409 # v1.5.15
       - name: Record the consumer CPU, OS and JDK
         env:
           CONSUMER_JAVA_HOME: ${{ steps.runtime-java.outputs.path }}
@@ -71,13 +71,13 @@ jobs:
       - name: Let the children of a JVM preloading libjsig run
         if: runner.os == 'macOS'
         run: scripts/ci/prepare_macos_jvm_children.sh
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ inputs.candidate_artifact }}
           path: candidate
       - name: Verify exact candidate files
         run: python3 scripts/release.py verify --candidate candidate
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         if: matrix.line == '3.5' && matrix.scalaBinary == '2.13'
         with:
           path: ~/.cache/spark-milvus/downloads
@@ -93,7 +93,7 @@ jobs:
             --line "$SPARK_LINE" --scala "$SCALA_VERSION" --platform "$NATIVE_PLATFORM" --output consumer-results
       - name: Preserve consumer evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: consumer-${{ matrix.platform }}-${{ matrix.os_version }}-${{ matrix.line }}-${{ matrix.scalaBinary }}
           path: |

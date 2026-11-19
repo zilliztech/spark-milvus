@@ -31,7 +31,7 @@ import com.zilliz.milvus.storage.snapshot.{
   Snapshot,
   SnapshotOrigin
 }
-import com.zilliz.milvus.storage.write.ColumnGroupFiles
+import com.zilliz.milvus.storage.write.{ColumnGroupFiles, ManifestTransaction}
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.types.{RowIdentity, SparkTypes}
 import io.milvus.grpc.common.KeyValuePair
@@ -302,6 +302,40 @@ class ColumnReplacePlanTest extends AnyFunSuite with Matchers {
       ),
       version = sourceVersion + 1L
     )
+
+  test("a conflicting manifest revision cannot confirm a failed commit") {
+    val plan = committed(30L, 2L).planned
+    val ours = plan.columnGroups.flatMap(_.files)
+    val failed = new IllegalStateException("commit failed")
+    val candidates = Seq(
+      Seq(ours.head, "other/winner.parquet") -> SegmentState.Unknown,
+      Seq("other/0_a.parquet") -> SegmentState.Unknown,
+      Seq("other/winner.parquet") -> SegmentState.NotCommitted
+    )
+    candidates.foreach { case (files, expected) =>
+      val outcome = SegmentCommits.afterFailure(plan, failed) {
+        case 3L      => ManifestTransaction.Revision(3L, files)
+        case version => fail(s"unexpected revision $version")
+      }
+      withClue(files) {
+        outcome.state shouldBe expected
+        outcome.version shouldBe None
+      }
+    }
+
+    val wrongVersion = SegmentCommits.afterFailure(plan, failed) { _ =>
+      ManifestTransaction.Revision(4L, Seq("other/later.parquet"))
+    }
+    wrongVersion.state shouldBe SegmentState.Unknown
+    wrongVersion.version shouldBe None
+
+    val unreadable = SegmentCommits.afterFailure(plan, failed) { _ =>
+      throw new IllegalStateException("manifest unavailable")
+    }
+    unreadable.state shouldBe SegmentState.Unknown
+    unreadable.version shouldBe None
+  }
+
   private val receipt = WriteResult(
     operationId = "op",
     operation = "replace_columns",

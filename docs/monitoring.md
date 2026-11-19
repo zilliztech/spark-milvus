@@ -44,7 +44,7 @@ emitted rows can therefore add up to fewer than the decoded rows.
 | `milvus.write.rows.files_ready` | Rows in completed files from Spark-adopted commit messages, after the driver validates complete coverage. |
 | `milvus.write.files.ready` | Files in those validated messages. |
 | `milvus.write.rows.manifest_committed` | Rows in segments whose new manifest revision was confirmed. |
-| `milvus.write.segments.manifest_committed` | Confirmed committed segment manifests, including successful recovery readbacks. |
+| `milvus.write.segments.manifest_committed` | Segment manifest commits acknowledged by storage. |
 | `milvus.write.segments.manifest_unknown` | Segment commit outcomes that could not be confirmed. |
 | `milvus.write.segments.not_committed` | Segment manifests confirmed not committed, or not attempted. |
 | `milvus.write.receipt.published` | `1` only after receipt publication is confirmed. |

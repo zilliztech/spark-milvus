@@ -194,10 +194,17 @@ earlier protocol then finds the address occupied, and a write that loses the
 guard to one stops before any task starts. Every independent write still needs
 its own address.
 
-A segment is `unknown` only when its commit failed and its manifest could not be
-inspected afterwards. A commit pinned to revision `v` can only produce revision
-`v + 1`, so after a failure the driver reads that revision: if it references the
-write's files the segment is `committed`, otherwise `not_committed`.
+A segment is `committed` when storage acknowledges its manifest commit. A
+commit pinned to revision `v` can only produce `v + 1`. If storage reports an
+error, the driver inspects that revision. A revision with none of the write's
+output filenames establishes that another writer committed it, so the segment
+is `not_committed`. An overlapping filename cannot establish who committed the
+revision. The driver records `unknown` in that case, or if the revision is
+missing or unreadable. A write with either outcome has no success receipt.
+
+After a failed write, the driver retains files from attempted manifest commits.
+This includes files another writer's revision could reference. Files from
+segments whose commits never started can be removed during abort.
 
 ### Receipt
 
