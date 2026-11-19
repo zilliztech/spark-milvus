@@ -9,6 +9,7 @@ import java.io.{
 import java.nio.charset.StandardCharsets
 import scala.jdk.CollectionConverters._
 
+import org.apache.hadoop.conf.Configuration
 import org.apache.spark.sql.types.{LongType, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
@@ -33,7 +34,7 @@ class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
       "milvus.token" -> "driver-only-test-token",
       "milvus.client.key" -> "driver-only-client-key",
       "milvus.uri" -> "https://driver-only-service",
-      "fs.secret_access_key" -> "partition-only-storage-secret"
+      "fs.access_key_value" -> "partition-only-storage-secret"
     )
     val snapshot = Snapshot(
       name = "t",
@@ -49,7 +50,13 @@ class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
       schema,
       new CaseInsensitiveStringMap(input.asJava),
       snapshot
-    )
+    ) {
+      override private[read] def hadoopConfFor(path: String): Configuration = {
+        val conf = new Configuration(false)
+        conf.set("fs.s3a.secret.key", "driver-only-hadoop-secret")
+        conf
+      }
+    }
     val factory = scan.createReaderFactory()
     val bytes = new ByteArrayOutputStream()
     val output = new ObjectOutputStream(bytes)
