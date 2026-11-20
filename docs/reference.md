@@ -352,9 +352,7 @@ The scan planner accepts top-level `=` and `IN` predicates on the hidden
 `_partition_id` and `_segment_id` columns. For example,
 `_partition_id = 10 AND _segment_id IN (100, 101)` plans reads only for
 segments 100 and 101 that belong to partition 10, retaining their applicable
-delete records. In the published 3.0.1 connector, only `_partition_id`
-supports this pruning. Spark evaluates `_segment_id` after the scan in that
-version.
+delete records.
 
 Spark evaluates range comparisons on the hidden IDs, and conditions on them
 that still contain `OR` or `NOT` after optimization. Conditions on the hidden
