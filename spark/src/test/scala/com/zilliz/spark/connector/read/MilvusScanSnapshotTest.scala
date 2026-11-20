@@ -278,7 +278,7 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
   }
 
   test(
-    "partition IN plans only matching data segments and distinguishes a stored field of the same name"
+    "partition and segment IN predicates prune tasks only on hidden metadata columns"
   ) {
     import org.apache.spark.sql.connector.expressions.{Expression, Expressions}
     import org.apache.spark.sql.connector.expressions.filter.Predicate
@@ -288,7 +288,12 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
     raw.put("fs.storage_type", "local")
     raw.put("fs.root_path", "/unused-partition-pruning-test")
     val options = new CaseInsensitiveStringMap(raw)
-    def scan(fieldName: String, values: Long*): MilvusScan = {
+    def in(name: String, values: Long*): Predicate = new Predicate(
+      "IN",
+      (Seq[Expression](Expressions.column(name)) ++
+        values.map(Expressions.literal)).toArray
+    )
+    def scan(fieldName: String, filters: Predicate*): MilvusScan = {
       val snapshot = snapshotOf(
         partitionIds = Seq(10L, 11L, 12L),
         segments = Seq(
@@ -311,33 +316,37 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
       val builder = MilvusTable(snapshot, MilvusOption(options), None)
         .newScanBuilder(options)
         .asInstanceOf[MilvusScanBuilder]
-      val filter = new Predicate(
-        "IN",
-        (Seq[Expression](Expressions.column("_partition_id")) ++
-          values.map(Expressions.literal)).toArray
-      )
-      assert(builder.pushPredicates(Array(filter)).isEmpty)
+      assert(builder.pushPredicates(filters.toArray).isEmpty)
       builder.build().asInstanceOf[MilvusScan]
     }
 
-    val selected = scan("id", 10L, 11L, 99L)
+    val partitions = in("_partition_id", 10L, 11L, 99L)
+    val selected = scan("id", partitions)
     assert(selected.segmentPredicate.isEmpty)
     assert(
       selected.segmentPartitions().map(_.task.segmentId) == Seq(30L, 31L, 32L)
     )
     assert(selected.estimateStatistics().numRows().getAsLong == 9L)
-    assert(scan("id", 99L).segmentPartitions().isEmpty)
+    assert(scan("id", in("_partition_id", 99L)).segmentPartitions().isEmpty)
 
-    val stored = scan("_partition_id", 10L, 11L)
-    assert(stored.segmentPredicate.nonEmpty)
-    assert(
-      stored.segmentPartitions().map(_.task.segmentId) == Seq(
-        30L,
-        31L,
-        32L,
-        33L
+    val intersection = scan("id", partitions, in("_segment_id", 31L, 33L, 99L))
+    assert(intersection.segmentPredicate.isEmpty)
+    assert(intersection.segmentPartitions().map(_.task.segmentId) == Seq(31L))
+    assert(intersection.estimateStatistics().numRows().getAsLong == 4L)
+    assert(scan("id", in("_segment_id", 99L)).segmentPartitions().isEmpty)
+
+    for (name <- Seq("_partition_id", "_segment_id")) {
+      val stored = scan(name, in(name, 10L, 11L))
+      assert(stored.segmentPredicate.nonEmpty)
+      assert(
+        stored.segmentPartitions().map(_.task.segmentId) == Seq(
+          30L,
+          31L,
+          32L,
+          33L
+        )
       )
-    )
+    }
   }
 
   private def snapshotTableSchema(
@@ -967,19 +976,30 @@ class MilvusScanSnapshotTest extends AnyFunSuite {
     val snapshot = snapshotOf(schemaBytes = collection.toByteArray)
     val table = MilvusTable(snapshot, MilvusOption(options), None)
     val builder = table.newScanBuilder(options).asInstanceOf[MilvusScanBuilder]
-    def equalTo(name: String, value: Long): Predicate = new Predicate(
-      "=",
+    def compare(
+        name: String,
+        operator: String,
+        value: Long
+    ): Predicate = new Predicate(
+      operator,
       Array[Expression](Expressions.column(name), Expressions.literal(value))
     )
-    val timestampFilter = equalTo("_timestamp", 100L)
-    val segmentFilter = equalTo("_segment_id", 30L)
-    val offsetFilter = equalTo("_row_offset", 1L)
+    val timestampFilter = compare("_timestamp", "=", 100L)
+    val segmentFilter = compare("_segment_id", "=", 30L)
+    val segmentRange = compare("_segment_id", ">", 20L)
+    val offsetFilter = compare("_row_offset", "=", 1L)
+    val predicates =
+      Array(timestampFilter, segmentFilter, segmentRange, offsetFilter)
     assert(
       builder
-        .pushPredicates(Array(timestampFilter, segmentFilter, offsetFilter))
-        .sameElements(Array(segmentFilter, offsetFilter))
+        .pushPredicates(predicates)
+        .sameElements(Array(segmentRange, offsetFilter))
     )
-    assert(builder.pushedPredicates().sameElements(Array(timestampFilter)))
+    assert(
+      builder
+        .pushedPredicates()
+        .sameElements(Array(timestampFilter, segmentFilter))
+    )
     builder.pruneColumns(
       StructType(Seq(StructField("_segment_id", LongType, nullable = false)))
     )

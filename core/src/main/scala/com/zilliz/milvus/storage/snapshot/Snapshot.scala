@@ -56,10 +56,10 @@ final case class Snapshot(
 
   def v3Segments: Seq[Segment] = segments.filter(_.storageVersion == 3)
 
-  /** Retains the data segments selected by a partition or primary-key filter.
-    * Delete-only segments are not candidates for data pruning: partition L0
-    * sources remain for retained data in that partition, and collection-wide L0
-    * sources remain whenever any data segment remains.
+  /** Retains the data segments selected during scan planning. Delete-only
+    * segments are not candidates for data pruning: partition L0 sources remain
+    * for retained data in that partition, and collection-wide L0 sources remain
+    * whenever any data segment remains.
     */
   def retainDataSegments(segmentIds: Set[Long]): Snapshot = {
     val retainedData = dataSegments.filter(segment => segmentIds(segment.id))

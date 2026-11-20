@@ -4,7 +4,8 @@ The reader consumes fixed Storage V3 snapshots without service calls; the
 [column replacement](column-replacement.md) writes new columns of such a
 snapshot back from a DataFrame. Both support the Spark/Scala combinations in
 [README](../README.md#requirements-and-compatibility).
-This reference describes the 3.0.1 reader and writer.
+This reference describes the current source. The [3.0.1 reference](https://github.com/zilliztech/spark-milvus/blob/v3.0.1/docs/reference.md)
+documents the published version.
 Follow the [installation guide](../README.md#installing) to select matching
 artifacts; CI candidates are not automatically published to Maven Central.
 
@@ -275,7 +276,8 @@ batch to rows when a downstream operation requires them.
 Select collection fields by name, for example `docs.select("id", "title")`.
 To read the stored Milvus `RowID` (system field ID `0`) when the collection
 schema omits it, include `RowID BIGINT` in the reader's explicit schema.
-Filter Milvus partitions with `docs.where("_partition_id IN (10, 11)")`.
+Filter Milvus partitions with `docs.where("_partition_id IN (10, 11)")`
+or individual segments with `docs.where("_segment_id IN (100, 101)")`.
 An ID absent from the snapshot matches no rows.
 
 ##### Hidden metadata columns
@@ -287,7 +289,7 @@ live and physical reads.
 | Column | Spark type | Value |
 | --- | --- | --- |
 | `_partition_id` | `LongType`, non-null | Milvus partition ID of the row's data segment. Equality and `IN` conditions can prune partitions before segment reads are planned. |
-| `_segment_id` | `LongType`, non-null | ID of the data segment containing the row. |
+| `_segment_id` | `LongType`, non-null | ID of the data segment containing the row. Equality and `IN` conditions can prune individual segment reads. |
 | `_row_offset` | `LongType`, non-null | Zero-based physical row position within the segment. Filtering deleted rows can leave gaps. |
 | `_timestamp` | `LongType`, snapshot nullability | Stored Milvus system timestamp (field ID `1`). |
 | `_milvus_row_id` | Non-null struct of three non-null `LongType` fields: `snapshot_id`, `segment_id`, `row_offset` | Row identity for column replacement on a physical read. Requesting this column fails during scan planning if the snapshot lacks a positive `snapshot_info.id`. Carry it unchanged through to the write. |
@@ -346,13 +348,17 @@ decimal byte counts such as `33554432`, not size strings such as `32m`.
 
 #### Spark predicate pushdown
 
-The connector prunes partitions when Spark passes a top-level equality or
-`IN` predicate on the hidden [`_partition_id`](#hidden-metadata-columns).
-For example, `_partition_id IN (10, 11)` prunes segments and retains their
-applicable delete records. Spark evaluates range comparisons such as
-`_partition_id > 10`, and partition conditions that still contain `OR` or
-`NOT` after optimization. Conditions on the hidden `_timestamp` column
-support the same pushdown as other stored `LongType` fields.
+The scan planner accepts top-level `=` and `IN` predicates on the hidden
+`_partition_id` and `_segment_id` columns. For example,
+`_partition_id = 10 AND _segment_id IN (100, 101)` plans reads only for
+segments 100 and 101 that belong to partition 10, retaining their applicable
+delete records. In the published 3.0.1 connector, only `_partition_id`
+supports this pruning. Spark evaluates `_segment_id` after the scan in that
+version.
+
+Spark evaluates range comparisons on the hidden IDs, and conditions on them
+that still contain `OR` or `NOT` after optimization. Conditions on the hidden
+`_timestamp` column support the same pushdown as other stored `LongType` fields.
 
 Spark SQL and DataFrame `where` conditions use DataSource V2 predicate
 pushdown. Bool fields support equality, inequality, null-safe equality (`<=>`),
@@ -363,7 +369,7 @@ conditions. These operators preserve Spark SQL three-valued NULL semantics.
 Each predicate tree is pushed only when the connector supports the whole tree.
 Spark evaluates unsupported operators, casts, nested references and filters on
 JSON, Array, Geometry and vector fields. It also evaluates filters on
-`_segment_id`, `_row_offset`, `_milvus_row_id` and its struct fields.
+`_row_offset`, `_milvus_row_id` and its struct fields.
 Fields used only in predicates can be omitted from the result. The DataSource
 V1 Filter API is not supported.
 

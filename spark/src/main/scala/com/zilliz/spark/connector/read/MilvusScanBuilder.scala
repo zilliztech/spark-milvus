@@ -53,15 +53,15 @@ class MilvusScanBuilder(
   )
   private val fieldsByName =
     availableSchema.fields.map(field => field.name -> field).toMap
-  private val hasPartitionMetadata =
-    fieldsByName
-      .get(MetadataColumns.PartitionId)
-      .exists(MetadataColumns.isSynthetic)
+  private val prunableIdColumns =
+    Set(MetadataColumns.PartitionId, MetadataColumns.SegmentId).filter { name =>
+      fieldsByName.get(name).exists(MetadataColumns.isSynthetic)
+    }
 
   private var pushedPredicateArray: Array[Predicate] = Array.empty[Predicate]
   private var pushedExpression: Option[PredicateExpr] = None
   private var predicateFieldIds: Set[Long] = Set.empty
-  private var partitionIds: Option[Set[Long]] = None
+  private var metadataIdFilters = Map.empty[String, Set[Long]]
 
   override def pruneColumns(requiredSchema: StructType): Unit = {
     val requestedFields = requiredSchema.fields.map { field =>
@@ -97,13 +97,16 @@ class MilvusScanBuilder(
   ): Array[Predicate] = {
     val accepted = Array.newBuilder[Predicate]
     val expressions = Seq.newBuilder[SparkPredicateTranslator.Translated]
-    val partitionFilters = Seq.newBuilder[Set[Long]]
+    var idFilters = Map.empty[String, Set[Long]]
     val residual = Array.newBuilder[Predicate]
     predicates.foreach { predicate =>
-      matchingPartitionIds(predicate) match {
-        case Some(ids) =>
+      matchingMetadataIds(predicate) match {
+        case Some((name, ids)) =>
           accepted += predicate
-          partitionFilters += ids
+          idFilters = idFilters.updated(
+            name,
+            idFilters.get(name).fold(ids)(_ intersect ids)
+          )
         case None =>
           SparkPredicateTranslator.translate(predicate, availableSchema) match {
             case Some(translated) =>
@@ -115,7 +118,7 @@ class MilvusScanBuilder(
     }
     val translated = expressions.result()
     pushedPredicateArray = accepted.result()
-    partitionIds = partitionFilters.result().reduceLeftOption(_ intersect _)
+    metadataIdFilters = idFilters
     pushedExpression = translated.iterator
       .map(_.expr)
       .reduceLeftOption[PredicateExpr](And.apply)
@@ -126,20 +129,21 @@ class MilvusScanBuilder(
   override def pushedPredicates(): Array[Predicate] =
     pushedPredicateArray.clone()
 
-  /** Exact partition matches for a top-level equality or IN. A null literal
-    * cannot make either predicate true on a non-null partition ID.
+  /** Exact matches on a hidden partition or segment ID for a top-level equality
+    * or IN. A null literal cannot match either non-null ID.
     */
-  private def matchingPartitionIds(predicate: Predicate): Option[Set[Long]] = {
-    if (!hasPartitionMetadata || predicate == null) return None
+  private def matchingMetadataIds(
+      predicate: Predicate
+  ): Option[(String, Set[Long])] = {
+    if (predicate == null) return None
     try {
       val operator = predicate.name()
       if (operator != "=" && operator != "IN") return None
       predicate.children() match {
         case Array(ref: NamedReference, values @ _*)
-            if ref
-              .fieldNames()
-              .sameElements(Array(MetadataColumns.PartitionId)) &&
-              (operator == "IN" || values.size == 1) =>
+            if operator == "IN" || values.size == 1 =>
+          val names = ref.fieldNames()
+          if (names.length != 1 || !prunableIdColumns(names.head)) return None
           val ids = Set.newBuilder[Long]
           values.foreach {
             case value: Literal[_] =>
@@ -150,7 +154,7 @@ class MilvusScanBuilder(
               }
             case _ => return None
           }
-          Some(ids.result())
+          Some(names.head -> ids.result())
         case _ => None
       }
     } catch {
@@ -180,11 +184,20 @@ class MilvusScanBuilder(
   }
 
   override def build(): Scan = {
-    val selectedSnapshot = partitionIds.fold(snapshot) { ids =>
-      val segments =
-        snapshot.dataSegments.iterator.filter(s => ids(s.partitionId))
-      snapshot.retainDataSegments(segments.map(_.id).toSet)
+    val segmentIds = metadataIdFilters.get(MetadataColumns.SegmentId)
+    val selectedIds = metadataIdFilters.get(MetadataColumns.PartitionId) match {
+      case None => segmentIds
+      case Some(partitionIds) =>
+        val matchingIds = snapshot.dataSegments.iterator.collect {
+          case segment
+              if partitionIds.contains(segment.partitionId) &&
+                segmentIds.forall(_.contains(segment.id)) =>
+            segment.id
+        }
+        Some(matchingIds.toSet)
     }
+    val selectedSnapshot =
+      selectedIds.fold(snapshot)(snapshot.retainDataSegments)
     val readIds = neededFieldIds
     logInfo(s"Milvus field ids required by the scan: $readIds")
     new MilvusScan(
