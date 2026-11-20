@@ -16,7 +16,7 @@ For a first run on a Linux x86_64 machine with Spark 4.0 installed, run the
 PySpark example locally:
 
 ```bash
-export RELEASE_VERSION=3.0.0
+export RELEASE_VERSION=3.0.1
 export LD_PRELOAD="$JAVA_HOME/lib/libjsig.so"
 
 "$SPARK_HOME/bin/spark-submit" \
