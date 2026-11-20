@@ -6,6 +6,25 @@ is supplied by your application or cluster. The
 [README installation examples](../README.md#installing) use Spark 4.0,
 Scala 2.13 and Java 21.
 
+## 3.0.1 artifacts
+
+The 3.0.1 release plan includes the following universal entries. Use these
+coordinates once 3.0.1 appears in the Maven Central version list for your
+entry, such as [Spark 4.0 / Scala 2.13](https://repo.maven.apache.org/maven2/com/zilliz/spark-milvus-4.0_2.13/).
+
+| Spark | Scala | Universal Maven coordinate |
+|---|---|---|
+| 3.5 | 2.12 | `com.zilliz:spark-milvus-3.5_2.12:3.0.1` |
+| 3.5 | 2.13 | `com.zilliz:spark-milvus-3.5_2.13:3.0.1` |
+| 4.0 | 2.13 | `com.zilliz:spark-milvus-4.0_2.13:3.0.1` |
+| 4.1 | 2.13 | `com.zilliz:spark-milvus-4.1_2.13:3.0.1` |
+| 4.2 | 2.13 | `com.zilliz:spark-milvus-4.2_2.13:3.0.1` |
+
+Each combination also has a bundled JVM artifact and a platform entry for
+Linux x86_64, Linux ARM64 and Apple silicon. With three shared native
+artifacts, the plan totals 28 Maven coordinates. Applications using 3.0.0
+Thin modules should switch to the matching universal or platform entry.
+
 ## Published 3.0.0
 
 All five combinations below are available from Maven Central at version
@@ -33,14 +52,14 @@ overlapping connector classes.
 
 ## Choose a dependency entry or local JARs
 
-These coordinates are for Spark 4.0 / Scala 2.13, connector version 3.0.0:
+The following examples use Spark 4.0 / Scala 2.13 and connector version 3.0.1.
 
 | Maven coordinate | Contents and use |
 |---|---|
-| `com.zilliz:spark-milvus-4.0_2.13:3.0.0` | Universal entry: resolves the bundled JVM artifact and all three native platforms. The native loader selects the current platform. |
-| `com.zilliz:spark-milvus-4.0-linux-x86_64_2.13:3.0.0` | Platform entry: resolves the bundled JVM artifact and only the Linux x86_64 native package. |
-| `com.zilliz:spark-milvus-4.0-jvm_2.13:3.0.0` | Bundled JVM implementation and its JVM dependencies, without Milvus native libraries or Spark. |
-| `com.zilliz:spark-milvus-native-linux-x86_64:3.0.0` | Milvus Storage native libraries for Linux x86_64; shared across Spark and Scala profiles. |
+| `com.zilliz:spark-milvus-4.0_2.13:3.0.1` | Universal entry that resolves the bundled JVM artifact and all three native platforms. The native loader selects the current platform. |
+| `com.zilliz:spark-milvus-4.0-linux-x86_64_2.13:3.0.1` | Platform entry that resolves the bundled JVM artifact and the Linux x86_64 native package. |
+| `com.zilliz:spark-milvus-4.0-jvm_2.13:3.0.1` | Bundled JVM implementation and its JVM dependencies, without Milvus native libraries or Spark. |
+| `com.zilliz:spark-milvus-native-linux-x86_64:3.0.1` | Milvus Storage native libraries for Linux x86_64, shared across Spark and Scala profiles. |
 
 Replace `4.0` with `3.5`, `4.1` or `4.2` for your Spark line. For Spark 3.5
 with Scala 2.12, also replace `_2.13` with `_2.12`. For a different platform,

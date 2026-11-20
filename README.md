@@ -30,11 +30,9 @@ then [run your application](docs/application-development.md#running-your-applica
 For all supported options, defaults and limits, see the
 [Reference](docs/reference.md#2-milvus-format-parameters).
 
-This guide uses **Spark-Milvus 3.0.0** for Milvus 3.0, available from
-[Maven Central](https://repo.maven.apache.org/maven2/com/zilliz/spark-milvus-4.0_2.13/3.0.0/).
-Earlier releases do not provide this API. See the
-[3.0.0 release notes](https://github.com/zilliztech/spark-milvus/releases/tag/v3.0.0)
-for capabilities and migration guidance.
+This guide targets **Spark-Milvus 3.0.1** for Milvus 3.0. Use the same
+connector version for the dependency and the examples below. For earlier
+packages, see the [3.0.0 artifact inventory](docs/release-artifacts.md#published-300).
 
 ## Requirements and compatibility
 
@@ -56,10 +54,9 @@ Before writing your application, prepare:
 | 3.5 | 2.12, 2.13 | 17 |
 | 4.0, 4.1, 4.2 | 2.13 | 21 |
 
-**3.0.0** provides universal and platform-specific packages for all five
-combinations above. The installation examples below use Spark 4.0; see
-[artifact selection](docs/release-artifacts.md#published-300) for the matching
-Maven coordinates for your Spark and Scala versions.
+Each combination has universal and platform-specific entries. The installation
+examples use Spark 4.0. See the [3.0.1 artifact list](docs/release-artifacts.md#301-artifacts)
+for the coordinate matching your Spark and Scala versions.
 
 ### Operating systems and CPU architectures
 
@@ -104,7 +101,7 @@ on your cluster.
 ```xml
 <properties>
   <spark.version>4.0.1</spark.version>
-  <spark-milvus.version>3.0.0</spark-milvus.version>
+  <spark-milvus.version>3.0.1</spark-milvus.version>
 </properties>
 
 <dependencies>
@@ -138,7 +135,7 @@ repositories {
 
 dependencies {
     implementation 'org.scala-lang:scala-library:2.13.16'
-    implementation 'com.zilliz:spark-milvus-4.0_2.13:3.0.0'
+    implementation 'com.zilliz:spark-milvus-4.0_2.13:3.0.1'
     compileOnly 'org.apache.spark:spark-sql_2.13:4.0.1'
 }
 ```
@@ -155,7 +152,7 @@ the explicit `scala-library` dependency.
 scalaVersion := "2.13.16"
 
 libraryDependencies ++= Seq(
-  "com.zilliz" % "spark-milvus-4.0_2.13" % "3.0.0",
+  "com.zilliz" % "spark-milvus-4.0_2.13" % "3.0.1",
   "org.apache.spark" %% "spark-sql" % "4.0.1" % Provided
 )
 ```
@@ -174,10 +171,10 @@ rows, including rows marked deleted, add `.option("milvus.read.mode", "physical"
 before `.load()`. Replace the S3 path, endpoint
 and region with your own values; the bucket is part of the `s3://` path.
 
-These examples use `fs.use_iam=true`: the native storage library obtains AWS
-credentials from its credential chain, such as process environment credentials
-or a workload IAM role. Make that identity available to both the driver and
-executors. For access-key authentication and other providers, see
+These examples use `fs.use_iam=true`. Supply AWS environment credentials
+or a web identity token such as IRSA on the driver and every executor. To use
+an EC2 instance profile, set `AWS_EC2_METADATA_ENABLE=true` on each of them.
+For access-key authentication and other providers, see
 [storage authentication](docs/reference.md#22-storage-location-and-credentials).
 
 ### Scala
@@ -330,7 +327,7 @@ joining external updates, permissions and failure recovery.
 | [Cluster setup](docs/cluster-setup.md) | Driver and executor permissions, networking and native runtime |
 | [Operational monitoring](docs/monitoring.md) | Read progress, confirmed write milestones and Driver metrics export |
 | [Release artifacts](docs/release-artifacts.md) | Published Maven coordinates, package choices and platform support |
-| [3.0.0 release notes](https://github.com/zilliztech/spark-milvus/releases/tag/v3.0.0) | Released capabilities and migration from earlier versions |
+| [Release notes](https://github.com/zilliztech/spark-milvus/releases) | Released capabilities and migration from earlier versions |
 
 ## License
 

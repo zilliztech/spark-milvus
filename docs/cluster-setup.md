@@ -42,7 +42,7 @@ Ubuntu 22.04 and 24.04 and require a system `libstdc++` providing
 not bundled. Windows, musl-based Linux (including Alpine) and Intel Macs have
 no released native artifacts. The Spark 3.5 bundled JVM artifacts include the
 Arrow JNI library needed on Linux ARM64 for both Scala variants; use the
-[universal or platform-specific dependency](release-artifacts.md#published-300)
+[universal or platform-specific dependency](release-artifacts.md#301-artifacts)
 for your Spark and Scala versions.
 
 | Requirement | Configuration or permission |
