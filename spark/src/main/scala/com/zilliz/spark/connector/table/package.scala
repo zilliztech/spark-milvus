@@ -4,8 +4,8 @@ package com.zilliz.spark.connector
   * validates DataSource input, resolves one Snapshot and derives its schema;
   * `SnapshotSources` reads either a snapshot file or complete V3 metadata.
   * Stores close after metadata is materialized. The scan builder applies
-  * partition predicates to the resolved snapshot. `MilvusTable` advertises
-  * BATCH_READ only.
+  * partition and segment ID predicates to the resolved snapshot. `MilvusTable`
+  * advertises BATCH_READ only.
   *
   * Nonempty inputs require a complete Milvus snapshot file, including its
   * segment Avro records for identity and L0 validation. Explicit schema options

@@ -251,7 +251,7 @@ class V3ReadContractTest extends AnyFunSuite with BeforeAndAfterAll {
   }
 
   test(
-    "partition ID predicates prune Spark tasks and preserve the physical partition ID"
+    "partition and segment predicates prune Spark tasks and preserve applicable deletes"
   ) {
     fixture { (root, options) =>
       // PK 3002 is deleted only by this collection-wide L0 segment.
@@ -276,10 +276,10 @@ class V3ReadContractTest extends AnyFunSuite with BeforeAndAfterAll {
         frame.select("_timestamp").collect().map(_.getLong(0)).toSeq ==
           Seq.fill(liveIds.size)(100L)
       )
-      assert(
-        ids(frame.where("_segment_id = 30 AND _row_offset IN (1, 2, 3)")) ==
-          Seq(3001L, 3003L)
-      )
+      val bySegment =
+        frame.where("_segment_id = 30 AND _row_offset IN (1, 2, 3)")
+      assert(bySegment.queryExecution.toRdd.getNumPartitions == 1)
+      assert(ids(bySegment) == Seq(3001L, 3003L))
 
       // A temp view retains the metadata columns selected on the source.
       frame
