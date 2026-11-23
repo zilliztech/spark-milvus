@@ -91,7 +91,20 @@ wrong type fails the write before any manifest changes.
 | Any field of a snapshot that lists no index definitions and whose segment records do not say which index files they have | The write cannot confirm that the field has no index. A Milvus snapshot omits an empty definition list, so a collection without indexes passes once its segments are described. |
 
 The snapshot must be a Milvus snapshot file with a positive `snapshot_info.id`
-and Storage V3 segments. Only Storage V3 is written.
+and Storage V3 segments. Each collection field needs a unique physical ID.
+
+The writer checks each segment's manifest location before starting any tasks.
+For a snapshot at `<root>/snapshots/<collection>/metadata/<snapshot>.json`,
+the collection and snapshot IDs in the path must match the file. Referenced
+snapshots use `<root>/insert_log/<collection>/<partition>/<segment>`.
+Self-contained exports use `<root>/files/insert_log/<collection>/<partition>/<segment>`.
+The collection, partition and segment IDs must match the metadata. Older
+snapshots that omit the layout can use either directory convention, provided
+all data segments use the same one.
+
+If you move or rename the snapshot JSON, keep the data under the same root.
+For example, `<root>/snapshot.json` and `<root>/snapshots/before_update.json`
+both use the layouts above. Reads can still use nonstandard manifest locations.
 
 ## Write options
 

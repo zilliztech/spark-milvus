@@ -6,7 +6,7 @@ import com.fasterxml.jackson.annotation.{JsonAlias, JsonProperty}
 import com.fasterxml.jackson.databind.{DeserializationFeature, JsonNode}
 import com.fasterxml.jackson.databind.node.LongNode
 
-import com.zilliz.milvus.storage.snapshot.CollectionIndex
+import com.zilliz.milvus.storage.snapshot.{CollectionIndex, SnapshotLayout}
 
 /** `snapshot_info`. */
 case class SnapshotInfoJson(
@@ -181,8 +181,16 @@ case class SnapshotJson(
       Array("segment-infos", "segmentInfos")
     ) segmentInfos: Seq[SegmentJson] = Seq.empty,
     @JsonProperty("build_ids") rawBuildIds: Option[JsonNode] = None,
-    @JsonProperty("segment_ids") rawSegmentIds: Option[JsonNode] = None
+    @JsonProperty("segment_ids") rawSegmentIds: Option[JsonNode] = None,
+    @JsonProperty("layout") rawLayout: Option[JsonNode] = None
 ) {
+  def layout: Option[SnapshotLayout] = rawLayout.map(_.asText()).map {
+    // DataCoord interprets its zero-valued enum as a referenced snapshot.
+    case "SnapshotLayoutUnknown" | "0" | "SnapshotLayoutReferenced" | "1" =>
+      SnapshotLayout.Referenced
+    case "SnapshotLayoutSelfContained" | "2" => SnapshotLayout.SelfContained
+    case other => SnapshotLayout.Unsupported(other)
+  }
   def segmentIds: Option[Vector[Long]] =
     rawSegmentIds.map(JsonValues.toLongSeq(_).toVector)
   def buildIds: Option[Vector[Long]] =

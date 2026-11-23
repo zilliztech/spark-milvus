@@ -6,11 +6,16 @@ package com.zilliz.spark.connector
   * The column replacement is a DataSource V2 batch append: `ColumnReplace`
   * plans it on the driver and asks Spark to cluster rows by the segment of
   * their hidden `_milvus_row_id` from the physical read and order them by
-  * offset. `ColumnReplaceDataWriter` writes each segment's new column files in
-  * tasks, checking that every stored row arrives exactly once; the driver
-  * commits every segment's manifest from the snapshot's pinned revision and
-  * publishes the receipt. `WriteResult` owns the records under the write result
-  * address, including the claim that gives an address to one write, and
+  * offset. The driver binds each writable manifest directory to the caller's
+  * snapshot location, collection ID and segment Avro identity before any result
+  * claim or task starts. The declared layout selects the writable data root
+  * beneath the snapshot's storage prefix. When the layout is absent, every
+  * planned segment must resolve to the same supported root.
+  * `ColumnReplaceDataWriter` writes each segment's new column files in tasks,
+  * checking that every stored row arrives exactly once; the driver commits
+  * every segment's manifest from the snapshot's pinned revision and publishes
+  * the receipt. `WriteResult` owns the records under the write result address,
+  * including the claim that gives an address to one write, and
   * `WriteResultTable` reads a receipt back. Only an acknowledged manifest
   * transaction can supply a revision to the receipt. The driver records that
   * revision even if releasing native resources fails. Abort removes task files

@@ -32,12 +32,19 @@ final case class Snapshot(
     bucket: String,
     indexes: Option[Vector[CollectionIndex]] = None,
     buildIds: Option[Vector[Long]] = None,
-    id: Option[Long] = None
+    id: Option[Long] = None,
+    layout: Option[SnapshotLayout] = None
 ) {
   require(
     id.forall(_ > 0L),
     s"snapshot id must be positive, got ${id.getOrElse(0L)}"
   )
+  schema.fields.groupBy(_.fieldID).foreach { case (fieldId, fields) =>
+    require(
+      fields.size == 1,
+      s"Snapshot '$name' schema contains duplicate field id $fieldId: ${fields.map(_.name).mkString(", ")}"
+    )
+  }
 
   /** The schema as the bytes every `SegmentReadTask` carries. */
   def schemaBytes: Array[Byte] = schema.toByteArray
@@ -78,6 +85,14 @@ final case class Snapshot(
       )
     copy(partitionIds = orderedPartitions, segments = retainedSegments)
   }
+}
+
+/** DataCoord's persisted placement of the snapshot's segment files. */
+sealed trait SnapshotLayout
+object SnapshotLayout {
+  case object Referenced extends SnapshotLayout
+  case object SelfContained extends SnapshotLayout
+  final case class Unsupported(value: String) extends SnapshotLayout
 }
 
 /** Which entry point produced a `Snapshot`; for errors and logs. */

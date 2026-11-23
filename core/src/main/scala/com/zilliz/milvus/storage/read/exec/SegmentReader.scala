@@ -7,6 +7,7 @@ import org.apache.arrow.vector.VectorSchemaRoot
 
 import com.zilliz.milvus.jni.storage.NativeStorageLibrary
 import com.zilliz.milvus.storage.{Logging, NativeCalls}
+import com.zilliz.milvus.storage.io.NativeObjectStore
 import com.zilliz.milvus.storage.read.plan.{ReadLimits, SegmentReadTask}
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
 import io.milvus.storage.{
@@ -225,7 +226,10 @@ object SegmentReader {
   ): SegmentReader = task.layout match {
     case SegmentLayout.Manifest(basePath, readVersion) =>
       openNative(
-        ManifestSource(basePath, readVersion),
+        ManifestSource(
+          NativeObjectStore.filesystemKey(task.properties, basePath),
+          readVersion
+        ),
         arrowSchema,
         neededColumns,
         task.properties,

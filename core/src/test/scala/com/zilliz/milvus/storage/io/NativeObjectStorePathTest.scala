@@ -23,7 +23,8 @@ class NativeObjectStorePathTest extends AnyFunSuite with Matchers {
       ("files", "filesystem/run", "files/filesystem/run"),
       ("/data/root", "/data/root/results/run", "/data/root/results/run"),
       ("/data/root", "results/run", "/data/root/results/run"),
-      ("/", "data/results/run", "/data/results/run")
+      ("/", "data/results/run", "/data/results/run"),
+      ("/", "/data/results/run", "/data/results/run")
     )
     cases.foreach { case (root, key, path) =>
       withClue(s"root=$root key=$key: ") {
