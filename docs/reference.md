@@ -143,8 +143,9 @@ duplicate or unmatched segment records fail during planning, before segment
 selection can hide an L0 record. Existing callers using a nonempty explicit
 manifest list must switch to `milvus.snapshot.path`: a list of storage
 manifests alone cannot identify L0 segments or their delete scope.
-Supplying Spark `.schema()` does not replace the Milvus schema: field names,
-types and selection must match the fixed input.
+Each field in the snapshot schema must have a unique physical field ID.
+Readers and column replacement validate this even when the caller supplies
+a Spark schema. Field names, types and selection must match the fixed input.
 
 For snapshot data, supply `milvus.snapshot.path` and call `.load()` without a
 path argument. Spark's `.load(path)` selects the result location only when

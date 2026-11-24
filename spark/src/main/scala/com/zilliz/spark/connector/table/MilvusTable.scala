@@ -176,7 +176,7 @@ case class MilvusTable(
     sparkSchema
       .filter(_.nonEmpty)
       .map(rehydrateSnapshotSchemaMetadata)
-      .getOrElse(MilvusTables.sparkSchemaOf(snapshot.schema, rawVectors))
+      .getOrElse(MilvusTables.sparkSchemaOf(snapshot, rawVectors))
 
   override def capabilities(): ju.Set[TableCapability] =
     Set(TableCapability.BATCH_READ).asJava

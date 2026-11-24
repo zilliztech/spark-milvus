@@ -489,7 +489,7 @@ private final class SegmentColumnsWriter(
           .mkString(",")
       )
       writer = new V3SegmentWriter(
-        segment.basePath,
+        NativeObjectStore.filesystemKey(task.storage, segment.basePath),
         arrowSchema,
         properties,
         allocator,

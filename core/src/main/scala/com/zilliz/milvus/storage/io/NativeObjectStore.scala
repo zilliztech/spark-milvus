@@ -30,7 +30,7 @@ final class NativeObjectStore private (
     NativeObjectStore.belowRoot(rootPath, key)
 
   private def up(key: String): String =
-    if (rootPath.isEmpty || key.startsWith(rootPath)) key
+    if (rootPath.isEmpty || rootPath == "/" || key.startsWith(rootPath)) key
     else if (key.isEmpty) rootPath
     else rootPath + "/" + key
 
@@ -85,6 +85,12 @@ final class NativeObjectStore private (
 
 object NativeObjectStore {
 
+  /** The key to pass directly to a native storage operation on this backend. */
+  private[zilliz] def filesystemKey(
+      properties: Map[String, String],
+      key: String
+  ): String = belowRoot(localRootPath(properties), key)
+
   /** The filesystem path that `key` names when `properties` describe local
     * storage, by the rule every store operation applies: a key that carries
     * `fs.root_path` and one written below it name the same path. Object storage
@@ -103,7 +109,7 @@ object NativeObjectStore {
               .get(StorageProperties.RootPath)
               .map(_.trim)
               .getOrElse(""),
-            belowRoot(localRootPath(properties), key)
+            filesystemKey(properties, key)
           )
           .toString
       )
@@ -122,8 +128,11 @@ object NativeObjectStore {
     if (isLocal(properties))
       properties
         .get(StorageProperties.RootPath)
-        .map(_.trim.stripSuffix("/"))
-        .filter(_.nonEmpty)
+        .map(_.trim)
+        .map {
+          case "/"  => "/"
+          case root => root.stripSuffix("/")
+        }
         .getOrElse("")
     else ""
 
@@ -131,7 +140,8 @@ object NativeObjectStore {
     * only a whole leading root segment is taken off.
     */
   private def belowRoot(rootPath: String, key: String): String =
-    if (rootPath.isEmpty) key
+    if (rootPath == "/") key.stripPrefix("/")
+    else if (rootPath.isEmpty) key
     else if (key == rootPath) ""
     else if (key.startsWith(rootPath + "/")) key.substring(rootPath.length + 1)
     else key

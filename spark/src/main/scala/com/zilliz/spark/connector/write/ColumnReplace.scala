@@ -40,7 +40,10 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.sql.SparkSession
 
 import com.zilliz.milvus.storage.credential.StorageProperties
-import com.zilliz.milvus.storage.io.NativeWritableObjectStore
+import com.zilliz.milvus.storage.io.{
+  NativeObjectStore,
+  NativeWritableObjectStore
+}
 import com.zilliz.milvus.storage.schema.{FieldMetadata, SchemaMapper}
 import com.zilliz.milvus.storage.snapshot.{
   CollectionIndex,
@@ -181,7 +184,6 @@ private[connector] object ColumnReplaceTables {
       )
     val source = sourceOf(snapshot, snapshotPath)
     val targetSchema = resolveTargets(inputSchema, snapshot)
-    val segments = plannedSegments(snapshot)
 
     val bucket = Option(snapshot.bucket).map(_.trim).getOrElse("")
     val canonical = milvusOption.options ++
@@ -204,7 +206,8 @@ private[connector] object ColumnReplaceTables {
         )
       ),
       targetSchema = targetSchema,
-      segments = segments,
+      segments =
+        plannedSegments(snapshot, WritableManifestPaths(source, storage)),
       storage = storage,
       bucket = bucket,
       result = WriteResultLocation.resolve(resultPath, storage),
@@ -350,7 +353,11 @@ private[connector] object ColumnReplaceTables {
       Vector.empty
     }
 
-  private def plannedSegments(snapshot: Snapshot): Seq[PlannedSegment] = {
+  private def plannedSegments(
+      snapshot: Snapshot,
+      paths: WritableManifestPaths
+  ): Seq[PlannedSegment] = {
+    val partitions = snapshot.partitionIds.toSet
     val planned = snapshot.dataSegments.map { segment =>
       if (segment.storageVersion != 3) {
         throw new IllegalArgumentException(
@@ -359,6 +366,11 @@ private[connector] object ColumnReplaceTables {
       }
       val (basePath, version) = segment.layout match {
         case SegmentLayout.Manifest(base, readVersion) if readVersion > 0L =>
+          require(
+            segment.partitionId > 0L && (partitions.isEmpty ||
+              partitions.contains(segment.partitionId)),
+            s"Segment ${segment.id} has an invalid data partition ${segment.partitionId} for snapshot '${snapshot.name}'"
+          )
           (base, readVersion)
         case SegmentLayout.Manifest(_, readVersion) =>
           throw new IllegalArgumentException(
@@ -377,6 +389,7 @@ private[connector] object ColumnReplaceTables {
       require(rows >= 0L, s"Segment ${segment.id} has $rows stored rows")
       PlannedSegment(segment.id, segment.partitionId, basePath, version, rows)
     }
+    paths.validate(planned, snapshot.layout)
     val stored = planned.filter(_.rows > 0L).sortBy(_.id)
     if (stored.isEmpty) {
       throw new IllegalArgumentException(
@@ -929,16 +942,16 @@ private[write] object SegmentCommits {
       commit: PlannedCommit,
       storage: Map[String, String],
       columns: Seq[String]
-  ): SegmentOutcome =
+  ): SegmentOutcome = {
+    val base = NativeObjectStore.filesystemKey(storage, commit.manifestBasePath)
     commitOne(
       commit,
-      version =>
-        ManifestTransaction.revision(commit.manifestBasePath, storage, version)
+      version => ManifestTransaction.revision(base, storage, version)
     ) { submit =>
       val groups = WrittenColumnGroups.of(commit.columnGroups)
       WriterResources.closing(groups.close()) {
         ManifestTransaction.withPrepared(
-          commit.manifestBasePath,
+          base,
           storage,
           groups,
           ManifestTransaction.ReplaceColumns(columns),
@@ -946,6 +959,7 @@ private[write] object SegmentCommits {
         )(submit)
       }
     }
+  }
 
   private[write] def commitOne(
       commit: PlannedCommit,

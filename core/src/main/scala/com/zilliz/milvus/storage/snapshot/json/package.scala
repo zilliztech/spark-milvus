@@ -13,6 +13,8 @@ package com.zilliz.milvus.storage.snapshot
   * Manifest references are JSON objects with an integer version in the signed
   * 64-bit range; an omitted or null version defaults to zero as in Milvus.
   * Malformed objects, trailing content and numeric coercion are rejected.
+  * Snapshot layout accepts the protobuf enum name or number and retains
+  * unrecognized values for consumers that depend on the layout.
   *
   * Everything here is a description of bytes on disk. Nothing is computed:
   * `SnapshotCatalog` turns a `SnapshotJson` into a `Snapshot`. External format

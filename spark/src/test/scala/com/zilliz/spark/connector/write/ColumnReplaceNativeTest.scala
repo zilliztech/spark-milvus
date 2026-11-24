@@ -142,6 +142,16 @@ class ColumnReplaceNativeTest extends AnyFunSuite with BeforeAndAfterAll {
     * snapshot taken after registration would describe.
     */
   private def pinned(root: Path, versions: Map[Long, Long]): String = {
+    val path = "snapshot-after.json"
+    rewriteManifests(root, path) { (segment, manifest) =>
+      versions.get(segment).foreach(manifest.put("ver", _))
+    }
+    path
+  }
+
+  private def rewriteManifests(root: Path, name: String)(
+      update: (Long, ObjectNode) => Unit
+  ): Unit = {
     val json = mapper
       .readTree(Files.readAllBytes(root.resolve("snapshot.json")))
       .asInstanceOf[ObjectNode]
@@ -151,14 +161,10 @@ class ColumnReplaceNativeTest extends AnyFunSuite with BeforeAndAfterAll {
       val segment = node.get("segmentID").asLong()
       val manifest =
         mapper.readTree(node.get("manifest").asText()).asInstanceOf[ObjectNode]
-      versions.get(segment).foreach(manifest.put("ver", _))
+      update(segment, manifest)
       node.put("manifest", mapper.writeValueAsString(manifest))
     }
-    Files.write(
-      root.resolve("snapshot-after.json"),
-      mapper.writeValueAsBytes(json)
-    )
-    "snapshot-after.json"
+    Files.write(root.resolve(name), mapper.writeValueAsBytes(json))
   }
 
   private def categories(frame: DataFrame): Map[Long, Option[Long]] =
@@ -258,6 +264,58 @@ class ColumnReplaceNativeTest extends AnyFunSuite with BeforeAndAfterAll {
       assert(
         rootMessage(error).contains("already belongs to another column write")
       )
+    }
+  }
+
+  test(
+    "write planning rejects an unbound manifest before claiming the result"
+  ) {
+    fixture { (root, options) =>
+      val source = "unbound.json"
+      rewriteManifests(root, source) { (_, manifest) =>
+        manifest.put("base_path", "unassigned")
+      }
+      val result = root.resolve("write-result")
+      val error = intercept[Exception] {
+        write(
+          prepared(physical(options)),
+          options.updated(MilvusOption.SnapshotPath, source),
+          result
+        )
+      }
+      assert(rootMessage(error).contains("writable location"))
+      assert(Files.notExists(result))
+    }
+  }
+
+  test(
+    "a local manifest can carry its storage root through a write and receipt"
+  ) {
+    fixture { (root, options) =>
+      val source = "root-qualified.json"
+      rewriteManifests(root, source) { (_, manifest) =>
+        val base = root.resolve(manifest.get("base_path").asText())
+        manifest.put("base_path", base.toString)
+      }
+      val result = root.resolve("write-result")
+      val at = options.updated(
+        MilvusOption.SnapshotPath,
+        root.resolve(source).toUri.toString
+      )
+      write(prepared(physical(at)), at, result)
+
+      val committed = receipt(result).collect()
+      val versions = committed.map { row =>
+        val segment = row.getAs[Long]("segment_id")
+        val base = root.resolve(s"files/insert_log/10/20/$segment")
+        assert(row.getAs[String]("manifest_base_path") == base.toString)
+        segment -> row.getAs[Long]("version")
+      }.toMap
+      assert(versions == Map(30L -> 3L, 31L -> 3L))
+      val after = physical(
+        options.updated(MilvusOption.SnapshotPath, pinned(root, versions))
+      )
+      assert(categories(after)(3001L).contains(11L))
     }
   }
 

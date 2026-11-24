@@ -1,6 +1,8 @@
 package com.zilliz.milvus.storage.snapshot
 
+import java.net.URI
 import java.nio.charset.StandardCharsets
+import java.nio.file.Paths
 import scala.util.control.NonFatal
 
 import com.zilliz.milvus.storage.io.ObjectStore
@@ -57,7 +59,7 @@ final class SnapshotCatalog(
     * read as a local key.
     */
   private def metadata(location: String): SnapshotJson = {
-    val located = StoragePath.parseMilvus(location, bucket, endpoint)
+    val located = SnapshotCatalog.metadataLocation(location, bucket, endpoint)
     if (located.hasBucket && located.bucket != bucket) {
       val boundTo =
         if (bucket.isEmpty) "a store with no bucket (the local backend)"
@@ -113,6 +115,20 @@ final class SnapshotCatalog(
 }
 
 object SnapshotCatalog extends Logging {
+
+  /** A snapshot file URI and its local filesystem path identify the same
+    * metadata file. Object-store locations retain their bucket and key.
+    */
+  private[zilliz] def metadataLocation(
+      location: String,
+      bucket: String,
+      endpoint: String
+  ): StoragePath = {
+    val located = StoragePath.parseMilvus(location, bucket, endpoint)
+    if (!located.hasBucket && located.key.startsWith("file:"))
+      located.copy(key = Paths.get(URI.create(located.key)).toString)
+    else located
+  }
 
   // datapb.SegmentLevel_L0 identifies segments that carry only deletes.
   private val L0SegmentLevel = 1L
@@ -234,7 +250,7 @@ object SnapshotCatalog extends Logging {
       try
         Right(
           attachSegmentMetadata(value, metadata, entries, endpoint)
-            .copy(id = Option(info.id).filter(_ > 0L))
+            .copy(id = Option(info.id).filter(_ > 0L), layout = metadata.layout)
         )
       catch { case NonFatal(error) => Left(error) }
     }

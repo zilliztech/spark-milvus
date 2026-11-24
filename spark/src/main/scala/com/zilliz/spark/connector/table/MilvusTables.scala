@@ -6,7 +6,6 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import com.zilliz.milvus.storage.snapshot.Snapshot
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.types.SparkTypes
-import io.milvus.grpc.schema.CollectionSchema
 
 /** Builds a table and its schema from the same validated options and snapshot
   * source for DataSource loads and schema inference.
@@ -27,7 +26,7 @@ private[connector] object MilvusTables {
     val milvusOption = validate(options)
     val snapshot = resolve(milvusOption)
     sparkSchemaOf(
-      snapshot.schema,
+      snapshot,
       MilvusOption.readVectorRaw(options)
     )
   }
@@ -63,22 +62,11 @@ private[connector] object MilvusTables {
   }
 
   private[connector] def sparkSchemaOf(
-      schema: CollectionSchema,
+      snapshot: Snapshot,
       rawVectors: Boolean
   ): StructType = {
-    val fieldsById = schema.fields.groupBy(_.fieldID)
-    val duplicateIds = fieldsById
-      .collect {
-        case (id, fields) if fields.size > 1 => id
-      }
-      .toSeq
-      .sorted
-    if (duplicateIds.nonEmpty) {
-      throw new IllegalArgumentException(
-        s"Snapshot schema contains duplicate field id(s): ${duplicateIds.mkString(", ")}"
-      )
-    }
-    val fields = schema.fields.map(SparkTypes.toStructField(_, rawVectors))
+    val fields =
+      snapshot.schema.fields.map(SparkTypes.toStructField(_, rawVectors))
     val clashes = fields
       .groupBy(_.name.toLowerCase(java.util.Locale.ROOT))
       .collect { case (_, same) if same.size > 1 => same.map(_.name) }

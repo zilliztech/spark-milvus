@@ -26,6 +26,9 @@ package com.zilliz.milvus.storage
   * implementation: the seven cloud backends, their credential providers and the
   * filesystem itself all live in the C layer.
   *
+  * NativeObjectStore.filesystemKey supplies the backend-relative path to native
+  * manifest operations that run outside the store session.
+  *
   * A handle is a pointer inside this process. It must never reach an
   * InputPartition, which Spark serializes and ships; partitions carry the
   * description (path, manifest version, column names, the `fs.*` map) and the

@@ -580,6 +580,46 @@ class SnapshotCatalogTest extends AnyFunSuite {
   }
 
   test(
+    "catalog retains declared layout including future values for read-only consumers"
+  ) {
+    withDir { dir =>
+      val key = "snapshot.json"
+      val document = snapshotJson("layout", 100L)
+      val cases = Seq(
+        "" -> None,
+        """"layout": null,""" -> None,
+        """"layout": "SnapshotLayoutReferenced",""" -> Some(
+          SnapshotLayout.Referenced
+        ),
+        """"layout": 1,""" -> Some(SnapshotLayout.Referenced),
+        """"layout": 0,""" -> Some(SnapshotLayout.Referenced),
+        """"layout": "SnapshotLayoutUnknown",""" -> Some(
+          SnapshotLayout.Referenced
+        ),
+        """"layout": "SnapshotLayoutSelfContained",""" -> Some(
+          SnapshotLayout.SelfContained
+        ),
+        """"layout": 2,""" -> Some(SnapshotLayout.SelfContained),
+        """"layout": 3,""" -> Some(SnapshotLayout.Unsupported("3")),
+        """"layout": "FutureLayout",""" -> Some(
+          SnapshotLayout.Unsupported("FutureLayout")
+        )
+      )
+      cases.foreach { case (declaration, layout) =>
+        writeSingleSegmentSnapshot(
+          dir,
+          key,
+          document.replace(
+            "\"format_version\"",
+            declaration + "\"format_version\""
+          )
+        )
+        assert(catalog(dir).read(key).layout == layout)
+      }
+    }
+  }
+
+  test(
     "segment Avro supplies the partition for a nonstandard V3 path"
   ) {
     withDir { dir =>
@@ -823,6 +863,23 @@ class SnapshotCatalogTest extends AnyFunSuite {
         0L
       )
     )
+  }
+
+  test("snapshot materialization rejects fields that share a physical id") {
+    val json = snapshotJson("duplicate-fields", 100L, Seq.empty)
+      .replace("\"fieldID\": 101", "\"fieldID\": 100")
+    val metadata = SnapshotJson.parse(json).fold(throw _, identity)
+    val error = SnapshotCatalog
+      .fromMetadata(
+        metadata,
+        SnapshotOrigin.Options,
+        new LocalObjectStore(""),
+        ""
+      )
+      .swap
+      .toOption
+      .get
+    assert(error.getMessage.contains("duplicate field id 100"))
   }
 
   test("dynamic snapshots require the authoritative $meta field schema") {
