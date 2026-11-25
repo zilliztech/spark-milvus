@@ -1,0 +1,12 @@
+version: 2
+updates:
+  - package-ecosystem: sbt
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 1
+    groups:
+      sbt-dependencies:
+        applies-to: version-updates
+        patterns:
+          - "*"
