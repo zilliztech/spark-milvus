@@ -5,7 +5,7 @@ object Versions {
   val scala213 = "2.13.16"
 
   // Dependabot reads version literals before the first nested block in this object.
-  val scalapb = "0.11.21"
+  val scalapb = "0.11.20"
   val parquet = "1.18.2"
   val parquetAvro = "1.18.2"
 
@@ -14,7 +14,7 @@ object Versions {
   val avro = "1.12.2"
   val awsSdkV2 = "2.30.38"
   val awsSdkV1Core = "1.12.797"
-  val munit = "1.3.6"
+  val munit = "1.2.0"
   val scalaTest = "3.2.20"
 
   /** Keep jackson-module-scala and jackson-databind on the same version. */
@@ -27,7 +27,7 @@ object Versions {
   val slf4j = "2.0.20"
 
   /** Supplies scala.jdk.CollectionConverters on Scala 2.12. */
-  val scalaCollectionCompat = "2.14.0"
+  val scalaCollectionCompat = "2.13.0"
 
   /** A supported Spark line; all lines compile the same selected sbt project.
     */

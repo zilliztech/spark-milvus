@@ -4,4 +4,4 @@ addSbtPlugin("org.xerial.sbt" % "sbt-sonatype" % "3.12.2")
 addSbtPlugin("com.github.sbt" % "sbt-pgp" % "2.4.0")
 addSbtPlugin("org.scalameta" % "sbt-scalafmt" % "2.5.2")
 
-libraryDependencies += "com.thesamet.scalapb" %% "compilerplugin" % "0.11.21"
+libraryDependencies += "com.thesamet.scalapb" %% "compilerplugin" % "0.11.20"
