@@ -1,0 +1,60 @@
+name: JVM dependency graph
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/dependency-graph.yml'
+      - '.sbtopts'
+      - '**/*.sbt'
+      - 'project/**'
+      - 'scripts/ci/read_validation.py'
+      - 'milvus-proto'
+      - 'milvus-storage'
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    runs-on: ubuntu-22.04
+    outputs:
+      spark: ${{ steps.profiles.outputs.spark }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: sbt/setup-sbt@7e114eae4f32ec3f93c851c2793376a77f384409 # v1.5.15
+      - id: profiles
+        run: |
+          sbt 'exportBuildMatrix build-matrix.json'
+          python3 scripts/ci/read_validation.py matrix --matrix build-matrix.json --github-output "$GITHUB_OUTPUT"
+
+  submit:
+    name: Submit dependencies (Spark ${{ matrix.line }}, Scala ${{ matrix.scalaBinary }})
+    needs: matrix
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.spark) }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.buildJava }}
+          cache: sbt
+      - uses: sbt/setup-sbt@7e114eae4f32ec3f93c851c2793376a77f384409 # v1.5.15
+      - uses: scalacenter/sbt-dependency-submission@d84eef4c09e633bcf5f113bcad7fd5e9af1baee9 # v3.2.3
+        env:
+          JAVA_TOOL_OPTIONS: -DsparkVersion=${{ matrix.line }} -DscalaVersion=${{ matrix.scala }}
+        with:
+          correlator: sbt-${{ matrix.line }}-${{ matrix.scalaBinary }}

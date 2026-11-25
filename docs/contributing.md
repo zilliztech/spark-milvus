@@ -254,10 +254,10 @@ which throws the same way from the other direction.
 
 ## Pull requests
 
-Changes reach `main` only through pull requests, and pull requests come from a
-fork: a repository ruleset reserves branch creation on
-`zilliztech/spark-milvus` for maintainers. Push your branch to your fork and open
-the pull request against `main`. Releases use tags on `main` after full push CI
+Changes reach `main` only through pull requests. A repository ruleset reserves
+upstream branch creation for maintainers and the Dependabot app.
+Push your branch to your fork and open the pull request against `main`.
+Releases use tags on `main` after full push CI
 succeeds for the tagged commit; no release branch is required.
 The ordinary CI checks run for a fork pull request without repository secrets;
 the native builds and consumers run once the change is pushed to the protected
