@@ -5,17 +5,18 @@ object Versions {
   val scala213 = "2.13.16"
 
   // Dependabot reads version literals before the first nested block in this object.
-  val scalapb = "0.11.3"
+  val scalapb = "0.11.20"
+  // Compile core against the Parquet API shipped by Spark 3.5.
   val parquet = "1.13.1"
   val parquetAvro = "1.15.2"
 
   /** Layer 2's own tests; each Spark line pins its distribution's version. */
-  val hadoop = "3.4.1"
+  val hadoop = "3.5.0"
   val avro = "1.12.0"
   val awsSdkV2 = "2.30.38"
-  val awsSdkV1Core = "1.12.780"
-  val munit = "0.7.29"
-  val scalaTest = "3.2.15"
+  val awsSdkV1Core = "1.12.797"
+  val munit = "1.2.0"
+  val scalaTest = "3.2.20"
 
   /** Keep jackson-module-scala and jackson-databind on the same version. */
   val jackson = "2.17.3"
@@ -24,10 +25,10 @@ object Versions {
   val zeroAllocationHashing = "0.16"
 
   /** The logging API provided by Spark 3.5 and compatible later lines. */
-  val slf4j = "2.0.7"
+  val slf4j = "2.0.20"
 
   /** Supplies scala.jdk.CollectionConverters on Scala 2.12. */
-  val scalaCollectionCompat = "2.12.0"
+  val scalaCollectionCompat = "2.13.0"
 
   /** A supported Spark line; all lines compile the same selected sbt project.
     */
