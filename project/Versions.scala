@@ -6,12 +6,13 @@ object Versions {
 
   // Dependabot reads version literals before the first nested block in this object.
   val scalapb = "0.11.20"
-  val parquet = "1.18.2"
-  val parquetAvro = "1.18.2"
+  // Compile core against the Parquet API shipped by Spark 3.5.
+  val parquet = "1.13.1"
+  val parquetAvro = "1.15.2"
 
   /** Layer 2's own tests; each Spark line pins its distribution's version. */
   val hadoop = "3.5.0"
-  val avro = "1.12.2"
+  val avro = "1.12.0"
   val awsSdkV2 = "2.30.38"
   val awsSdkV1Core = "1.12.797"
   val munit = "1.2.0"
