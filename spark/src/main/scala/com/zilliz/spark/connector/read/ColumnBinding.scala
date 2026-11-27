@@ -289,13 +289,12 @@ final case class PhysicalColumnBinding(
             .filter(_ >= 0)
             .map(_ -> field.getName)
         }
-      // Unannotated ordinary outputs bind by Spark name or by an adapter
-      // alias. Their stored columns also have a known collection field ID.
+      // An unannotated Spark output defaults to its own physical name. The
+      // adapter's explicit aliases also identify columns outside the projection.
       val namedOutputs = schema.fields.iterator
         .filterNot(_.metadata.contains(FieldMetadata.MilvusFieldIdMetadataKey))
-        .map(_.name)
-        .map(name => name -> physical.outputColumns.getOrElse(name, name))
-        .toMap
+        .map(field => field.name -> field.name)
+        .toMap ++ physical.outputColumns
       val ordinary = milvusSchema.fields.iterator
         .filterNot(field => physical.fieldNames.contains(field.fieldID))
         .flatMap { field =>
