@@ -1,6 +1,7 @@
 package com.zilliz.spark.connector.read
 
 import scala.jdk.CollectionConverters._
+import scala.util.Try
 
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.{BigIntVector, VectorSchemaRoot}
@@ -270,11 +271,48 @@ final case class PhysicalColumnBinding(
     physical.outputColumns.values.forall(names),
     "physical output names differ from the Arrow schema"
   )
+  private val stored = physical.groups.flatMap(_.columnNames).toSet
   require(
-    physical.groups.flatMap(_.columnNames).forall(names),
+    stored.subsetOf(names),
     "physical groups name unknown Arrow columns"
   )
-  override val columnNameFor: Long => Option[String] = physical.fieldNames.get
+  // The adapter's Arrow schema can include fields added after this segment.
+  // Only annotations on stored columns supply additional physical identities.
+  private val fieldNames =
+    if (projectedParents.isEmpty) physical.fieldNames
+    else {
+      val annotated = arrowSchema.getFields.asScala.iterator
+        .filter(field => stored(field.getName))
+        .flatMap { field =>
+          Option(field.getMetadata.get("PARQUET:field_id"))
+            .flatMap(value => Try(value.toLong).toOption)
+            .filter(_ >= 0)
+            .map(_ -> field.getName)
+        }
+      // Unannotated ordinary outputs bind by Spark name or by an adapter
+      // alias. Their stored columns also have a known collection field ID.
+      val namedOutputs = schema.fields.iterator
+        .filterNot(_.metadata.contains(FieldMetadata.MilvusFieldIdMetadataKey))
+        .map(_.name)
+        .map(name => name -> physical.outputColumns.getOrElse(name, name))
+        .toMap
+      val ordinary = milvusSchema.fields.iterator
+        .filterNot(field => physical.fieldNames.contains(field.fieldID))
+        .flatMap { field =>
+          namedOutputs.get(field.name).filter(stored).map(field.fieldID -> _)
+        }
+      val mappings = physical.fieldNames.toVector ++ annotated ++ ordinary
+      val byId = mappings.toMap
+      val byName = mappings.map(_.swap).toMap
+      mappings.foreach { case (id, name) =>
+        require(
+          byId(id) == name && byName(name) == id,
+          s"Segment ${task.segmentId} has conflicting mappings for field id $id and column '$name'"
+        )
+      }
+      byId
+    }
+  override val columnNameFor: Long => Option[String] = fieldNames.get
   override val arrowColumnNames: Map[String, String] =
     physical.outputColumns ++ projectedColumnNames(schema)
   override val pkColumnName: String =
@@ -297,24 +335,25 @@ final case class PhysicalColumnBinding(
       )
       (requested ++ Seq(pkColumnName, timestampColumnName)).distinct
     } else requested.distinct
-    val available = physical.groups.flatMap(_.columnNames).toSet
-    def storedIds: Set[Long] = {
-      val mappings = physical.fieldNames.filter { case (_, name) =>
-        available(name)
-      }
-      val unknown = available -- mappings.values
+    lazy val storedMappings = fieldNames.filter { case (_, name) =>
+      stored(name)
+    }
+    val needsStoredIds = projectedParents.exists { parent =>
+      parent.fields.exists(field => !fieldNames.contains(field.fieldID)) ||
+      !childNames(parent).exists(stored)
+    }
+    if (needsStoredIds) {
+      val unknown = stored -- storedMappings.values
       if (unknown.nonEmpty) {
         throw new IllegalStateException(
           s"Segment ${task.segmentId} lacks field ids for stored columns ${unknown.toSeq.sorted
-              .mkString(", ")}; " +
-            "cannot establish whether it predates the missing struct array"
+              .mkString(", ")}; cannot determine which struct array members are stored"
         )
       }
-      mappings.keySet
     }
-    val selected = storedProjection(required, available, storedIds)
+    val selected = storedProjection(required, stored, storedMappings.keySet)
     require(
-      selected.forall(available),
+      selected.forall(stored),
       "physical column groups do not contain all requested columns"
     )
     selected

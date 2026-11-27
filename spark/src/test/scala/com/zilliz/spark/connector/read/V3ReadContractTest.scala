@@ -15,17 +15,26 @@ import org.apache.avro.generic.{
   GenericRecord
 }
 import org.apache.avro.io.{DecoderFactory, EncoderFactory}
+import org.apache.hadoop.fs.{Path => HadoopPath}
+import org.apache.parquet.hadoop.util.HadoopInputFile
+import org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.spark.sql.{AnalysisException, DataFrame, SparkSession}
 import org.apache.spark.TaskContext
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.jni.storage.NativeStorageLibrary
+import com.zilliz.milvus.storage.io.LocalObjectStore
 import com.zilliz.milvus.storage.manifest.{
   SnapshotSegmentFixture,
   SnapshotSegmentSchema
 }
+import com.zilliz.milvus.storage.read.exec.PhysicalColumnGroup
+import com.zilliz.milvus.storage.read.plan.SegmentReadTask
+import com.zilliz.milvus.storage.schema.SchemaMapper
+import com.zilliz.milvus.storage.snapshot.{SegmentLayout, SnapshotCatalog}
 import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.table.MilvusTables
 import com.zilliz.spark.connector.testkit.LocalMilvusCollection
 import com.zilliz.spark.connector.types.RowIdentity
 
@@ -284,6 +293,78 @@ class V3ReadContractTest extends AnyFunSuite with BeforeAndAfterAll {
         raw.getLong(0) == 0L && raw.getString(1) == "0000803F00000040" && raw
           .isNullAt(2)
       )
+    }
+  }
+
+  test(
+    "physical StructArray reads recover a stored vector member from its Arrow field id"
+  ) {
+    withCollection("struct-array-306") { (root, options) =>
+      val snapshot =
+        new SnapshotCatalog(new LocalObjectStore(root.toString), "")
+          .read("snapshot.json")
+      val segment = snapshot.dataSegments.head
+      val files = Files.walk(root)
+      val groups =
+        try
+          files
+            .iterator()
+            .asScala
+            .filter(_.toString.endsWith(".parquet"))
+            .map { file =>
+              val input = HadoopInputFile.fromPath(
+                new HadoopPath(file.toUri),
+                spark.sparkContext.hadoopConfiguration
+              )
+              val parquet = ParquetFileReader.open(input)
+              try {
+                val footer = parquet.getFooter
+                val columns = footer.getFileMetaData.getSchema.getFields.asScala
+                  .map(_.getName)
+                  .toVector
+                val rows = footer.getBlocks.asScala.map(_.getRowCount).sum
+                PhysicalColumnGroup(
+                  columns,
+                  Seq(root.relativize(file).toString),
+                  Seq(rows)
+                )
+              } finally parquet.close()
+            }
+            .toVector
+        finally files.close()
+      val arrow =
+        SchemaMapper.convertToArrowSchemaWithFieldIdNames(snapshot.schema)
+      val names = SchemaMapper
+        .physicalFields(snapshot.schema)
+        .map(f => f.fieldID -> f.fieldID.toString)
+        .toMap
+      val layout = SegmentLayout.PhysicalColumnGroups(
+        groups,
+        arrow.toJson,
+        names - 104L,
+        Map.empty
+      )
+      val task = SegmentReadTask(
+        segment.id,
+        segment.partitionId,
+        layout,
+        snapshot.schemaBytes,
+        options - MilvusOption.SnapshotPath,
+        neededFieldIds = Seq(100L, 102L, 103L, 104L, 105L)
+      )
+      val output = MilvusTables.sparkSchemaOf(snapshot, rawVectors = false)
+      val reader = new MilvusPartitionReaderFactory(output, rawVectors = false)
+        .createColumnarReader(MilvusInputPartition(task))
+      try {
+        assert(reader.next())
+        val row = reader.get().getRow(0)
+        assert(row.getLong(0) == 1L)
+        val chunks = row.getArray(1)
+        val first = chunks.getStruct(0, 4)
+        assert(!first.isNullAt(2))
+        assert(first.getArray(2).toFloatArray().toList == List(1f, 2f))
+        assert(chunks.getStruct(1, 4).isNullAt(2))
+      } finally reader.close()
     }
   }
 

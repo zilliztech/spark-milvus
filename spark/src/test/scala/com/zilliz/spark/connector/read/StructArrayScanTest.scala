@@ -2,6 +2,7 @@ package com.zilliz.spark.connector.read
 
 import scala.jdk.CollectionConverters._
 
+import org.apache.arrow.vector.types.pojo.{Field, FieldType, Schema}
 import org.apache.spark.sql.types.{
   ArrayType,
   BinaryType,
@@ -222,10 +223,29 @@ class StructArrayScanTest extends AnyFunSuite {
       .physicalFields(storedSchema)
       .map(field => field.fieldID -> field.name)
       .toMap
-    def binding(names: Seq[String], mapping: Map[Long, String] = fieldNames) = {
+    def binding(
+        names: Seq[String],
+        mapping: Map[Long, String] = fieldNames,
+        withoutId: Option[String] = None
+    ) = {
+      val fields = arrow.getFields.asScala.map { field =>
+        if (withoutId.contains(field.getName)) {
+          val metadata = field.getMetadata.asScala.toMap - "PARQUET:field_id"
+          new Field(
+            field.getName,
+            new FieldType(
+              field.isNullable,
+              field.getType,
+              field.getDictionary,
+              metadata.asJava
+            ),
+            field.getChildren
+          )
+        } else field
+      }
       val layout = SegmentLayout.PhysicalColumnGroups(
         Seq(PhysicalColumnGroup(names, Seq("data/a"), Seq(3L))),
-        arrow.toJson,
+        new Schema(fields.asJava).toJson,
         mapping,
         Map.empty
       )
@@ -256,13 +276,66 @@ class StructArrayScanTest extends AnyFunSuite {
     val newer = older :+ "retired"
     val error = intercept[IllegalStateException](binding(newer).neededColumns)
     assert(error.getMessage.contains("none of its current members"))
-    val unresolved = intercept[IllegalStateException](
+    val identified = intercept[IllegalStateException](
       binding(newer, fieldNames - 104L).neededColumns
+    )
+    assert(identified.getMessage.contains("none of its current members"))
+    val unresolved = intercept[IllegalStateException](
+      binding(newer, fieldNames - 104L, Some("retired")).neededColumns
     )
     assert(
       unresolved.getMessage.contains(
         "lacks field ids for stored columns retired"
       )
     )
+    assert(
+      binding(
+        newer :+ "items[count]",
+        fieldNames - 104L,
+        Some("retired")
+      ).neededColumns ==
+        Seq("items[count]")
+    )
+    val ambiguous = intercept[IllegalStateException](
+      binding(
+        older ++ Seq("items[count]", "items[embedding]"),
+        fieldNames - 103L,
+        Some("items[embedding]")
+      ).neededColumns
+    )
+    assert(
+      ambiguous.getMessage.contains(
+        "lacks field ids for stored columns items[embedding]"
+      )
+    )
+    val conflict = intercept[IllegalArgumentException](
+      binding(
+        older :+ "items[count]",
+        (fieldNames - 102L).updated(103L, "items[count]")
+      ).neededColumns
+    )
+    assert(conflict.getMessage.contains("conflicting mappings"))
+  }
+
+  test(
+    "a projected ordinary column with a physical alias can accompany a newly added struct member"
+  ) {
+    val arrow = SchemaMapper.convertToArrowSchema(snapshot.schema)
+    val id = Field.notNullable("stored_id", arrow.findField("id").getType)
+    val count = arrow.findField("items[count]")
+    val stored = Seq(id, count)
+    val layout = SegmentLayout.PhysicalColumnGroups(
+      Seq(PhysicalColumnGroup(stored.map(_.getName), Seq("data/a"), Seq(3L))),
+      new Schema(stored.asJava).toJson,
+      Map(102L -> count.getName),
+      Map("id" -> id.getName)
+    )
+    val selected =
+      StructType(Seq(StructField("id", output("id").dataType), output("items")))
+    val binding = PhysicalColumnBinding(
+      SegmentReadTask(30, 20, layout, snapshot.schemaBytes, Map.empty),
+      selected
+    )
+    assert(binding.neededColumns == Seq("stored_id", "items[count]"))
   }
 }
