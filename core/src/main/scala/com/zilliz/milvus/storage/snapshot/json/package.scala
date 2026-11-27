@@ -20,7 +20,9 @@ package com.zilliz.milvus.storage.snapshot
   * `SnapshotCatalog` turns a `SnapshotJson` into a `Snapshot`. External format
   * writers can serialize the same neutral shapes with `toJson`.
   *
-  * Main types: SnapshotJson, CollectionSchemaJson, FieldJson, SegmentJson,
+  * Collection schemas retain struct array parents, members and recursive array
+  * element types when converted to the snapshot protobuf. Main types:
+  * SnapshotJson, CollectionSchemaJson, FieldJson, SegmentJson,
   * ManifestItemJson, SegmentListJson, JsonValues.
   */
 package object json

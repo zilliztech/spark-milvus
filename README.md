@@ -254,6 +254,11 @@ their stored bytes, set `.option("milvus.read.vector.raw", "true")` before
 `.load()`. See
 [supported types](docs/reference.md#supported-data-types).
 
+The development version of the connector reads StructArray fields from
+**Milvus 3.0.6 and later** as Spark `array<struct<...>>`. For example, use
+`rows.selectExpr("id", "explode(chunks) AS chunk").select("id", "chunk.text")`
+to read the text of each chunk. See [StructArray reads](docs/reference.md#structarray-reads).
+
 ## Writing Collection data
 
 Use a DataFrame to replace existing field values while preserving the

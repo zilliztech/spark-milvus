@@ -86,6 +86,7 @@ wrong type fails the write before any manifest changes.
 |---|---|
 | Primary key, partition key, clustering key | They place and identify rows. |
 | Dynamic field, function outputs, system fields | Milvus owns their values. |
+| StructArray and its members | The connector exposes them for snapshot reads starting with Milvus 3.0.6. |
 | A field with an index in the snapshot, defined or built on its segments | The index would keep describing the old values. Drop the index before the replacement and build it again after the new revisions are registered. |
 | A field with statistics in a segment manifest, such as a text index or JSON key statistics | The statistics would keep describing the old values. |
 | Any field of a snapshot that lists no index definitions and whose segment records do not say which index files they have | The write cannot confirm that the field has no index. A Milvus snapshot omits an empty definition list, so a collection without indexes passes once its segments are described. |

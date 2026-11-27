@@ -3,34 +3,107 @@ package com.zilliz.milvus.storage.snapshot.json
 import com.fasterxml.jackson.annotation.{JsonAlias, JsonProperty}
 import com.fasterxml.jackson.databind.JsonNode
 
+import io.milvus.grpc.common.KeyValuePair
+import io.milvus.grpc.schema.{
+  CollectionSchema => ProtoCollectionSchema,
+  DataType,
+  FieldSchema,
+  FieldState,
+  StructArrayFieldSchema,
+  TypeSchema
+}
+
 /** A `{key, value}` pair: a field's `type_params` entry or a collection's
   * `properties` entry (`KeyValuePair` in the Milvus proto).
   */
 case class KeyValueJson(
     @JsonProperty("key") key: String,
     @JsonProperty("value") value: String
-)
+) {
+  def toProtobuf: KeyValuePair = KeyValuePair(key = key, value = value)
+}
+
+/** The recursive type of a nested scalar array. */
+case class TypeSchemaJson(
+    @JsonProperty("leaf_type") @JsonAlias(Array("leafType")) leafType: Option[
+      JsonNode
+    ] = None,
+    @JsonProperty("array_element") @JsonAlias(
+      Array("arrayElement")
+    ) arrayElement: Option[TypeSchemaJson] = None,
+    @JsonProperty("type_params") @JsonAlias(
+      Array("typeParams")
+    ) typeParams: Seq[KeyValueJson] = Seq.empty,
+    @JsonProperty("nullable") nullable: Boolean = false
+) {
+  def toProtobuf: TypeSchema = {
+    val node =
+      TypeSchema(typeParams = typeParams.map(_.toProtobuf), nullable = nullable)
+    (leafType, arrayElement) match {
+      case (Some(leaf), None) =>
+        node.withLeafType(DataType.fromValue(JsonValues.toDataTypeCode(leaf)))
+      case (None, Some(element)) => node.withArrayElement(element.toProtobuf)
+      case _ =>
+        throw UnsupportedSnapshotSchemaField(
+          "type_schema requires exactly one of leaf_type and array_element"
+        )
+    }
+  }
+}
+
+/** Logical parent of the member columns stored in a segment. */
+case class StructArrayFieldJson(
+    @JsonProperty("fieldID") fieldID: JsonNode,
+    @JsonProperty("name") name: String,
+    @JsonProperty("fields") fields: Seq[FieldJson],
+    @JsonProperty("description") description: Option[String] = None,
+    @JsonProperty("type_params") @JsonAlias(
+      Array("typeParams")
+    ) typeParams: Seq[KeyValueJson] = Seq.empty,
+    @JsonProperty("nullable") nullable: Boolean = false
+) {
+  def toProtobuf: StructArrayFieldSchema = StructArrayFieldSchema(
+    fieldID = JsonValues.toLong(fieldID),
+    name = name,
+    fields = fields.map(_.toProtobuf),
+    description = description.getOrElse(""),
+    typeParams = typeParams.map(_.toProtobuf),
+    nullable = nullable
+  )
+}
 
 /** One entry of `collection.schema.fields`. */
 case class FieldJson(
     @JsonProperty("fieldID") fieldID: Option[JsonNode] = None,
     @JsonProperty("name") name: String,
     @JsonProperty("description") description: Option[String] = None,
-    @JsonProperty("data_type") rawDataType: Option[JsonNode] = None,
+    @JsonProperty("data_type") @JsonAlias(
+      Array("dataType")
+    ) rawDataType: Option[JsonNode] = None,
     @JsonProperty("is_primary_key") isPrimaryKey: Option[Boolean] = None,
     @JsonProperty("is_clustering_key") isClusteringKey: Option[Boolean] = None,
-    @JsonProperty("type_params") typeParams: Option[Seq[KeyValueJson]] = None,
+    @JsonProperty("type_params") @JsonAlias(
+      Array("typeParams")
+    ) typeParams: Option[Seq[KeyValueJson]] = None,
     @JsonProperty("autoID") @JsonAlias(Array("auto_id")) autoID: Option[
       Boolean
     ] = None,
     @JsonProperty("state") rawState: Option[JsonNode] = None,
-    @JsonProperty("element_type") rawElementType: Option[JsonNode] = None,
+    @JsonProperty("element_type") @JsonAlias(
+      Array("elementType")
+    ) rawElementType: Option[JsonNode] = None,
     @JsonProperty("is_dynamic") isDynamic: Option[Boolean] = None,
     @JsonProperty("is_partition_key") isPartitionKey: Option[Boolean] = None,
     @JsonProperty("nullable") nullable: Option[Boolean] = None,
     @JsonProperty("is_function_output") isFunctionOutput: Option[Boolean] =
       None,
-    @JsonProperty("default_value") defaultValue: Option[JsonNode] = None
+    @JsonProperty("default_value") defaultValue: Option[JsonNode] = None,
+    @JsonProperty("type_schema") @JsonAlias(
+      Array("typeSchema")
+    ) typeSchema: Option[TypeSchemaJson] = None,
+    @JsonProperty("element_nullable") @JsonAlias(
+      Array("elementNullable")
+    ) elementNullable: Boolean = false
 ) {
 
   /** The data type code, whether the JSON wrote `5` or `"Int64"`. */
@@ -46,6 +119,27 @@ case class FieldJson(
 
   def elementType: Int =
     rawElementType.map(JsonValues.toDataTypeCode).getOrElse(0)
+
+  def toProtobuf: FieldSchema = FieldSchema(
+    fieldID = getFieldIDAsLong,
+    name = name,
+    description = description.getOrElse(""),
+    dataType = DataType.fromValue(dataType),
+    isPrimaryKey = isPrimaryKey.getOrElse(false),
+    isClusteringKey = isClusteringKey.getOrElse(false),
+    typeParams = typeParams.getOrElse(Seq.empty).map(_.toProtobuf),
+    autoID = autoID.getOrElse(false),
+    state = FieldState.fromValue(state),
+    elementType = DataType.fromValue(elementType),
+    isDynamic = isDynamic.getOrElse(false),
+    isPartitionKey = isPartitionKey.getOrElse(false),
+    nullable = nullable.getOrElse(false),
+    elementNullable = elementNullable,
+    typeSchema = typeSchema.map(_.toProtobuf),
+    isFunctionOutput = isFunctionOutput.getOrElse(false),
+    defaultValue =
+      defaultValue.map(CollectionSchemaJson.protobufDefaultValue(_, name))
+  )
 }
 
 case class UnsupportedSnapshotSchemaField(message: String)
@@ -106,72 +200,46 @@ case class CollectionSchemaJson(
     ] = None,
     @JsonProperty("enable_dynamic_field") enableDynamicField: Option[Boolean] =
       None,
-    @JsonProperty("version") version: Int = 0
+    @JsonProperty("version") version: Int = 0,
+    @JsonProperty("struct_array_fields") @JsonAlias(
+      Array("structArrayFields")
+    ) structArrayFields: Seq[StructArrayFieldJson] = Seq.empty
 ) {
+  private def storedFields: Seq[FieldJson] =
+    fields ++ structArrayFields.flatMap(_.fields)
+
   def getFieldByName(name: String): Option[FieldJson] =
-    fields.find(_.name == name)
+    storedFields.find(_.name == name)
 
   def primaryKey: Option[FieldJson] =
     fields.find(_.isPrimaryKey.contains(true))
 
   def fieldNamesById: Map[Long, String] =
-    fields.map(f => f.getFieldIDAsLong -> f.name).toMap
+    storedFields.map(f => f.getFieldIDAsLong -> f.name).toMap
 
   def fieldIdsByName: Map[String, Long] =
-    fields.map(f => f.name -> f.getFieldIDAsLong).toMap
+    storedFields.map(f => f.name -> f.getFieldIDAsLong).toMap
 
   /** The same schema as the protobuf `CollectionSchema`, serialized: what the
     * native reader and every planner take. The system fields `RowID` and
     * `Timestamp` are left out, as the proto never lists them.
     */
-  def toProtobufBytes: Array[Byte] = {
-    import io.milvus.grpc.common.KeyValuePair
-    import io.milvus.grpc.schema.{
-      DataType,
-      FieldSchema,
-      FieldState,
-      CollectionSchema => ProtoCollectionSchema
-    }
-
+  def toProtobuf: ProtoCollectionSchema = {
     val userFields =
       fields.filterNot(f => f.name == "RowID" || f.name == "Timestamp")
-
-    val protoFields = userFields.map { field =>
-      FieldSchema(
-        fieldID = field.getFieldIDAsLong,
-        name = field.name,
-        description = field.description.getOrElse(""),
-        dataType = DataType.fromValue(field.dataType),
-        isPrimaryKey = field.isPrimaryKey.getOrElse(false),
-        isClusteringKey = field.isClusteringKey.getOrElse(false),
-        typeParams = field.typeParams.getOrElse(Seq.empty).map { tp =>
-          KeyValuePair(key = tp.key, value = tp.value)
-        },
-        autoID = field.autoID.getOrElse(false),
-        state = FieldState.fromValue(field.state),
-        elementType = DataType.fromValue(field.elementType),
-        isDynamic = field.isDynamic.getOrElse(false),
-        isPartitionKey = field.isPartitionKey.getOrElse(false),
-        nullable = field.nullable.getOrElse(false),
-        isFunctionOutput = field.isFunctionOutput.getOrElse(false),
-        defaultValue = field.defaultValue.map(
-          CollectionSchemaJson.protobufDefaultValue(_, field.name)
-        )
-      )
-    }
-
     ProtoCollectionSchema(
       name = name,
       description = description.getOrElse(""),
       autoID = autoID.getOrElse(false),
-      fields = protoFields,
+      fields = userFields.map(_.toProtobuf),
+      structArrayFields = structArrayFields.map(_.toProtobuf),
       enableDynamicField = enableDynamicField.getOrElse(false),
-      properties = properties.getOrElse(Seq.empty).map { prop =>
-        KeyValuePair(key = prop.key, value = prop.value)
-      },
+      properties = properties.getOrElse(Seq.empty).map(_.toProtobuf),
       version = version
-    ).toByteArray
+    )
   }
+
+  def toProtobufBytes: Array[Byte] = toProtobuf.toByteArray
 }
 
 object CollectionSchemaJson {
@@ -179,7 +247,7 @@ object CollectionSchemaJson {
   /** A field's `default_value` as the proto `ValueField`. The JSON carries one
     * of the `*_data` members, in snake or camel case.
     */
-  private def protobufDefaultValue(
+  private[json] def protobufDefaultValue(
       node: JsonNode,
       fieldName: String
   ): io.milvus.grpc.schema.ValueField = {

@@ -12,6 +12,7 @@ import org.apache.spark.sql.connector.catalog.{
 }
 import org.apache.spark.sql.connector.read.ScanBuilder
 import org.apache.spark.sql.types.{
+  ArrayType,
   DataType,
   MetadataBuilder,
   StructField,
@@ -105,71 +106,96 @@ case class MilvusTable(
         s"Field '${field.name}' has $key=$actual, but snapshot schema requires $expected"
       )
 
-    val fields = baseSchema.fields.map { field =>
-      collectionFieldByName.get(field.name) match {
-        case Some(collectionField) =>
-          val expectedType = SparkTypes.toDataType(
-            collectionField,
-            rawVectors
-          )
-          if (field.dataType != expectedType) {
-            throw new IllegalArgumentException(
-              s"Field '${field.name}' has Spark type ${field.dataType.catalogString}, " +
-                s"but snapshot field ${collectionField.fieldID} requires ${expectedType.catalogString}"
+    val parents =
+      snapshot.schema.structArrayFields.map(field => field.name -> field).toMap
+
+    def restore(
+        field: StructField,
+        expected: StructField,
+        inStruct: Boolean
+    ): StructField = {
+      def wrongType(): Nothing = throw new IllegalArgumentException(
+        s"Field '${field.name}' has Spark type ${field.dataType.catalogString}, " +
+          s"but snapshot field ${expected.metadata.getLong(FieldMetadata.MilvusFieldIdMetadataKey)} requires ${expected.dataType.catalogString}"
+      )
+
+      def restoreType(actual: DataType, wanted: DataType): DataType =
+        (actual, wanted) match {
+          case (ArrayType(left, _), ArrayType(right, nullable)) =>
+            ArrayType(restoreType(left, right), nullable)
+          case (left: StructType, right: StructType)
+              if left.fieldNames.sameElements(right.fieldNames) =>
+            StructType(
+              left.fields.zip(right.fields).map { case (provided, target) =>
+                restore(provided, target, inStruct = true)
+              }
             )
-          }
-          val collectionMetadata = SparkTypes.metadata(collectionField)
-          val metadataBuilder = new MetadataBuilder()
-            .withMetadata(field.metadata)
+          case _ if actual == wanted => wanted
+          case _                     => wrongType()
+        }
 
-          Seq(
-            FieldMetadata.MilvusDataTypeMetadataKey,
-            FieldMetadata.MilvusFieldIdMetadataKey,
-            FieldMetadata.MilvusVectorDimensionMetadataKey
-          ).foreach { key =>
-            if (collectionMetadata.contains(key)) {
-              val expected = collectionMetadata.getLong(key)
-              if (field.metadata.contains(key)) {
-                val actual = field.metadata.getLong(key)
-                if (actual != expected) {
-                  conflictingMetadata(field, key, expected, actual)
-                }
-              } else {
-                metadataBuilder.putLong(key, expected)
-              }
-            }
-          }
+      val dataType =
+        if (inStruct) restoreType(field.dataType, expected.dataType)
+        else if (field.dataType == expected.dataType) expected.dataType
+        else wrongType()
 
-          Seq(
-            FieldMetadata.MilvusPrimaryKeyMetadataKey,
-            FieldMetadata.MilvusPartitionKeyMetadataKey,
-            FieldMetadata.MilvusClusteringKeyMetadataKey
-          ).foreach { key =>
-            val expected = collectionMetadata.contains(key) &&
-              collectionMetadata.getBoolean(key)
-            if (field.metadata.contains(key)) {
-              val actual = field.metadata.getBoolean(key)
-              if (actual != expected) {
-                conflictingMetadata(field, key, expected, actual)
-              }
-            } else if (expected) {
-              metadataBuilder.putBoolean(key, true)
-            }
-          }
-
-          field.copy(
-            nullable = collectionField.nullable,
-            metadata = metadataBuilder.build()
+      val collectionMetadata = expected.metadata
+      val metadataBuilder = new MetadataBuilder().withMetadata(field.metadata)
+      Seq(
+        FieldMetadata.MilvusDataTypeMetadataKey,
+        FieldMetadata.MilvusFieldIdMetadataKey,
+        FieldMetadata.MilvusVectorDimensionMetadataKey,
+        FieldMetadata.MilvusElementTypeMetadataKey
+      ).foreach { key =>
+        if (collectionMetadata.contains(key)) {
+          val value = collectionMetadata.getLong(key)
+          if (
+            field.metadata.contains(key) && field.metadata.getLong(key) != value
           )
-        case None =>
-          throw new IllegalArgumentException(
-            s"Field '${field.name}' is not present in snapshot schema; available fields: ${collectionFieldByName.keys.toSeq.sorted
-                .mkString(", ")}"
-          )
+            conflictingMetadata(field, key, value, field.metadata.getLong(key))
+          metadataBuilder.putLong(key, value)
+        }
       }
+      Seq(
+        FieldMetadata.MilvusPrimaryKeyMetadataKey,
+        FieldMetadata.MilvusPartitionKeyMetadataKey,
+        FieldMetadata.MilvusClusteringKeyMetadataKey
+      ).foreach { key =>
+        val value =
+          collectionMetadata.contains(key) && collectionMetadata.getBoolean(key)
+        if (
+          field.metadata
+            .contains(key) && field.metadata.getBoolean(key) != value
+        )
+          conflictingMetadata(field, key, value, field.metadata.getBoolean(key))
+        if (value) metadataBuilder.putBoolean(key, true)
+      }
+      field.copy(
+        dataType = dataType,
+        nullable = expected.nullable,
+        metadata = metadataBuilder.build()
+      )
     }
 
-    StructType(fields)
+    val fields = baseSchema.fields.map { field =>
+      val expected = collectionFieldByName
+        .get(field.name)
+        .map(SparkTypes.toStructField(_, rawVectors))
+        .orElse(
+          parents
+            .get(field.name)
+            .map(SparkTypes.toStructArrayField(_, rawVectors))
+        )
+        .getOrElse {
+          val available = collectionFieldByName.keySet ++ parents.keySet
+          throw new IllegalArgumentException(
+            s"Field '${field.name}' is not present in snapshot schema; available fields: ${available.toSeq.sorted
+                .mkString(", ")}"
+          )
+        }
+      restore(field, expected, inStruct = parents.contains(field.name))
+    }
+    MilvusTables.checkedSchema(StructType(fields))
   }
 
   override def schema(): StructType =

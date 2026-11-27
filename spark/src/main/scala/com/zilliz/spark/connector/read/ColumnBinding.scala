@@ -1,18 +1,23 @@
 package com.zilliz.spark.connector.read
 
 import scala.jdk.CollectionConverters._
+import scala.util.Try
 
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.{BigIntVector, VectorSchemaRoot}
-import org.apache.arrow.vector.types.pojo.Schema
-import org.apache.spark.sql.types.StructType
+import org.apache.arrow.vector.types.pojo.{Field, Schema}
+import org.apache.spark.sql.types.{ArrayType, StructType}
 
 import com.zilliz.milvus.storage.delete.DeletePlan
 import com.zilliz.milvus.storage.read.exec.{DeletePlans, SegmentReader}
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.{FieldMetadata, SchemaMapper}
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
-import io.milvus.grpc.schema.{CollectionSchema, FieldSchema}
+import io.milvus.grpc.schema.{
+  CollectionSchema,
+  FieldSchema,
+  StructArrayFieldSchema
+}
 
 /** Everything a reader has to work out before it can open a segment: which
   * columns to ask the native layer for, what to call them, and how to tell a
@@ -24,6 +29,8 @@ import io.milvus.grpc.schema.{CollectionSchema, FieldSchema}
 sealed trait ColumnBinding {
 
   def task: SegmentReadTask
+
+  def schema: StructType
 
   /** The schema handed to the native reader, named the way this line names
     * columns.
@@ -61,6 +68,66 @@ sealed trait ColumnBinding {
   final def arrowColumnFor(sparkFieldName: String): String =
     arrowColumnNames.getOrElse(sparkFieldName, sparkFieldName)
 
+  protected lazy val parentByName =
+    ColumnBinding.structArrayParents(milvusSchema, schema)
+  protected lazy val projectedParents =
+    schema.fieldNames.toSeq.flatMap(parentByName.get)
+
+  /** The physical projection includes all members, including siblings needed to
+    * recover a newly added member's element count in an older segment.
+    */
+  protected def childNames(parent: StructArrayFieldSchema): Seq[String] =
+    parent.fields.flatMap(child => columnNameFor(child.fieldID))
+
+  protected def projectedNames(
+      ordinary: String => Option[String]
+  ): Seq[String] =
+    schema.fieldNames.toSeq.flatMap { name =>
+      if (parentByName.contains(name)) childNames(parentByName(name))
+      else ordinary(name).toSeq
+    }
+
+  /** Resolve against actual column groups so a missing leaf is absent in the
+    * Arrow batch. A stored all-null leaf still reaches the decoder as a vector.
+    */
+  protected def storedProjection(
+      requested: Seq[String],
+      stored: Set[String],
+      storedFieldIds: => Set[Long]
+  ): Seq[String] = {
+    lazy val storedIds = storedFieldIds
+    val leaves = projectedParents.flatMap { parent =>
+      val members = childNames(parent)
+      if (!members.exists(stored) && storedIds.exists(_ > parent.fieldID)) {
+        throw new IllegalStateException(
+          s"Segment ${task.segmentId} stores fields newer than struct array '${parent.name}' " +
+            "but none of its current members can establish its row validity and element counts"
+        )
+      }
+      members
+    }.toSet
+    val selected = requested.filter(name => !leaves(name) || stored(name))
+    if (selected.nonEmpty || projectedParents.isEmpty) selected
+    else {
+      // Only absent parents were projected. A stored column supplies the row
+      // count; the decoder materializes the parents as null for those rows.
+      val candidates = Seq(timestampColumnName, pkColumnName) ++
+        arrowSchema.getFields.asScala.map(_.getName)
+      Seq(
+        candidates
+          .find(stored)
+          .getOrElse(
+            throw new IllegalStateException(
+              s"Segment ${task.segmentId} has no stored column for counting rows"
+            )
+          )
+      )
+    }
+  }
+
+  private[read] def resolveManifestColumns: Option[Set[String] => Seq[String]] =
+    None
+
   /** Projection fields carry their resolved Milvus IDs. In particular, hidden
     * _timestamp always reads field 1 even if an external schema omitted a
     * collection field with that name.
@@ -69,6 +136,7 @@ sealed trait ColumnBinding {
       schema: StructType
   ): Map[String, String] =
     schema.fields.iterator
+      .filterNot(field => parentByName.contains(field.name))
       .filter(_.metadata.contains(FieldMetadata.MilvusFieldIdMetadataKey))
       .map { field =>
         val id = field.metadata.getLong(FieldMetadata.MilvusFieldIdMetadataKey)
@@ -95,7 +163,8 @@ sealed trait ColumnBinding {
       arrowSchema,
       neededColumns,
       columnNameFor,
-      allocator
+      allocator,
+      resolveManifestColumns
     )
   }
 
@@ -136,6 +205,31 @@ sealed trait ColumnBinding {
 
 object ColumnBinding {
 
+  /** A projected metadata column can share a name with an unprojected parent.
+    * DataSource fields carry their identity. For adapters without field IDs,
+    * only an array of structs with the collection parent's name can match.
+    */
+  private[read] def structArrayParents(
+      collection: CollectionSchema,
+      output: StructType
+  ): Map[String, StructArrayFieldSchema] = {
+    val parents = collection.structArrayFields
+    if (parents.isEmpty) return Map.empty
+    val byId = parents.map(parent => parent.fieldID -> parent).toMap
+    val byName = parents.map(parent => parent.name -> parent).toMap
+    output.fields.iterator.flatMap { field =>
+      val key = FieldMetadata.MilvusFieldIdMetadataKey
+      val parent =
+        if (field.metadata.contains(key)) byId.get(field.metadata.getLong(key))
+        else
+          field.dataType match {
+            case ArrayType(_: StructType, _) => byName.get(field.name)
+            case _                           => None
+          }
+      parent.map(field.name -> _)
+    }.toMap
+  }
+
   /** Binds the columns using the layout described by the task.
     *
     * `schema` is the data schema, synthesized columns already removed: it says
@@ -167,8 +261,9 @@ final case class PhysicalColumnBinding(
   }
   protected val milvusSchema: CollectionSchema =
     CollectionSchema.parseFrom(task.schemaBytes)
-  override val arrowSchema: Schema = Schema.fromJSON(physical.arrowSchemaJson)
-  private val names = arrowSchema.getFields.asScala.map(_.getName).toSet
+  private val declaredSchema = Schema.fromJSON(physical.arrowSchemaJson)
+  private val fieldsByName = declaredSchema.getFields.asScala.groupBy(_.getName)
+  private val names = fieldsByName.keySet
   require(
     physical.fieldNames.values.forall(names),
     "physical field names differ from the Arrow schema"
@@ -177,11 +272,77 @@ final case class PhysicalColumnBinding(
     physical.outputColumns.values.forall(names),
     "physical output names differ from the Arrow schema"
   )
+  private val stored = physical.groups.flatMap(_.columnNames).toSet
   require(
-    physical.groups.flatMap(_.columnNames).forall(names),
+    stored.subsetOf(names),
     "physical groups name unknown Arrow columns"
   )
-  override val columnNameFor: Long => Option[String] = physical.fieldNames.get
+  private def parquetFieldId(field: Field): Option[Long] =
+    Option(field.getMetadata.get("PARQUET:field_id"))
+      .flatMap(value => Try(value.toLong).toOption)
+      .filter(_ >= 0)
+
+  // The Arrow schema can describe several historical fields with the same
+  // physical name. Native looks up that name, so it needs the segment's field
+  // definition, including its type, even when another column is projected.
+  private val resolvedDuplicates = fieldsByName.iterator.collect {
+    case (name, candidates) if candidates.size > 1 && stored(name) =>
+      val ids = physical.fieldNames.iterator.collect { case (id, `name`) =>
+        id
+      }.toSet
+      val matches =
+        candidates.filter(field => parquetFieldId(field).exists(ids))
+      require(
+        ids.size == 1 && matches.size == 1,
+        s"Segment ${task.segmentId} needs a unique field id matching one Arrow field for stored column '$name'"
+      )
+      name -> matches.head
+  }.toMap
+  override val arrowSchema: Schema =
+    if (resolvedDuplicates.isEmpty) declaredSchema
+    else {
+      val fields = declaredSchema.getFields.asScala.filter { field =>
+        resolvedDuplicates.get(field.getName).forall(_ eq field)
+      }
+      new Schema(fields.asJava, declaredSchema.getCustomMetadata)
+    }
+  // The adapter's Arrow schema can include fields added after this segment.
+  // Only annotations on stored columns supply additional physical identities.
+  private val fieldNames =
+    if (projectedParents.isEmpty && resolvedDuplicates.isEmpty)
+      physical.fieldNames
+    else {
+      val annotated = arrowSchema.getFields.asScala.iterator
+        .filter(field => stored(field.getName))
+        .flatMap(field => parquetFieldId(field).map(_ -> field.getName))
+      // A collection-wide alias for a shared name cannot establish that the
+      // other field exists in this segment. Still validate any requested
+      // unannotated ordinary output against the resolved identity.
+      val aliases = physical.outputColumns.filterNot { case (_, name) =>
+        resolvedDuplicates.contains(name)
+      }
+      val namedOutputs = aliases ++ schema.fields.iterator
+        .filterNot(_.metadata.contains(FieldMetadata.MilvusFieldIdMetadataKey))
+        .map(field =>
+          field.name -> physical.outputColumns.getOrElse(field.name, field.name)
+        )
+      val ordinary = milvusSchema.fields.iterator
+        .filterNot(field => physical.fieldNames.contains(field.fieldID))
+        .flatMap { field =>
+          namedOutputs.get(field.name).filter(stored).map(field.fieldID -> _)
+        }
+      val mappings = physical.fieldNames.toVector ++ annotated ++ ordinary
+      val byId = mappings.toMap
+      val byName = mappings.map(_.swap).toMap
+      mappings.foreach { case (id, name) =>
+        require(
+          byId(id) == name && byName(name) == id,
+          s"Segment ${task.segmentId} has conflicting mappings for field id $id and column '$name'"
+        )
+      }
+      byId
+    }
+  override val columnNameFor: Long => Option[String] = fieldNames.get
   override val arrowColumnNames: Map[String, String] =
     physical.outputColumns ++ projectedColumnNames(schema)
   override val pkColumnName: String =
@@ -189,12 +350,14 @@ final case class PhysicalColumnBinding(
   override val timestampColumnName: String = columnNameFor(1L).getOrElse("")
   override lazy val neededColumns: Seq[String] = {
     val requested =
-      if (task.neededFieldIds.nonEmpty) task.neededFieldIds.map { id =>
-        columnNameFor(id).getOrElse(
-          throw new IllegalArgumentException(s"Unknown physical field id $id")
-        )
-      }
-      else schema.fieldNames.toSeq.map(arrowColumnFor)
+      if (task.neededFieldIds.nonEmpty) {
+        val memberIds = projectedParents.flatMap(_.fields.map(_.fieldID)).toSet
+        task.neededFieldIds.filterNot(memberIds).map { id =>
+          columnNameFor(id).getOrElse(
+            throw new IllegalArgumentException(s"Unknown physical field id $id")
+          )
+        } ++ projectedParents.flatMap(childNames)
+      } else projectedNames(name => Some(arrowColumnFor(name)))
     val required = if (appliesDeletes && !deletePlan.isEmpty) {
       require(
         pkColumnName.nonEmpty && timestampColumnName.nonEmpty,
@@ -202,12 +365,28 @@ final case class PhysicalColumnBinding(
       )
       (requested ++ Seq(pkColumnName, timestampColumnName)).distinct
     } else requested.distinct
-    val available = physical.groups.flatMap(_.columnNames).toSet
+    lazy val storedMappings = fieldNames.filter { case (_, name) =>
+      stored(name)
+    }
+    val needsStoredIds = projectedParents.exists { parent =>
+      parent.fields.exists(field => !fieldNames.contains(field.fieldID)) ||
+      !childNames(parent).exists(stored)
+    }
+    if (needsStoredIds) {
+      val unknown = stored -- storedMappings.values
+      if (unknown.nonEmpty) {
+        throw new IllegalStateException(
+          s"Segment ${task.segmentId} lacks field ids for stored columns ${unknown.toSeq.sorted
+              .mkString(", ")}; cannot determine which struct array members are stored"
+        )
+      }
+    }
+    val selected = storedProjection(required, stored, storedMappings.keySet)
     require(
-      required.forall(available),
+      selected.forall(stored),
       "physical column groups do not contain all requested columns"
     )
-    required
+    selected
   }
 }
 
@@ -243,7 +422,8 @@ final case class V3ColumnBinding(
 
   override lazy val neededColumns: Seq[String] = {
     val requested = if (task.neededFieldIds.nonEmpty) {
-      val knownIds = (SchemaMapper.CanonicalSystemFields ++ milvusSchema.fields)
+      val knownIds = SchemaMapper
+        .physicalFields(milvusSchema)
         .map(_.fieldID)
         .toSet
       val missingIds = task.neededFieldIds.filterNot(knownIds)
@@ -253,9 +433,11 @@ final case class V3ColumnBinding(
             s"; schema field IDs=${knownIds.toSeq.sorted.mkString(",")}"
         )
       }
-      task.neededFieldIds.map(_.toString)
+      (task.neededFieldIds.map(_.toString) ++ projectedParents.flatMap(
+        childNames
+      )).distinct
     } else {
-      schema.fieldNames.toSeq.flatMap(arrowColumnNames.get)
+      projectedNames(arrowColumnNames.get)
     }
     if (!appliesDeletes) requested
     else {
@@ -269,6 +451,15 @@ final case class V3ColumnBinding(
       (requested ++ Seq(pk, timestampColumnName)).distinct
     }
   }
+
+  override private[read] def resolveManifestColumns
+      : Option[Set[String] => Seq[String]] =
+    if (projectedParents.isEmpty) None
+    else
+      Some(stored =>
+        storedProjection(neededColumns, stored, stored.map(_.toLong))
+      )
+
 }
 
 object V3ColumnBinding {

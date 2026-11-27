@@ -60,7 +60,8 @@ object SegmentReader {
   private[exec] sealed trait Source
   private[exec] final case class ManifestSource(
       basePath: String,
-      readVersion: Long
+      readVersion: Long,
+      resolveColumns: Option[Set[String] => Seq[String]]
   ) extends Source
   private[exec] final case class ColumnGroupsSource(
       groups: Seq[PhysicalColumnGroup]
@@ -223,12 +224,26 @@ object SegmentReader {
       neededColumns: Seq[String],
       columnNameFor: Long => Option[String],
       allocator: BufferAllocator
+  ): SegmentReader =
+    open(task, arrowSchema, neededColumns, columnNameFor, allocator, None)
+
+  /** Resolve a logical projection against the manifest's stored column names on
+    * the executor, using the same manifest handle as the data reader.
+    */
+  def open(
+      task: SegmentReadTask,
+      arrowSchema: Schema,
+      neededColumns: Seq[String],
+      columnNameFor: Long => Option[String],
+      allocator: BufferAllocator,
+      resolveManifestColumns: Option[Set[String] => Seq[String]]
   ): SegmentReader = task.layout match {
     case SegmentLayout.Manifest(basePath, readVersion) =>
       openNative(
         ManifestSource(
           NativeObjectStore.filesystemKey(task.properties, basePath),
-          readVersion
+          readVersion,
+          resolveManifestColumns
         ),
         arrowSchema,
         neededColumns,
@@ -267,14 +282,7 @@ object SegmentReader {
       segmentId: Long,
       allocator: BufferAllocator
   ): SegmentReader = {
-    require(
-      groups != null && groups.nonEmpty,
-      "physical column groups must not be empty"
-    )
-    require(
-      groups.forall(_ != null),
-      "physical column groups must not contain null"
-    )
+    PhysicalColumnGroup.validateGroups(groups)
     openNative(
       ColumnGroupsSource(groups),
       arrowSchema,
@@ -475,10 +483,12 @@ private[exec] final class NativeSegmentReader(
     properties = calls.timed(new MilvusStorageProperties())
     calls.timed(properties.create(nativeProperties))
     reader = new MilvusStorageReader()
-    val columns = neededColumns.toArray
-
-    source match {
-      case SegmentReader.ManifestSource(basePath, readVersion) =>
+    val columns = source match {
+      case SegmentReader.ManifestSource(
+            basePath,
+            readVersion,
+            resolveColumns
+          ) =>
         manifest = calls.timed(
           MilvusStorageManifest.open(basePath, properties, readVersion)
         )
@@ -488,6 +498,20 @@ private[exec] final class NativeSegmentReader(
             s"no manifest at $basePath; the segment has not been compacted " +
               "into the milvus-storage format"
           )
+        }
+        resolveColumns.fold(neededColumns) { resolve =>
+          val stored = calls.timed {
+            (0 until MilvusStorageColumnGroups.count(
+              columnGroupsHandle
+            )).iterator
+              .flatMap(i =>
+                MilvusStorageColumnGroups
+                  .columns(columnGroupsHandle, i)
+                  .iterator
+              )
+              .toSet
+          }
+          resolve(stored)
         }
       case SegmentReader.ColumnGroupsSource(groups) =>
         val columnNames = groups.map(_.columnNames.toArray).toArray
@@ -501,13 +525,14 @@ private[exec] final class NativeSegmentReader(
           )
         )
         ownsColumnGroups = true
+        neededColumns
     }
 
     calls.timed(
       reader.create(
         columnGroupsHandle,
         schemaStruct.memoryAddress(),
-        columns,
+        columns.toArray,
         properties
       )
     )

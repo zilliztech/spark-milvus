@@ -98,7 +98,7 @@ object MilvusVectorColumn {
             s"$other is not a vector type this column can present"
           )
       }
-      val expected = dimension * elementWidth
+      val expected = Math.multiplyExact(dimension, elementWidth)
       // A fixed-width column declares one width for every row, so the
       // disagreement shows up here. A variable-width column can only be checked
       // row by row, which MilvusVectorArrayColumn does as each row is read.
@@ -113,12 +113,7 @@ object MilvusVectorColumn {
       new MilvusVectorArrayColumn(
         blobs,
         sparkType(milvusType, raw = false),
-        new MilvusVectorElementColumn(
-          blobs,
-          milvusType,
-          elementWidth,
-          dimension
-        ),
+        elementWidth,
         dimension,
         expected,
         milvusType
@@ -192,19 +187,17 @@ private final class VariableWidthBlobs(vector: VarBinaryVector)
   override def bytes(rowId: Int): Array[Byte] = vector.get(rowId)
 }
 
-/** A vector column seen as an array column: row `i` is the window `[i *
-  * dimension, i * dimension + dimension)` of the element column.
-  */
+/** A vector column seen as a Spark array of elements for each stored blob. */
 private final class MilvusVectorArrayColumn(
     blobs: VectorBlobs,
     arrayType: DataType,
-    elements: ColumnVector,
+    elementWidth: Int,
     dimension: Int,
     expectedWidth: Int,
     milvusType: MilvusDataType
 ) extends ColumnVector(arrayType) {
 
-  override def close(): Unit = elements.close()
+  override def close(): Unit = ()
 
   override def hasNull: Boolean = blobs.nullCount > 0
 
@@ -224,8 +217,24 @@ private final class MilvusVectorArrayColumn(
           s"$expectedWidth bytes a row, but row $rowId stores $width"
       )
     }
-    new ColumnarArray(elements, rowId * dimension, dimension)
+    // A compact nullable vector column can contain many more logical elements
+    // than fit in one Spark Int index. Index each row from its own byte offset.
+    val start = blobs.startOf(rowId)
+    val row = new MilvusVectorElementColumn(blobs.buffer, milvusType) {
+      override protected def byteOffsetOf(index: Int): Long =
+        start + index.toLong * elementWidth
+    }
+    new ColumnarArray(row, 0, dimension)
   }
+
+  // The direct child accessor addresses the flattened logical element column.
+  private lazy val elements =
+    new MilvusVectorElementColumn(blobs.buffer, milvusType) {
+      override protected def byteOffsetOf(index: Int): Long =
+        blobs.startOf(
+          index / dimension
+        ) + (index % dimension).toLong * elementWidth
+    }
 
   override def getChild(ordinal: Int): ColumnVector = elements
 
@@ -248,30 +257,17 @@ private final class MilvusVectorArrayColumn(
     )
 }
 
-/** The elements of every vector in the column, laid end to end. Index `i` is
-  * element `i % dimension` of row `i / dimension`, which is where it already
-  * sits in the Arrow buffer, so nothing is moved. Half precision is widened
-  * here, one element per call, rather than by materializing the column.
+/** A view over vector elements in the Arrow buffer. Half precision is widened
+  * one element per call.
   */
-private final class MilvusVectorElementColumn(
-    blobs: VectorBlobs,
-    milvusType: MilvusDataType,
-    elementWidth: Int,
-    dimension: Int
+private abstract class MilvusVectorElementColumn(
+    buffer: ArrowBuf,
+    milvusType: MilvusDataType
 ) extends ColumnVector(
       if (milvusType == Int8Vector) ShortType else FloatType
     ) {
 
-  private val buffer = blobs.buffer
-
-  /** Where element `index` sits in the buffer. Index `index` is element `index
-    * % dimension` of row `index / dimension`, and a row starts wherever its
-    * layout says — `rowId * width` when the width is fixed, the offset buffer's
-    * entry when it is not.
-    */
-  private def byteOffsetOf(index: Int): Long =
-    blobs.startOf(index / dimension) +
-      (index % dimension).toLong * elementWidth
+  protected def byteOffsetOf(index: Int): Long
 
   override def close(): Unit = ()
 

@@ -8,6 +8,7 @@ import scala.jdk.CollectionConverters._
 
 import com.fasterxml.jackson.databind.node.ObjectNode
 import com.fasterxml.jackson.databind.ObjectMapper
+import org.apache.arrow.vector.types.pojo.{Field, Schema}
 import org.apache.avro.file.{DataFileStream, DataFileWriter}
 import org.apache.avro.generic.{
   GenericDatumReader,
@@ -15,19 +16,37 @@ import org.apache.avro.generic.{
   GenericRecord
 }
 import org.apache.avro.io.{DecoderFactory, EncoderFactory}
+import org.apache.hadoop.fs.{Path => HadoopPath}
+import org.apache.parquet.hadoop.util.HadoopInputFile
+import org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.spark.sql.{AnalysisException, DataFrame, SparkSession}
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.types.StructType
 import org.apache.spark.TaskContext
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.jni.storage.NativeStorageLibrary
+import com.zilliz.milvus.storage.expr.{
+  Comparison,
+  ComparisonOperator,
+  FieldRef,
+  Literal
+}
+import com.zilliz.milvus.storage.io.LocalObjectStore
 import com.zilliz.milvus.storage.manifest.{
   SnapshotSegmentFixture,
   SnapshotSegmentSchema
 }
+import com.zilliz.milvus.storage.read.exec.PhysicalColumnGroup
+import com.zilliz.milvus.storage.read.plan.SegmentReadTask
+import com.zilliz.milvus.storage.schema.SchemaMapper
+import com.zilliz.milvus.storage.snapshot.{SegmentLayout, SnapshotCatalog}
 import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.table.MilvusTables
 import com.zilliz.spark.connector.testkit.LocalMilvusCollection
 import com.zilliz.spark.connector.types.RowIdentity
+import io.milvus.grpc.schema.DataType
 
 /** Public file reads against frozen V3 data. Every destructive case changes
   * only a temporary copy; no writer or online service prepares it.
@@ -72,12 +91,18 @@ class V3ReadContractTest extends AnyFunSuite with BeforeAndAfterAll {
   override def afterAll(): Unit = if (spark != null) spark.stop()
 
   private def fixture(body: (Path, Map[String, String]) => Unit): Unit = {
+    withCollection("basic")(body)
+  }
+
+  private def withCollection(name: String)(
+      body: (Path, Map[String, String]) => Unit
+  ): Unit = {
     assume(
       available,
       "the native libraries and a compatible Arrow JVM are required"
     )
     val root = Files.createTempDirectory("v3-read-contract-")
-    try body(root, LocalMilvusCollection.load("basic", root))
+    try body(root, LocalMilvusCollection.load(name, root))
     finally {
       val paths = Files.walk(root)
       try paths.sorted(Comparator.reverseOrder[Path]()).forEach(Files.delete(_))
@@ -216,6 +241,345 @@ class V3ReadContractTest extends AnyFunSuite with BeforeAndAfterAll {
   }
 
   test(
+    "Milvus 3.0.6 StructArray reads preserve order, nested nulls and raw vectors"
+  ) {
+    withCollection("struct-array-306") { (_, options) =>
+      val frame = read(options)
+      assert(
+        frame.schema("chunks").dataType.simpleString ==
+          "array<struct<text:string,score:int,embedding:array<float>,tags:array<bigint>>>"
+      )
+      val rows = frame
+        .selectExpr("id", "chunks IS NULL", "size(chunks)", "chunks.text")
+        .orderBy("id")
+        .collect()
+      assert(
+        rows.map(_.getBoolean(1)).toList == List(false, false, true, false)
+      )
+      assert(rows(1).getInt(2) == 0)
+      assert(rows(0).getSeq[String](3).toList == List("alpha", "beta"))
+
+      val elements = frame
+        .selectExpr("id", "posexplode(chunks) AS (pos, chunk)")
+        .selectExpr(
+          "id",
+          "pos",
+          "chunk.text",
+          "chunk.score",
+          "chunk.embedding",
+          "chunk.tags"
+        )
+        .orderBy("id", "pos")
+        .collect()
+      assert(
+        elements.map(_.getString(2)).toList == List("alpha", "beta", "delta")
+      )
+      assert(
+        elements(0).getInt(3) == 7 && elements(1).isNullAt(3) && elements(2)
+          .getInt(3) == 0
+      )
+      assert(elements(0).getSeq[Float](4).toList == List(1f, 2f))
+      assert(elements(1).isNullAt(4))
+      assert(elements(2).getSeq[Float](4).toList == List(-1.5f, 0.5f))
+      assert(elements(0).getSeq[java.lang.Long](5).toList == List(3L, null))
+      assert(elements(1).getSeq[Long](5).isEmpty && elements(2).isNullAt(5))
+
+      val physical = read(
+        options ++ Map(
+          MilvusOption.ReadMode -> "physical",
+          MilvusOption.ReadVectorRaw -> "true",
+          MilvusOption.ReadBatchMaxRows -> "1"
+        )
+      ).selectExpr("id", "_milvus_row_id.row_offset", "chunks")
+      val raw = physical
+        .where("id = 1")
+        .selectExpr(
+          "row_offset",
+          "hex(chunks[0].embedding)",
+          "chunks[1].embedding"
+        )
+        .head()
+      assert(
+        raw.getLong(0) == 0L && raw.getString(1) == "0000803F00000040" && raw
+          .isNullAt(2)
+      )
+    }
+  }
+
+  private def withPhysicalChunkRows(
+      columns: Seq[String],
+      filterId: Option[Long] = None
+  )(check: Iterator[InternalRow] => Unit): Unit = {
+    withCollection("struct-array-306") { (root, options) =>
+      val stored =
+        new SnapshotCatalog(new LocalObjectStore(root.toString), "")
+          .read("snapshot.json")
+      val segment = stored.dataSegments.head
+      val files = Files.walk(root)
+      val groups =
+        try
+          files
+            .iterator()
+            .asScala
+            .filter(_.toString.endsWith(".parquet"))
+            .map { file =>
+              val input = HadoopInputFile.fromPath(
+                new HadoopPath(file.toUri),
+                spark.sparkContext.hadoopConfiguration
+              )
+              val parquet = ParquetFileReader.open(input)
+              try {
+                val footer = parquet.getFooter
+                val columns = footer.getFileMetaData.getSchema.getFields.asScala
+                  .map(_.getName)
+                  .toVector
+                val rows = footer.getBlocks.asScala.map(_.getRowCount).sum
+                PhysicalColumnGroup(
+                  columns,
+                  Seq(root.relativize(file).toString),
+                  Seq(rows)
+                )
+              } finally parquet.close()
+            }
+            .toVector
+        finally files.close()
+      val parent = stored.schema.structArrayFields.head
+      val added = parent.fields
+        .find(_.fieldID == 103L)
+        .get
+        .copy(
+          fieldID = 106L,
+          name = "chunks[new_score]"
+        )
+      val members = parent.fields :+ added
+      val snapshot = stored.copy(
+        schema = stored.schema.copy(
+          structArrayFields = Seq(parent.copy(fields = members))
+        )
+      )
+      val arrow =
+        SchemaMapper.convertToArrowSchemaWithFieldIdNames(snapshot.schema)
+      // The adapter supplies an output alias for id and a Parquet field id for
+      // the stored vector. The segment predates new_score.
+      val arrowFields = arrow.getFields.asScala.map { field =>
+        if (field.getName == "100") Field.notNullable("100", field.getType)
+        else field
+      }
+      val names = SchemaMapper
+        .physicalFields(stored.schema)
+        .map(f => f.fieldID -> f.fieldID.toString)
+        .toMap
+      val layout = SegmentLayout.PhysicalColumnGroups(
+        groups,
+        new Schema(arrowFields.asJava).toJson,
+        names - 100L - 104L,
+        Map("id" -> "100")
+      )
+      val memberIds = members.map(_.fieldID)
+      val task = SegmentReadTask(
+        segment.id,
+        segment.partitionId,
+        layout,
+        snapshot.schemaBytes,
+        options - MilvusOption.SnapshotPath,
+        neededFieldIds =
+          if (columns.contains("id") || filterId.nonEmpty) 100L +: memberIds
+          else memberIds
+      )
+      val sparkSchema = MilvusTables.sparkSchemaOf(snapshot, rawVectors = false)
+      val output = StructType(columns.map(sparkSchema(_)))
+      val predicate = filterId.map(id =>
+        Comparison(
+          FieldRef(100L, DataType.Int64),
+          ComparisonOperator.EqualTo,
+          Literal.IntegerValue(id)
+        )
+      )
+      val reader = new MilvusPartitionReaderFactory(
+        output,
+        rawVectors = false,
+        pushedExpression = predicate
+      ).createColumnarReader(MilvusInputPartition(task))
+      try {
+        val batches = Iterator.continually(reader.next()).takeWhile(identity)
+        check(batches.flatMap(_ => reader.get().rowIterator().asScala))
+      } finally reader.close()
+    }
+  }
+
+  test(
+    "physical StructArray reads recover a stored vector member from its Arrow field id"
+  ) {
+    withPhysicalChunkRows(Seq("id", "chunks")) { rows =>
+      val row = rows.next()
+      assert(row.getLong(0) == 1L)
+      val chunks = row.getArray(1)
+      val first = chunks.getStruct(0, 5)
+      assert(!first.isNullAt(2))
+      assert(first.getArray(2).toFloatArray().toList == List(1f, 2f))
+      assert(chunks.getStruct(1, 5).isNullAt(2))
+    }
+  }
+
+  test(
+    "a physical StructArray-only projection preserves rows after adding a nullable member"
+  ) {
+    withPhysicalChunkRows(Seq("chunks")) { rows =>
+      val values = rows.map { row =>
+        assert(row.numFields == 1)
+        if (row.isNullAt(0)) None
+        else {
+          val chunks = row.getArray(0)
+          val texts = (0 until chunks.numElements()).map { i =>
+            val chunk = chunks.getStruct(i, 5)
+            assert(chunk.isNullAt(4))
+            chunk.getUTF8String(0).toString
+          }
+          Some(texts.toList)
+        }
+      }.toList
+      assert(
+        values == Seq(
+          Some(List("alpha", "beta")),
+          Some(Nil),
+          None,
+          Some(List("delta"))
+        )
+      )
+    }
+  }
+
+  test(
+    "a physical StructArray projection filters on an unprojected ordinary column"
+  ) {
+    withPhysicalChunkRows(Seq("chunks"), filterId = Some(4L)) { rows =>
+      val row = rows.next()
+      assert(row.numFields == 1)
+      val chunks = row.getArray(0)
+      assert(chunks.numElements() == 1)
+      val chunk = chunks.getStruct(0, 5)
+      assert(chunk.getUTF8String(0).toString == "delta")
+      assert(chunk.getInt(1) == 0 && chunk.isNullAt(4))
+      assert(!rows.hasNext)
+    }
+  }
+
+  test(
+    "StructArray members that differ in case follow the Spark session resolver"
+  ) {
+    withCollection("struct-array-306") { (root, options) =>
+      metadata(root) { json =>
+        val fields = json.at("/collection/schema/struct_array_fields/0/fields")
+        val text = fields
+          .elements()
+          .asScala
+          .find(_.path("name").asText() == "chunks[text]")
+          .get
+        text.asInstanceOf[ObjectNode].put("name", "chunks[Score]")
+      }
+
+      val key = "spark.sql.caseSensitive"
+      val previous = spark.conf.get(key)
+      try {
+        spark.conf.set(key, "false")
+        val collision = intercept[Exception](read(options).schema)
+        assert(
+          messages(collision).contains("score") && messages(collision).contains(
+            "Score"
+          )
+        )
+        val ordinary = spark.read
+          .format("milvus")
+          .options(options)
+          .schema("id BIGINT")
+          .load()
+        assert(ids(ordinary) == Seq(1L, 2L, 3L, 4L))
+
+        spark.conf.set(key, "true")
+        val first = read(options)
+          .where("id = 1")
+          .selectExpr(
+            "chunks[0].Score",
+            "chunks[0].score",
+            "chunks[1].Score",
+            "chunks[1].score"
+          )
+          .head()
+        assert(first.getString(0) == "alpha" && first.getInt(1) == 7)
+        assert(first.getString(2) == "beta" && first.isNullAt(3))
+      } finally spark.conf.set(key, previous)
+    }
+  }
+
+  test("ordinary projections skip the StructArray column groups") {
+    withCollection("struct-array-306") { (root, options) =>
+      val files = Files.walk(root)
+      try {
+        val memberFiles = files
+          .iterator()
+          .asScala
+          .filter { path =>
+            val name = path.getFileName.toString
+            name.endsWith(".parquet") && (name.startsWith("1_") || name
+              .startsWith("2_"))
+          }
+          .toList
+        assert(memberFiles.size == 2)
+        memberFiles.foreach(Files.delete(_))
+      } finally files.close()
+      assert(ids(read(options)) == Seq(1L, 2L, 3L, 4L))
+    }
+  }
+
+  test(
+    "older segments inherit StructArray member counts and null parents from stored siblings"
+  ) {
+    withCollection("struct-array-306") { (root, options) =>
+      metadata(root) { json =>
+        val parents = json
+          .at("/collection/schema")
+          .asInstanceOf[ObjectNode]
+          .withArray("struct_array_fields")
+        parents
+          .get(0)
+          .asInstanceOf[ObjectNode]
+          .withArray("fields")
+          .addObject()
+          .put("name", "chunks[new_score]")
+          .put("fieldID", "106")
+          .put("data_type", "Array")
+          .put("element_type", "Int32")
+          .put("nullable", true)
+          .put("element_nullable", true)
+        val added = parents
+          .addObject()
+          .put("name", "other")
+          .put("fieldID", "107")
+          .put("nullable", true)
+        added
+          .putArray("fields")
+          .addObject()
+          .put("name", "other[score]")
+          .put("fieldID", "108")
+          .put("data_type", "Array")
+          .put("element_type", "Int32")
+          .put("nullable", true)
+      }
+      val rows = read(options)
+        .selectExpr("id", "chunks.new_score AS scores", "other")
+        .orderBy("id")
+        .collect()
+      assert(rows.forall(_.isNullAt(2)))
+      assert(rows(0).getSeq[java.lang.Integer](1).toList == List(null, null))
+      assert(
+        rows(1).getSeq[java.lang.Integer](1).isEmpty && rows(2).isNullAt(1)
+      )
+      assert(rows(3).getSeq[java.lang.Integer](1).toList == List(null))
+      assert(read(options).select("other").collect().forall(_.isNullAt(0)))
+    }
+  }
+
+  test(
     "fixed V3 reads need no management parser or service options"
   ) {
     fixture { (_, options) =>
@@ -312,6 +676,45 @@ class V3ReadContractTest extends AnyFunSuite with BeforeAndAfterAll {
       val absent = frame.where("_partition_id IN (22, 23)")
       assert(absent.queryExecution.toRdd.getNumPartitions == 0)
       assert(ids(absent).isEmpty)
+    }
+  }
+
+  test(
+    "an external schema can omit a struct array named _timestamp and read the stored timestamp"
+  ) {
+    withCollection("struct-array-306") { (root, options) =>
+      def times(frame: DataFrame): List[Long] =
+        frame
+          .select("id", "_timestamp")
+          .orderBy("id")
+          .collect()
+          .map(_.getLong(1))
+          .toList
+      val expected = times(read(options))
+      metadata(root) { json =>
+        val parent = json
+          .at("/collection/schema/struct_array_fields/0")
+          .asInstanceOf[ObjectNode]
+        parent.put("name", "_timestamp")
+        parent.withArray("fields").elements().asScala.foreach { node =>
+          val field = node.asInstanceOf[ObjectNode]
+          field.put(
+            "name",
+            field.get("name").asText().replace("chunks[", "_timestamp[")
+          )
+        }
+      }
+      val visibleParent = read(options)
+      assert(
+        visibleParent
+          .where("id = 1")
+          .selectExpr("_timestamp[0].text")
+          .head()
+          .getString(0) == "alpha"
+      )
+      val onlyId =
+        spark.read.format("milvus").options(options).schema("id BIGINT").load()
+      assert(times(onlyId) == expected)
     }
   }
 

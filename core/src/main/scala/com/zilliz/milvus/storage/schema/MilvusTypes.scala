@@ -1,7 +1,11 @@
 package com.zilliz.milvus.storage.schema
 
 import com.zilliz.milvus.storage.DataParseException
-import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
+import io.milvus.grpc.schema.{
+  DataType => MilvusDataType,
+  FieldSchema,
+  TypeSchema
+}
 
 /** Predicates over Milvus field types, and reading a field's dimension.
   *
@@ -10,6 +14,23 @@ import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
   * predicates on top, so there is one source of truth rather than two.
   */
 object MilvusTypes {
+
+  /** Milvus 3.0.6 stores a nested scalar array as two Arrow list levels. The
+    * protobuf repeats the first two nullability flags on FieldSchema.
+    */
+  def nestedArrayLeaf(field: FieldSchema): TypeSchema = {
+    val leaf = for {
+      root <- field.typeSchema if field.dataType == MilvusDataType.Array &&
+        field.elementType == MilvusDataType.Array && root.nullable == field.nullable
+      inner <- root.kind.arrayElement if inner.nullable == field.elementNullable
+      element <- inner.kind.arrayElement if element.kind.leafType.isDefined
+    } yield element
+    leaf.getOrElse {
+      throw new DataParseException(
+        s"Invalid nested array type_schema for field '${field.name}'"
+      )
+    }
+  }
 
   /** Dense vectors, which land as fixed-size binary. SparseFloatVector is not
     * one of them: it lands as variable-width binary.

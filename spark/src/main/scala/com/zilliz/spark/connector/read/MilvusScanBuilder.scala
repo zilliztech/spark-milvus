@@ -83,13 +83,18 @@ class MilvusScanBuilder(
     currentSchema = StructType(requestedFields)
   }
 
-  private def fieldId(field: StructField): Long = {
+  private val structChildren = snapshot.schema.structArrayFields.map { parent =>
+    parent.fieldID -> parent.fields.map(_.fieldID)
+  }.toMap
+
+  private def storedFieldIds(field: StructField): Seq[Long] = {
     require(
       field.metadata.contains(FieldMetadata.MilvusFieldIdMetadataKey),
       s"Field '${field.name}' has no ${FieldMetadata.MilvusFieldIdMetadataKey} metadata; " +
         "the scan cannot bind it to the fixed snapshot"
     )
-    field.metadata.getLong(FieldMetadata.MilvusFieldIdMetadataKey)
+    val id = field.metadata.getLong(FieldMetadata.MilvusFieldIdMetadataKey)
+    structChildren.getOrElse(id, Seq(id))
   }
 
   override def pushPredicates(
@@ -168,7 +173,9 @@ class MilvusScanBuilder(
     */
   private def neededFieldIds: Seq[Long] = {
     val projected =
-      currentSchema.fields.filterNot(MetadataColumns.isSynthetic).map(fieldId)
+      currentSchema.fields
+        .filterNot(MetadataColumns.isSynthetic)
+        .flatMap(storedFieldIds)
     val selected = (projected.toSeq ++ predicateFieldIds.toSeq.sorted).distinct
     if (selected.nonEmpty) selected
     else {

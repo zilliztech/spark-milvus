@@ -1,5 +1,7 @@
 package com.zilliz.milvus.storage.read.exec
 
+import scala.collection.mutable
+
 /** One physical column group, already resolved by the input format.
   *
   * Columns use the names in the Arrow schema. Files are in physical row order,
@@ -36,5 +38,26 @@ final case class PhysicalColumnGroup(
   fileRowCounts.foldLeft(0L) { (total, rows) =>
     require(rows <= Long.MaxValue - total, "physical row count overflows Long")
     total + rows
+  }
+}
+
+object PhysicalColumnGroup {
+  private[storage] def validateGroups(
+      groups: Seq[PhysicalColumnGroup]
+  ): Unit = {
+    require(
+      groups != null && groups.nonEmpty,
+      "physical column groups must not be empty"
+    )
+    val seen = mutable.HashSet.empty[String]
+    groups.foreach { group =>
+      require(group != null, "physical column groups must not contain null")
+      group.columnNames.foreach { name =>
+        require(
+          seen.add(name),
+          s"Column '$name' belongs to multiple physical column groups"
+        )
+      }
+    }
   }
 }

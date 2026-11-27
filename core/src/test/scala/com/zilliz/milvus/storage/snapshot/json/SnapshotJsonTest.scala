@@ -16,6 +16,43 @@ import io.milvus.grpc.schema.{
   */
 class SnapshotJsonTest extends AnyFunSuite with Matchers {
 
+  test(
+    "snapshot schema preserves struct parents, member IDs and recursive array types"
+  ) {
+    val json = """{
+      "name": "c", "fields": [], "struct_array_fields": [{
+        "name": "clips", "fieldID": "9007199254740993", "nullable": true,
+        "type_params": [{"key":"max_capacity","value":"12"}],
+        "fields": [{"name":"clips[tags]","fieldID":"103","data_type":"Array","element_type":22,
+          "nullable":true, "element_nullable":false,
+          "type_schema":{"nullable":true,"array_element":{"array_element":{
+            "leaf_type":"VarChar","nullable":true,"type_params":[{"key":"max_length","value":"80"}]}}}
+        }]
+      }]
+    }"""
+    val schema = Mapper.read[CollectionSchemaJson](json).fold(throw _, identity)
+    schema.fieldNamesById shouldBe Map(103L -> "clips[tags]")
+    val proto = ProtoCollectionSchema.parseFrom(schema.toProtobufBytes)
+    val parent = proto.structArrayFields.head
+    parent.fieldID shouldBe 9007199254740993L
+    parent.name shouldBe "clips"
+    parent.nullable shouldBe true
+    parent.typeParams.head.value shouldBe "12"
+    val field = parent.fields.head
+    field.fieldID shouldBe 103L
+    field.name shouldBe "clips[tags]"
+    field.dataType shouldBe DataType.Array
+    field.elementType shouldBe DataType.Array
+    val leaf = field.getTypeSchema.getArrayElement.getArrayElement
+    leaf.getLeafType shouldBe DataType.VarChar
+    leaf.nullable shouldBe true
+    leaf.typeParams.head.value shouldBe "80"
+    val roundTrip = Mapper
+      .read[CollectionSchemaJson](Mapper.write(schema))
+      .fold(throw _, identity)
+    roundTrip.toProtobuf shouldBe proto
+  }
+
   test("manifest versions preserve int64 values and default to zero") {
     Seq(0L, Int.MaxValue.toLong + 1L, Long.MaxValue).foreach { version =>
       ManifestContentJson.parse(

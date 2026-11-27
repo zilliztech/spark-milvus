@@ -1,0 +1,195 @@
+{
+  "format_version":  6,
+  "snapshot_info":  {
+    "name":  "struct_array_306",
+    "id":  "470744323681399428",
+    "collection_id":  "470744323681158404",
+    "partition_ids":  [
+      "470744323681158405"
+    ],
+    "create_ts":  "470744338370134033",
+    "state":  "SnapshotStatePending",
+    "pending_start_time":  "1795747140911",
+    "channel_seek_positions":  [
+      {
+        "channel_name":  "by-dev-rootcoord-dml_0_470744323681158404v0",
+        "msgID":  "BwBUZnhriAY=",
+        "timestamp":  "470744338370134033",
+        "WAL_name":  "RocksMQ"
+      }
+    ]
+  },
+  "collection":  {
+    "schema":  {
+      "name":  "struct_array_read",
+      "fields":  [
+        {
+          "fieldID":  "100",
+          "name":  "id",
+          "is_primary_key":  true,
+          "data_type":  "Int64"
+        },
+        {
+          "name":  "RowID",
+          "description":  "row id",
+          "data_type":  "Int64"
+        },
+        {
+          "fieldID":  "1",
+          "name":  "Timestamp",
+          "description":  "time stamp",
+          "data_type":  "Int64"
+        }
+      ],
+      "properties":  [
+        {
+          "key":  "timezone",
+          "value":  "UTC"
+        },
+        {
+          "key":  "namespace.sharding.enabled",
+          "value":  "false"
+        },
+        {
+          "key":  "max_field_id",
+          "value":  "105"
+        },
+        {
+          "key":  "consistency_level",
+          "value":  "2"
+        }
+      ],
+      "dbName":  "default",
+      "struct_array_fields":  [
+        {
+          "fieldID":  "101",
+          "name":  "chunks",
+          "fields":  [
+            {
+              "fieldID":  "102",
+              "name":  "chunks[text]",
+              "data_type":  "Array",
+              "type_params":  [
+                {
+                  "key":  "max_length",
+                  "value":  "64"
+                },
+                {
+                  "key":  "max_capacity",
+                  "value":  "8"
+                }
+              ],
+              "element_type":  "VarChar",
+              "nullable":  true
+            },
+            {
+              "fieldID":  "103",
+              "name":  "chunks[score]",
+              "data_type":  "Array",
+              "type_params":  [
+                {
+                  "key":  "max_capacity",
+                  "value":  "8"
+                }
+              ],
+              "element_type":  "Int32",
+              "nullable":  true,
+              "element_nullable":  true
+            },
+            {
+              "fieldID":  "104",
+              "name":  "chunks[embedding]",
+              "data_type":  "ArrayOfVector",
+              "type_params":  [
+                {
+                  "key":  "dim",
+                  "value":  "2"
+                },
+                {
+                  "key":  "max_capacity",
+                  "value":  "8"
+                }
+              ],
+              "element_type":  "FloatVector",
+              "nullable":  true,
+              "element_nullable":  true
+            },
+            {
+              "fieldID":  "105",
+              "name":  "chunks[tags]",
+              "data_type":  "Array",
+              "element_type":  "Array",
+              "nullable":  true,
+              "type_schema":  {
+                "array_element":  {
+                  "array_element":  {
+                    "leaf_type":  "Int64",
+                    "nullable":  true
+                  },
+                  "type_params":  [
+                    {
+                      "key":  "max_capacity",
+                      "value":  "4"
+                    }
+                  ],
+                  "nullable":  true
+                },
+                "type_params":  [
+                  {
+                    "key":  "max_capacity",
+                    "value":  "8"
+                  }
+                ],
+                "nullable":  true
+              },
+              "element_nullable":  true
+            }
+          ],
+          "type_params":  [
+            {
+              "key":  "max_capacity",
+              "value":  "8"
+            }
+          ],
+          "nullable":  true
+        }
+      ]
+    },
+    "num_partitions":  "1",
+    "num_shards":  "1",
+    "consistency_level":  "Bounded",
+    "properties":  [
+      {
+        "key":  "timezone",
+        "value":  "UTC"
+      },
+      {
+        "key":  "namespace.sharding.enabled",
+        "value":  "false"
+      },
+      {
+        "key":  "max_field_id",
+        "value":  "105"
+      }
+    ],
+    "partitions":  {
+      "_default":  "470744323681158405"
+    },
+    "virtual_channel_names":  [
+      "by-dev-rootcoord-dml_0_470744323681158404v0"
+    ]
+  },
+  "manifest_list":  [
+    "files/snapshots/470744323681158404/manifests/470744323681399428/470744323681359416.avro"
+  ],
+  "storagev2_manifest_list":  [
+    {
+      "segment_id":  "470744323681359416",
+      "manifest":  "{\"ver\":1,\"base_path\":\"files/insert_log/470744323681158404/470744323681158405/470744323681359416\"}"
+    }
+  ],
+  "segment_ids":  [
+    "470744323681359416"
+  ],
+  "layout":  "SnapshotLayoutReferenced"
+}

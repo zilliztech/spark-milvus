@@ -70,14 +70,17 @@ object MetadataColumns {
       .copy(name = Timestamp)
   }
 
-  private val syntheticNames =
-    positionFields.map(_.name).toSet + RowIdentity.ColumnName
+  private val syntheticTypes =
+    (positionFields :+ RowIdentity.field)
+      .map(field => field.name -> field.dataType)
+      .toMap
 
   /** A stored collection field with the same name carries its own field ID. */
   def isSynthetic(field: StructField): Boolean =
-    syntheticNames(field.name) && !field.metadata.contains(
-      FieldMetadata.MilvusFieldIdMetadataKey
-    )
+    syntheticTypes.get(field.name).contains(field.dataType) && !field.metadata
+      .contains(
+        FieldMetadata.MilvusFieldIdMetadataKey
+      )
 
   /** The column for `name`, or nothing when it is a real field the data
     * carries.

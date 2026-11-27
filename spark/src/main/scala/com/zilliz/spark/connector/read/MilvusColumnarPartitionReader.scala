@@ -33,6 +33,7 @@ import com.zilliz.spark.connector.metrics.{
 }
 import com.zilliz.spark.connector.types.{
   MilvusSparseVectorColumn,
+  MilvusStructArrayColumn,
   MilvusVectorColumn,
   SelectedRowsColumn,
   Utf8FromBinaryColumn
@@ -74,6 +75,9 @@ class MilvusColumnarPartitionReader(
 
   private val fieldsByName: Map[String, io.milvus.grpc.schema.FieldSchema] =
     milvusSchema.fields.map(field => field.name -> field).toMap
+
+  private val structArrays =
+    ColumnBinding.structArrayParents(milvusSchema, schema)
 
   private var current: VectorSchemaRoot = null
   private var batch: ColumnarBatch = null
@@ -250,6 +254,9 @@ class MilvusColumnarPartitionReader(
         )
       else None
     metadataColumn
+      .orElse(structArrays.get(name).map { parent =>
+        MilvusStructArrayColumn(root, parent, field, columnNameFor, rawVectors)
+      })
       .getOrElse {
         // The Arrow column is not always named after the Spark field: the
         // manifest line names columns by field id, so `vec` arrives as `101`.
