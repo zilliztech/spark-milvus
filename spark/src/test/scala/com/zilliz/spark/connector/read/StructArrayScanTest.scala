@@ -210,16 +210,23 @@ class StructArrayScanTest extends AnyFunSuite {
   }
 
   test(
-    "resolved physical groups omit absent members and retain row counts for an absent parent"
+    "resolved physical groups distinguish an older segment from missing struct members using adapter field ids"
   ) {
     val selected = StructType(Seq(output("items")))
-    val arrow =
-      SchemaMapper.convertToArrowSchemaWithFieldIdNames(snapshot.schema)
-    def binding(names: Seq[String]) = {
+    val retired =
+      FieldSchema(fieldID = 104, name = "retired", dataType = DataType.Int64)
+    val storedSchema =
+      snapshot.schema.copy(fields = snapshot.schema.fields :+ retired)
+    val arrow = SchemaMapper.convertToArrowSchema(storedSchema)
+    val fieldNames = SchemaMapper
+      .physicalFields(storedSchema)
+      .map(field => field.fieldID -> field.name)
+      .toMap
+    def binding(names: Seq[String], mapping: Map[Long, String] = fieldNames) = {
       val layout = SegmentLayout.PhysicalColumnGroups(
         Seq(PhysicalColumnGroup(names, Seq("data/a"), Seq(3L))),
         arrow.toJson,
-        names.map(name => name.toLong -> name).toMap,
+        mapping,
         Map.empty
       )
       PhysicalColumnBinding(
@@ -234,7 +241,28 @@ class StructArrayScanTest extends AnyFunSuite {
         selected
       )
     }
-    assert(binding(Seq("1", "100", "102")).neededColumns == Seq("102"))
-    assert(binding(Seq("1", "100")).neededColumns == Seq("1"))
+    val older = Seq("Timestamp", "id")
+    assert(binding(older).neededColumns == Seq("Timestamp"))
+    assert(
+      binding(older :+ "items[count]", fieldNames - 103L).neededColumns == Seq(
+        "items[count]"
+      )
+    )
+    assert(
+      binding(older ++ Seq("retired", "items[count]")).neededColumns == Seq(
+        "items[count]"
+      )
+    )
+    val newer = older :+ "retired"
+    val error = intercept[IllegalStateException](binding(newer).neededColumns)
+    assert(error.getMessage.contains("none of its current members"))
+    val unresolved = intercept[IllegalStateException](
+      binding(newer, fieldNames - 104L).neededColumns
+    )
+    assert(
+      unresolved.getMessage.contains(
+        "lacks field ids for stored columns retired"
+      )
+    )
   }
 }

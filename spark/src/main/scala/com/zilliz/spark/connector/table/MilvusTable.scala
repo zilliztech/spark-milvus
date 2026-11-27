@@ -195,7 +195,7 @@ case class MilvusTable(
         }
       restore(field, expected, inStruct = parents.contains(field.name))
     }
-    StructType(fields)
+    MilvusTables.checkedSchema(StructType(fields))
   }
 
   override def schema(): StructType =

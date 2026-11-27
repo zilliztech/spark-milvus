@@ -287,6 +287,53 @@ class V3ReadContractTest extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
+  test(
+    "StructArray members that differ in case follow the Spark session resolver"
+  ) {
+    withCollection("struct-array-306") { (root, options) =>
+      metadata(root) { json =>
+        val fields = json.at("/collection/schema/struct_array_fields/0/fields")
+        val text = fields
+          .elements()
+          .asScala
+          .find(_.path("name").asText() == "chunks[text]")
+          .get
+        text.asInstanceOf[ObjectNode].put("name", "chunks[Score]")
+      }
+
+      val key = "spark.sql.caseSensitive"
+      val previous = spark.conf.get(key)
+      try {
+        spark.conf.set(key, "false")
+        val collision = intercept[Exception](read(options).schema)
+        assert(
+          messages(collision).contains("score") && messages(collision).contains(
+            "Score"
+          )
+        )
+        val ordinary = spark.read
+          .format("milvus")
+          .options(options)
+          .schema("id BIGINT")
+          .load()
+        assert(ids(ordinary) == Seq(1L, 2L, 3L, 4L))
+
+        spark.conf.set(key, "true")
+        val first = read(options)
+          .where("id = 1")
+          .selectExpr(
+            "chunks[0].Score",
+            "chunks[0].score",
+            "chunks[1].Score",
+            "chunks[1].score"
+          )
+          .head()
+        assert(first.getString(0) == "alpha" && first.getInt(1) == 7)
+        assert(first.getString(2) == "beta" && first.isNullAt(3))
+      } finally spark.conf.set(key, previous)
+    }
+  }
+
   test("ordinary projections skip the StructArray column groups") {
     withCollection("struct-array-306") { (root, options) =>
       val files = Files.walk(root)

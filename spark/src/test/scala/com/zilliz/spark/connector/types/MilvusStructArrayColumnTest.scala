@@ -228,6 +228,46 @@ class MilvusStructArrayColumnTest extends AnyFunSuite with Matchers {
   }
 
   test(
+    "typed vector members use their stored offsets in a large nullable StructArray batch"
+  ) {
+    val dimension = 4096
+    val membersPerRow = 1024
+    val fullRows = 512
+    val last = fullRows * membersPerRow
+    val embedding = vector.copy(
+      elementNullable = true,
+      typeParams = Seq(KeyValuePair("dim", dimension.toString))
+    )
+    val p = parent.copy(fields = Seq(embedding))
+    withBatch(p, embedding.fieldID) { root =>
+      val lists =
+        root.getVector(embedding.fieldID.toString).asInstanceOf[ListVector]
+      (0 until fullRows).foreach(row => listRow(lists, row, membersPerRow))
+      listRow(lists, fullRows, 1)
+      val data = lists.getDataVector.asInstanceOf[VarBinaryVector]
+      val bytes =
+        ByteBuffer.allocate(dimension * 4).order(ByteOrder.LITTLE_ENDIAN)
+      data.setSafe(0, bytes.putFloat(0, 1f).array())
+      data.setSafe(
+        last,
+        bytes.putFloat(0, -2f).putFloat(bytes.capacity() - 4, 3f).array()
+      )
+      root.setRowCount(fullRows + 1)
+
+      val result = open(root, p)
+      try {
+        val first = result.getArray(0)
+        first.getStruct(1, 1).isNullAt(0) shouldBe true
+        val a = first.getStruct(0, 1).getArray(0)
+        val b = result.getArray(fullRows).getStruct(0, 1).getArray(0)
+        b.getFloat(0) shouldBe -2f
+        b.getFloat(dimension - 1) shouldBe 3f
+        a.getFloat(0) shouldBe 1f
+      } finally result.close()
+    }
+  }
+
+  test(
     "an absent nullable parent is null for every row; an absent required member fails"
   ) {
     withBatch(parent, 0) { root =>

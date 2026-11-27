@@ -1,6 +1,9 @@
 package com.zilliz.spark.connector.table
 
-import org.apache.spark.sql.types.StructType
+import java.util.Locale
+
+import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.types.{ArrayType, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import com.zilliz.milvus.storage.snapshot.Snapshot
@@ -70,16 +73,38 @@ private[connector] object MilvusTables {
         snapshot.schema.structArrayFields.map(
           SparkTypes.toStructArrayField(_, rawVectors)
         )
-    val clashes = fields
-      .groupBy(_.name.toLowerCase(java.util.Locale.ROOT))
-      .collect { case (_, same) if same.size > 1 => same.map(_.name) }
-      .toSeq
-    if (clashes.nonEmpty) {
-      throw new IllegalArgumentException(
-        s"Snapshot schema contains field names that collide under case-insensitive resolution: " +
-          clashes.map(_.mkString(" and ")).mkString(", ")
-      )
+    checkedSchema(StructType(fields))
+  }
+
+  /** Resolve duplicate names on the driver, after an external schema has
+    * selected its fields. Executor column binding uses exact stored identities.
+    */
+  private[table] def checkedSchema(schema: StructType): StructType = {
+    val caseSensitive = SQLConf.get.caseSensitiveAnalysis
+    def check(fields: Array[StructField], owner: String): Unit = {
+      val clashes = fields
+        .groupBy { field =>
+          if (caseSensitive) field.name else field.name.toLowerCase(Locale.ROOT)
+        }
+        .values
+        .filter(_.length > 1)
+        .map(_.map(_.name).mkString(" and "))
+        .toSeq
+      if (clashes.nonEmpty) {
+        val mode = if (caseSensitive) "case-sensitive" else "case-insensitive"
+        throw new IllegalArgumentException(
+          s"$owner contains field names that collide under $mode resolution: ${clashes.mkString(", ")}"
+        )
+      }
     }
-    StructType(fields)
+    check(schema.fields, "Snapshot schema")
+    schema.fields.foreach { field =>
+      field.dataType match {
+        case ArrayType(members: StructType, _) =>
+          check(members.fields, s"Struct array '${field.name}'")
+        case _ =>
+      }
+    }
+    schema
   }
 }

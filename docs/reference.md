@@ -434,7 +434,9 @@ raise an unsupported-type error during schema resolution or value conversion.
 
 Read a StructArray from a snapshot produced by **Milvus 3.0.6 or later**.
 Spark exposes the field as an ordered `array<struct<...>>` with the member
-names declared by the collection. A member may contain a scalar, a scalar
+names declared by the collection. A collection with members such as `score`
+and `Score` requires `spark.sql.caseSensitive=true` to read that struct.
+A member may contain a scalar, a scalar
 array, or a dense vector. Vector members follow the [vector type mappings](#vector-types),
 including `milvus.read.vector.raw`.
 

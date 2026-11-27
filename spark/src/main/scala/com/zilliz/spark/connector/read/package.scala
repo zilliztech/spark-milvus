@@ -8,11 +8,13 @@ package com.zilliz.spark.connector
   * segment metadata and planned partitions to downstream consumers without
   * owning their computation. ColumnBinding maps logical fields onto physical
   * columns, expanding struct arrays to their child field IDs. For older
-  * segments it requests the stored siblings that supply array lengths. The
-  * snapshot reader applies deletes and predicates to Arrow batches and returns
-  * Spark columnar batches. Each segment task receives the field IDs required by
-  * Spark projection and predicates. MetadataColumns binds the hidden timestamp
-  * to stored field 1 and supplies partition, segment and row position from each
+  * segments it requests the stored siblings that supply array lengths. With no
+  * remaining sibling, both layouts check the stored field ids to establish that
+  * the segment predates the parent before returning null rows. The snapshot
+  * reader applies deletes and predicates to Arrow batches and returns Spark
+  * columnar batches. Each segment task receives the field IDs required by Spark
+  * projection and predicates. MetadataColumns binds the hidden timestamp to
+  * stored field 1 and supplies partition, segment and row position from each
   * task. When Spark projects `_milvus_row_id` on a physical read, planning
   * requires a positive snapshot ID and the reader combines it with the stored
   * position. Operational read metrics distinguish decoded rows, mutually

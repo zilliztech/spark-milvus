@@ -78,10 +78,7 @@ object SparkTypes {
     }
     require(members.nonEmpty, s"Struct array '${parent.name}' has no members")
     require(
-      members
-        .map(_.name.toLowerCase(java.util.Locale.ROOT))
-        .distinct
-        .size == members.size,
+      members.map(_.name).distinct.size == members.size,
       s"Struct array '${parent.name}' contains duplicate member names"
     )
     val parentMetadata = new MetadataBuilder()

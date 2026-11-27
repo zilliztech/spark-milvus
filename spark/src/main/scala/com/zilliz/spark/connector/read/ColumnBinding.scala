@@ -91,10 +91,20 @@ sealed trait ColumnBinding {
     */
   protected def storedProjection(
       requested: Seq[String],
-      stored: Set[String]
+      stored: Set[String],
+      storedFieldIds: => Set[Long]
   ): Seq[String] = {
-    val leaves =
-      projectedParents.flatMap(childNames).toSet
+    lazy val storedIds = storedFieldIds
+    val leaves = projectedParents.flatMap { parent =>
+      val members = childNames(parent)
+      if (!members.exists(stored) && storedIds.exists(_ > parent.fieldID)) {
+        throw new IllegalStateException(
+          s"Segment ${task.segmentId} stores fields newer than struct array '${parent.name}' " +
+            "but none of its current members can establish its row validity and element counts"
+        )
+      }
+      members
+    }.toSet
     val selected = requested.filter(name => !leaves(name) || stored(name))
     if (selected.nonEmpty || projectedParents.isEmpty) selected
     else {
@@ -288,7 +298,21 @@ final case class PhysicalColumnBinding(
       (requested ++ Seq(pkColumnName, timestampColumnName)).distinct
     } else requested.distinct
     val available = physical.groups.flatMap(_.columnNames).toSet
-    val selected = storedProjection(required, available)
+    def storedIds: Set[Long] = {
+      val mappings = physical.fieldNames.filter { case (_, name) =>
+        available(name)
+      }
+      val unknown = available -- mappings.values
+      if (unknown.nonEmpty) {
+        throw new IllegalStateException(
+          s"Segment ${task.segmentId} lacks field ids for stored columns ${unknown.toSeq.sorted
+              .mkString(", ")}; " +
+            "cannot establish whether it predates the missing struct array"
+        )
+      }
+      mappings.keySet
+    }
+    val selected = storedProjection(required, available, storedIds)
     require(
       selected.forall(available),
       "physical column groups do not contain all requested columns"
@@ -363,20 +387,9 @@ final case class V3ColumnBinding(
       : Option[Set[String] => Seq[String]] =
     if (projectedParents.isEmpty) None
     else
-      Some { stored =>
-        projectedParents.foreach { parent =>
-          if (
-            !childNames(parent)
-              .exists(stored) && stored.exists(_.toLong > parent.fieldID)
-          ) {
-            throw new IllegalStateException(
-              s"Segment ${task.segmentId} stores fields newer than struct array '${parent.name}' " +
-                "but none of its current members can establish its row validity and element counts"
-            )
-          }
-        }
-        storedProjection(neededColumns, stored)
-      }
+      Some(stored =>
+        storedProjection(neededColumns, stored, stored.map(_.toLong))
+      )
 
 }
 

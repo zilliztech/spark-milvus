@@ -30,11 +30,10 @@ object SnapshotSparkSchema {
         !includeSystemFields && (f.name == "RowID" || f.name == "Timestamp")
       )
       .map(fieldToStructField)
-    StructType(
-      userFields ++ schema.structArrayFields.map(parent =>
-        SparkTypes.toStructArrayField(parent.toProtobuf, rawVectors = false)
-      )
+    val fields = userFields ++ schema.structArrayFields.map(parent =>
+      SparkTypes.toStructArrayField(parent.toProtobuf, rawVectors = false)
     )
+    MilvusTables.checkedSchema(StructType(fields))
   }
 
   /** Convert a FieldJson to Spark StructField with Milvus metadata preserved.
