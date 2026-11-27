@@ -74,92 +74,114 @@ object SchemaMapper {
     new Field(field.name, new FieldType(true, arrowType, null, metadata), null)
   }
 
-  def convertToArrowSchema(collectionSchema: CollectionSchema): Schema = {
-    val fields = allFields(collectionSchema).map { field =>
-      val dim = dimensionFor(field)
-      val arrowType = ArrowTypes.toArrowType(dim, field.dataType)
+  /** Milvus stores each struct-array member as its own column, named by the
+    * member field id. The parent id identifies the group only in the schema.
+    */
+  def physicalFields(collectionSchema: CollectionSchema): Seq[FieldSchema] =
+    missingSystemFields(collectionSchema) ++ collectionSchema.fields ++
+      collectionSchema.structArrayFields.flatMap(_.fields)
 
-      if (field.dataType == DataType.ArrayOfVector) {
-        // A variable-length array of vectors: the element type and the
-        // dimension can only travel in the field metadata.
-        val metadata = Map(
-          "PARQUET:field_id" -> field.fieldID.toString,
-          "elementType" -> field.elementType.value.toString,
-          "dim" -> dim.toString
-        ).asJava
-        new Field(
-          field.name,
-          new FieldType(true, arrowType, null, metadata),
-          null
-        )
-      } else if (isVectorType(field.dataType)) {
-        new Field(
-          field.name,
-          new FieldType(
-            field.nullable,
-            physicalTypeOf(field, arrowType),
-            null,
-            vectorMetadata(field, dim).asJava
-          ),
-          null
-        )
-      } else {
-        convertToArrowField(field, arrowType)
-      }
-    }
-    new Schema(fields.asJava)
-  }
+  def convertToArrowSchema(collectionSchema: CollectionSchema): Schema =
+    physicalSchema(collectionSchema, useFieldIds = false)
 
-  /** Names each column after its field id, and keeps original_name in the
-    * metadata so the layers above can restore the logical name.
+  /** Names each column after its field id and keeps original_name in metadata.
     */
   def convertToArrowSchemaWithFieldIdNames(
       collectionSchema: CollectionSchema
+  ): Schema = physicalSchema(collectionSchema, useFieldIds = true)
+
+  private def physicalSchema(
+      schema: CollectionSchema,
+      useFieldIds: Boolean
   ): Schema = {
-    val fields = allFields(collectionSchema).map { field =>
+    val memberIds =
+      schema.structArrayFields.flatMap(_.fields.map(_.fieldID)).toSet
+    val fields = physicalFields(schema).map { field =>
       val dim = dimensionFor(field)
-      val arrowType = ArrowTypes.toArrowType(dim, field.dataType)
-      val metadata = vectorMetadata(field, dim) +
-        ("original_name" -> field.name)
+      val id = field.fieldID.toString
+      val (name, nameMetadata) =
+        if (useFieldIds)
+          (id, Map("original_name" -> field.name))
+        else (field.name, Map.empty[String, String])
+      val metadata = Map("PARQUET:field_id" -> id) ++ nameMetadata
+      val isVectorArray = field.dataType == DataType.ArrayOfVector
+      val isNativeScalarArray = field.dataType == DataType.Array &&
+        (field.elementNullable || field.elementType == DataType.Array || field.typeSchema.nonEmpty)
+      val nullableDense =
+        MilvusTypes.isDenseVectorType(field.dataType) && field.nullable
+      val vectorMetadata =
+        if (isVectorArray)
+          Map(
+            "elementType" -> field.elementType.value.toString,
+            "dim" -> dim.toString
+          )
+        else if (nullableDense) Map("dim" -> dim.toString)
+        else Map.empty[String, String]
+
+      val (physicalType, children) = if (isVectorArray) {
+        if (!MilvusTypes.isDenseVectorType(field.elementType)) {
+          throw new DataParseException(
+            s"Unsupported vector array element ${field.elementType} for field '${field.name}'"
+          )
+        }
+        val elementType =
+          if (field.elementNullable) new ArrowType.Binary()
+          else ArrowTypes.toArrowType(dim, field.elementType)
+        (new ArrowType.List(), Seq(listItem(elementType, nullable = true)))
+      } else if (isNativeScalarArray) {
+        (new ArrowType.List(), Seq(scalarArrayItem(field)))
+      } else {
+        val arrowType =
+          if (nullableDense) new ArrowType.Binary()
+          else ArrowTypes.toArrowType(dim, field.dataType)
+        (arrowType, Seq.empty[Field])
+      }
+      val nullable =
+        if (
+          MilvusTypes.isVectorType(field.dataType) || isVectorArray ||
+          isNativeScalarArray || memberIds(field.fieldID)
+        ) field.nullable
+        else true
       new Field(
-        field.fieldID.toString,
+        name,
         new FieldType(
-          if (isVectorType(field.dataType)) field.nullable else true,
-          physicalTypeOf(field, arrowType),
+          nullable,
+          physicalType,
           null,
-          metadata.asJava
+          (metadata ++ vectorMetadata).asJava
         ),
-        null
+        children.asJava
       )
     }
     new Schema(fields.asJava)
   }
 
-  private def allFields(collectionSchema: CollectionSchema): Seq[FieldSchema] =
-    missingSystemFields(collectionSchema) ++ collectionSchema.fields
+  private def listItem(
+      arrowType: ArrowType,
+      nullable: Boolean,
+      children: Seq[Field] = Seq.empty
+  ): Field =
+    new Field("item", new FieldType(nullable, arrowType, null), children.asJava)
 
-  private def isVectorType(dataType: DataType): Boolean =
-    MilvusTypes.isDenseVectorType(dataType) ||
-      dataType == DataType.SparseFloatVector
-
-  /** A nullable dense vector lands as variable-width binary so a null row does
-    * not have to carry a fixed-width payload. Its dimension moves to the
-    * metadata instead.
-    */
-  private def physicalTypeOf(
-      field: FieldSchema,
-      arrowType: ArrowType
-  ): ArrowType =
-    if (MilvusTypes.isDenseVectorType(field.dataType) && field.nullable)
-      new ArrowType.Binary()
-    else arrowType
-
-  private def vectorMetadata(
-      field: FieldSchema,
-      dim: Int
-  ): Map[String, String] =
-    Map("PARQUET:field_id" -> field.fieldID.toString) ++
-      (if (MilvusTypes.isDenseVectorType(field.dataType) && field.nullable)
-         Map("dim" -> dim.toString)
-       else Map.empty)
+  private def scalarArrayItem(field: FieldSchema): Field = {
+    val nested =
+      field.elementType == DataType.Array || field.typeSchema.nonEmpty
+    val (elementType, nullable) = if (nested) {
+      val leaf = MilvusTypes.nestedArrayLeaf(field)
+      (leaf.getLeafType, leaf.nullable)
+    } else (field.elementType, field.elementNullable)
+    elementType match {
+      case DataType.Bool | DataType.Int8 | DataType.Int16 | DataType.Int32 |
+          DataType.Int64 | DataType.Float | DataType.Double |
+          DataType.VarChar =>
+        val item = listItem(ArrowTypes.toArrowType(0, elementType), nullable)
+        if (nested)
+          listItem(new ArrowType.List(), field.elementNullable, Seq(item))
+        else item
+      case _ =>
+        throw new DataParseException(
+          s"Unsupported native array element $elementType for field '${field.name}'"
+        )
+    }
+  }
 }

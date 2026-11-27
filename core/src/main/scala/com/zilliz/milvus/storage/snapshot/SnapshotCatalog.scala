@@ -272,7 +272,9 @@ object SnapshotCatalog extends Logging {
         s"collection index ${index.indexId} belongs to collection ${index.collectionId}, expected ${snapshot.collectionId}"
       )
       require(
-        snapshot.schema.fields.exists(_.fieldID == index.fieldId),
+        snapshot.schema.fields.exists(_.fieldID == index.fieldId) ||
+          snapshot.schema.structArrayFields
+            .exists(_.fields.exists(_.fieldID == index.fieldId)),
         s"collection index ${index.indexId} names unknown field ${index.fieldId}"
       )
     })

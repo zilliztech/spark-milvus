@@ -4,8 +4,6 @@ import org.apache.spark.sql.types.{DataType, StructField, StructType}
 
 import com.zilliz.milvus.storage.snapshot.json.{CollectionSchemaJson, FieldJson}
 import com.zilliz.spark.connector.types.SparkTypes
-import io.milvus.grpc.common.KeyValuePair
-import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
 
 /** The `CollectionSchemaJson` inside a snapshot to a Spark StructType.
   *
@@ -32,13 +30,17 @@ object SnapshotSparkSchema {
         !includeSystemFields && (f.name == "RowID" || f.name == "Timestamp")
       )
       .map(fieldToStructField)
-    StructType(userFields)
+    StructType(
+      userFields ++ schema.structArrayFields.map(parent =>
+        SparkTypes.toStructArrayField(parent.toProtobuf, rawVectors = false)
+      )
+    )
   }
 
   /** Convert a FieldJson to Spark StructField with Milvus metadata preserved.
     */
   def fieldToStructField(field: FieldJson): StructField =
-    SparkTypes.toStructField(toFieldSchema(field))
+    SparkTypes.toStructField(field.toProtobuf)
 
   /** Convert a FieldJson to Spark DataType
     *
@@ -50,23 +52,4 @@ object SnapshotSparkSchema {
   def fieldToSparkType(field: FieldJson): DataType = {
     fieldToStructField(field).dataType
   }
-
-  /** Snapshot JSON is converted to the same protobuf field that the rest of the
-    * read path consumes. Missing booleans use protobuf defaults, matching
-    * CollectionSchemaJson.toProtobufBytes.
-    */
-  private def toFieldSchema(field: FieldJson): FieldSchema =
-    FieldSchema(
-      fieldID = field.getFieldIDAsLong,
-      name = field.name,
-      dataType = MilvusDataType.fromValue(field.dataType),
-      isPrimaryKey = field.isPrimaryKey.getOrElse(false),
-      isClusteringKey = field.isClusteringKey.getOrElse(false),
-      typeParams = field.typeParams.getOrElse(Seq.empty).map { param =>
-        KeyValuePair(key = param.key, value = param.value)
-      },
-      elementType = MilvusDataType.fromValue(field.elementType),
-      isPartitionKey = field.isPartitionKey.getOrElse(false),
-      nullable = field.nullable.getOrElse(false)
-    )
 }

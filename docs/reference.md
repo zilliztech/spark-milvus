@@ -425,11 +425,32 @@ The output schema for `milvus` format depends on the Milvus collection schema an
 ### Complex types
 
 - Array of Bool, Int8, Int16, Int32, Int64, Float, Double, String, or VarChar
+- StructArray from Milvus 3.0.6 and later, in both live and physical reads
 
-This is a closed support list. Geometry, Timestamptz,
-ArrayOfVector/struct-array fields, and unknown future Milvus types are not
-silently converted to binary or null: schema resolution or value conversion
-fails explicitly and reports the unsupported type.
+Geometry, Timestamptz, standalone ArrayOfVector and unknown Milvus types
+raise an unsupported-type error during schema resolution or value conversion.
+
+#### StructArray reads
+
+Read a StructArray from a snapshot produced by **Milvus 3.0.6 or later**.
+Spark exposes the field as an ordered `array<struct<...>>` with the member
+names declared by the collection. A member may contain a scalar, a scalar
+array, or a dense vector. Vector members follow the [vector type mappings](#vector-types),
+including `milvus.read.vector.raw`.
+
+For a collection with a `chunks` StructArray containing `text` and
+`embedding`, the following PySpark query returns one row per chunk and its
+zero-based position within the document.
+
+```python
+chunks = rows.selectExpr("id", "posexplode(chunks) AS (position, chunk)")
+chunks.select("id", "position", "chunk.text", "chunk.embedding").show()
+```
+
+A null StructArray reads as SQL `NULL`. An empty StructArray reads as `[]`.
+A null member value keeps its position inside the struct. Selecting the parent
+reads its member columns together. Spark evaluates expressions on the nested
+members. StructArray fields and their members are read-only in the connector.
 
 ## Native dependency bundle
 

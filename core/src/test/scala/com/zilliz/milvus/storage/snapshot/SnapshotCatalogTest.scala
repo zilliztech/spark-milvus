@@ -162,6 +162,46 @@ class SnapshotCatalogTest extends AnyFunSuite {
       "build_ids":["469076449917967340"]"""
     )
 
+  test("index definitions can refer to the stored member of a struct array") {
+    withDir { dir =>
+      val index = SnapshotSegmentFixture.index()
+      writeAvro(
+        dir,
+        avroKey,
+        SnapshotSegmentFixture.encode(indexes = Vector(index))
+      )
+      val json = indexedSnapshotJson
+        .replace(
+          """"fieldID": 101, "name": "v"""",
+          """"fieldID": 102, "name": "v""""
+        )
+        .replace(
+          """"name": "c", "fields": [""",
+          """"name": "c", "struct_array_fields": [{
+          "fieldID":"103","name":"clips","fields":[{
+            "fieldID":"101","name":"clips[v]","data_type":"ArrayOfVector",
+            "element_type":"FloatVector","type_params":[{"key":"dim","value":"4"}]
+          }]}], "fields": ["""
+        )
+      write(dir, "snapshot.json", json)
+      val result =
+        new SnapshotCatalog(new LocalObjectStore(dir.toString), "bucket")
+          .read("snapshot.json")
+      assert(result.indexes.get.map(_.fieldId) == Seq(101L))
+
+      write(
+        dir,
+        "snapshot.json",
+        json.replace(""""fieldID":"103"""", """"fieldID":"101"""")
+      )
+      val error = intercept[IllegalArgumentException] {
+        new SnapshotCatalog(new LocalObjectStore(dir.toString), "bucket")
+          .read("snapshot.json")
+      }
+      assert(error.getMessage.contains("duplicate field id 101"))
+    }
+  }
+
   private def writeAvro(dir: Path, key: String, bytes: Array[Byte]): Unit = {
     val path = dir.resolve(key)
     Files.createDirectories(path.getParent)

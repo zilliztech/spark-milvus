@@ -6,13 +6,18 @@ import org.apache.spark.sql.types.{
   ArrayType,
   DataTypes,
   MetadataBuilder,
-  StructField
+  StructField,
+  StructType
 }
 import org.apache.spark.sql.types.{DataType => SparkDataType}
 
 import com.zilliz.milvus.storage.schema.{ArrowTypes, FieldMetadata, MilvusTypes}
 import com.zilliz.milvus.storage.DataParseException
-import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
+import io.milvus.grpc.schema.{
+  DataType => MilvusDataType,
+  FieldSchema,
+  StructArrayFieldSchema
+}
 
 /** Arrow type to Spark type, and the field metadata a Milvus field carries into
   * a Spark schema. The Milvus-to-Arrow half of the mapping is core's
@@ -36,6 +41,68 @@ object SparkTypes {
       metadata = metadata(fieldSchema)
     )
 
+  /** One Spark field per logical struct-array parent. The stored child names
+    * may be qualified as parent[member]; Spark exposes the member name.
+    */
+  def toStructArrayField(
+      parent: StructArrayFieldSchema,
+      rawVectors: Boolean
+  ): StructField = {
+    val members = parent.fields.map { child =>
+      val name =
+        if (
+          child.name.startsWith(parent.name + "[") && child.name.endsWith("]")
+        )
+          child.name.substring(parent.name.length + 1, child.name.length - 1)
+        else child.name
+      require(
+        name.nonEmpty && !name.exists(c => c == '[' || c == ']'),
+        s"Invalid member name '${child.name}' in struct array '${parent.name}'"
+      )
+      val memberType = child.dataType match {
+        case MilvusDataType.ArrayOfVector
+            if MilvusTypes.isDenseVectorType(child.elementType) =>
+          MilvusTypes.dimensionOf(child)
+          MilvusVectorColumn.sparkType(child.elementType, rawVectors)
+        case MilvusDataType.Array
+            if child.elementType == MilvusDataType.Array =>
+          val leaf = MilvusTypes.nestedArrayLeaf(child)
+          ArrayType(scalarMemberType(leaf.getLeafType), leaf.nullable)
+        case MilvusDataType.Array => scalarMemberType(child.elementType)
+        case other =>
+          throw new DataParseException(
+            s"Struct array '${parent.name}' has unsupported member '${child.name}' of type $other"
+          )
+      }
+      StructField(name, memberType, child.elementNullable, metadata(child))
+    }
+    require(members.nonEmpty, s"Struct array '${parent.name}' has no members")
+    require(
+      members
+        .map(_.name.toLowerCase(java.util.Locale.ROOT))
+        .distinct
+        .size == members.size,
+      s"Struct array '${parent.name}' contains duplicate member names"
+    )
+    val parentMetadata = new MetadataBuilder()
+      .putLong(
+        FieldMetadata.MilvusDataTypeMetadataKey,
+        MilvusDataType.ArrayOfStruct.value
+      )
+      .putLong(FieldMetadata.MilvusFieldIdMetadataKey, parent.fieldID)
+      .build()
+    StructField(
+      parent.name,
+      ArrayType(StructType(members), containsNull = false),
+      nullable = parent.nullable,
+      metadata = parentMetadata
+    )
+  }
+
+  private def scalarMemberType(elementType: MilvusDataType): SparkDataType =
+    if (elementType == MilvusDataType.Int8) DataTypes.ByteType
+    else arrayElementType(elementType)
+
   def metadata(fieldSchema: FieldSchema) = {
     val builder = new MetadataBuilder()
       .putLong(
@@ -53,7 +120,11 @@ object SparkTypes {
       builder.putBoolean(FieldMetadata.MilvusClusteringKeyMetadataKey, true)
     }
 
-    if (MilvusTypes.isDenseVectorType(fieldSchema.dataType)) {
+    if (
+      MilvusTypes.isDenseVectorType(
+        fieldSchema.dataType
+      ) || fieldSchema.dataType == MilvusDataType.ArrayOfVector
+    ) {
       fieldSchema.typeParams
         .find(_.key == "dim")
         .foreach { param =>
@@ -67,7 +138,9 @@ object SparkTypes {
     // An Array's element type goes to the writer: Int8 and Int16 elements
     // share Int32's Spark and physical form, and only the element type bounds
     // them as the Milvus proxy does on insert.
-    if (fieldSchema.dataType == MilvusDataType.Array) {
+    if (
+      fieldSchema.dataType == MilvusDataType.Array || fieldSchema.dataType == MilvusDataType.ArrayOfVector
+    ) {
       builder.putLong(
         FieldMetadata.MilvusElementTypeMetadataKey,
         fieldSchema.elementType.value.toLong

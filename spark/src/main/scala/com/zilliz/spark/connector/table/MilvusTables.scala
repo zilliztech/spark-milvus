@@ -66,7 +66,10 @@ private[connector] object MilvusTables {
       rawVectors: Boolean
   ): StructType = {
     val fields =
-      snapshot.schema.fields.map(SparkTypes.toStructField(_, rawVectors))
+      snapshot.schema.fields.map(SparkTypes.toStructField(_, rawVectors)) ++
+        snapshot.schema.structArrayFields.map(
+          SparkTypes.toStructArrayField(_, rawVectors)
+        )
     val clashes = fields
       .groupBy(_.name.toLowerCase(java.util.Locale.ROOT))
       .collect { case (_, same) if same.size > 1 => same.map(_.name) }

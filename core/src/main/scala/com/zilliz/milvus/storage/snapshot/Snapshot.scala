@@ -1,5 +1,6 @@
 package com.zilliz.milvus.storage.snapshot
 
+import com.zilliz.milvus.storage.schema.SchemaMapper
 import io.milvus.grpc.schema.{CollectionSchema => ProtoSchema, FieldSchema}
 
 /** One fixed view of a collection: what a read plans against. Every read entry
@@ -39,11 +40,16 @@ final case class Snapshot(
     id.forall(_ > 0L),
     s"snapshot id must be positive, got ${id.getOrElse(0L)}"
   )
-  schema.fields.groupBy(_.fieldID).foreach { case (fieldId, fields) =>
-    require(
-      fields.size == 1,
-      s"Snapshot '$name' schema contains duplicate field id $fieldId: ${fields.map(_.name).mkString(", ")}"
-    )
+  locally {
+    val identities =
+      SchemaMapper.physicalFields(schema).map(f => f.fieldID -> f.name) ++
+        schema.structArrayFields.map(f => f.fieldID -> f.name)
+    identities.groupBy(_._1).foreach { case (fieldId, fields) =>
+      require(
+        fields.size == 1,
+        s"Snapshot '$name' schema contains duplicate field id $fieldId: ${fields.map(_._2).mkString(", ")}"
+      )
+    }
   }
 
   /** The schema as the bytes every `SegmentReadTask` carries. */

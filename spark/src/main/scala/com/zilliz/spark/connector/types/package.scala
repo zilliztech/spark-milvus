@@ -3,6 +3,10 @@ package com.zilliz.spark.connector
 /** The single Milvus-to-Spark type contract and its Arrow value conversion.
   * `SparkTypes.toStructField` owns type, nullability and Milvus field metadata.
   * Unsupported Milvus or Spark types fail instead of becoming binary or null.
+  * Struct arrays expose one array of non-null structs. Each struct member's
+  * type and nullability describe one element of its physical child column.
+  * MilvusStructArrayColumn aligns sibling arrays by row and element offset. A
+  * batch with an added nullable member uses the stored siblings' cardinality.
   * ColumnVector implementations expose Arrow batch values to Spark.
   * ArrowValueTypes supplies the type metadata and layout checks for writers.
   * MilvusArrayColumn and Utf8FromBinaryColumn cover the supported fields whose

@@ -15,12 +15,13 @@ package com.zilliz.milvus.storage
   * remain delete sources through scan pruning. The Milvus-allocated snapshot id
   * and the collection schema version are kept, so that a row identity can be
   * bound to its snapshot and a write can report the schema it was based on.
-  * Snapshot requires each declared field to have a unique physical ID before
-  * readers or column replacement can resolve fields by name. SnapshotCatalog
-  * resolves the caller's metadata location for both the file read and the write
-  * planner's storage prefix check. The optional persisted layout distinguishes
-  * referenced segment data from a self-contained export. Older snapshots may
-  * omit the layout.
+  * Snapshot requires unique ids for top-level fields, struct parents and their
+  * stored members, and accepts indexes on stored member ids, before readers or
+  * column replacement can resolve fields by name. SnapshotCatalog resolves the
+  * caller's metadata location for both the file read and the write planner's
+  * storage prefix check. The optional persisted layout distinguishes referenced
+  * segment data from a self-contained export. Older snapshots may omit the
+  * layout.
   *
   * Snapshot.retainDataSegments keeps the data segments selected by the scan
   * planner and the delete sources that apply to those segments.

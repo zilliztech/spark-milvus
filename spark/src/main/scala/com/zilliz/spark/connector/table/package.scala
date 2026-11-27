@@ -12,11 +12,12 @@ package com.zilliz.spark.connector
   * describe empty snapshots only.
   *
   * Field identity, types, nullability and vector dimensions come from the
-  * snapshot schema. The table advertises the partition ID, segment ID, row
-  * offset and stored system timestamp as Spark metadata columns. A visible
-  * collection field takes precedence over a metadata name. Physical reads also
-  * advertise the hidden row identity `_milvus_row_id`. The scan builder
-  * requires a positive snapshot ID when a query requests that identity. No
-  * online service or catalog is consulted.
+  * snapshot schema, including the child fields of each struct array. The table
+  * advertises the partition ID, segment ID, row offset and stored system
+  * timestamp as Spark metadata columns. A visible collection field takes
+  * precedence over a metadata name. Physical reads also advertise the hidden
+  * row identity `_milvus_row_id`. The scan builder requires a positive snapshot
+  * ID when a query requests that identity. No online service or catalog is
+  * consulted.
   */
 package object table

@@ -77,6 +77,9 @@ final class MilvusArrayColumn(vector: VarBinaryVector, elementType: DataType)
   override def hasNull: Boolean = vector.getNullCount > 0
   override def numNulls: Int = vector.getNullCount
   override def isNullAt(rowId: Int): Boolean = vector.isNull(rowId)
+  private[types] def elementOffset(row: Int): Int = offsets(row)
+  private[types] def elementCount(row: Int): Int = lengths(row)
+
   override def getArray(rowId: Int): ColumnarArray =
     new ColumnarArray(elements, offsets(rowId), lengths(rowId))
   override def getChild(ordinal: Int): ColumnVector = elements
