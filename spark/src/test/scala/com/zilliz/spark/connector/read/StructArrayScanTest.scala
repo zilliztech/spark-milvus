@@ -8,6 +8,7 @@ import org.apache.spark.sql.types.{
   BinaryType,
   ByteType,
   FloatType,
+  IntegerType,
   MetadataBuilder,
   StructField,
   StructType
@@ -315,6 +316,76 @@ class StructArrayScanTest extends AnyFunSuite {
       ).neededColumns
     )
     assert(conflict.getMessage.contains("conflicting mappings"))
+  }
+
+  test(
+    "a StructArray projection keeps the stored Timestamp when a historical user field shares its name"
+  ) {
+    val historical = FieldSchema(
+      fieldID = 104L,
+      name = "Timestamp",
+      dataType = DataType.Int32
+    )
+    val collection =
+      snapshot.schema.copy(fields = snapshot.schema.fields :+ historical)
+    val arrow = SchemaMapper.convertToArrowSchema(collection)
+    val timestamps = arrow.getFields.asScala
+      .filter(_.getName == "Timestamp")
+      .map(field => field.getMetadata.get("PARQUET:field_id").toLong -> field)
+      .toMap
+    val systemId = SchemaMapper.TimestampFieldId
+    assert(timestamps.keySet == Set(systemId, historical.fieldID))
+    val members = items.fields.map(field => field.fieldID -> field.name).toMap
+    val group = PhysicalColumnGroup(
+      "Timestamp" +: items.fields.map(_.name),
+      Seq("data/a"),
+      Seq(3L)
+    )
+    val parent = StructType(Seq(output("items")))
+    def bindingFor(ids: Seq[Long], projected: StructType = parent) = {
+      val layout = SegmentLayout.PhysicalColumnGroups(
+        Seq(group),
+        arrow.toJson,
+        members ++ ids.map(_ -> "Timestamp"),
+        Map("Timestamp" -> "Timestamp", "_timestamp" -> "Timestamp")
+      )
+      PhysicalColumnBinding(
+        SegmentReadTask(30, 20, layout, collection.toByteArray, Map.empty),
+        projected
+      )
+    }
+    for (
+      (storedId, absentId) <- Seq(
+        systemId -> historical.fieldID,
+        historical.fieldID -> systemId
+      )
+    ) {
+      val binding = bindingFor(Seq(storedId))
+      assert(binding.neededColumns == items.fields.map(_.name))
+      assert(binding.columnNameFor(storedId).contains("Timestamp"))
+      assert(binding.columnNameFor(absentId).isEmpty)
+      val physical = binding.arrowSchema.getFields.asScala
+        .filter(_.getName == "Timestamp")
+      assert(physical.toList == List(timestamps(storedId)))
+    }
+    for (ids <- Seq(Seq.empty[Long], Seq(systemId, historical.fieldID))) {
+      val error =
+        intercept[IllegalArgumentException](bindingFor(ids).neededColumns)
+      assert(error.getMessage.contains("Timestamp"))
+    }
+
+    val withHistorical = parent.add(StructField("Timestamp", IntegerType))
+    assert(
+      bindingFor(Seq(historical.fieldID), withHistorical).neededColumns ==
+        (items.fields.map(_.name) :+ "Timestamp")
+    )
+    val absent = intercept[IllegalArgumentException](
+      bindingFor(Seq(systemId), withHistorical).neededColumns
+    )
+    assert(
+      absent.getMessage.contains("Timestamp") ||
+        absent.getMessage.contains(historical.fieldID.toString)
+    )
   }
 
   test(

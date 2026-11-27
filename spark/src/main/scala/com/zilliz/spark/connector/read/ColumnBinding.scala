@@ -5,7 +5,7 @@ import scala.util.Try
 
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.{BigIntVector, VectorSchemaRoot}
-import org.apache.arrow.vector.types.pojo.Schema
+import org.apache.arrow.vector.types.pojo.{Field, Schema}
 import org.apache.spark.sql.types.{ArrayType, StructType}
 
 import com.zilliz.milvus.storage.delete.DeletePlan
@@ -261,8 +261,9 @@ final case class PhysicalColumnBinding(
   }
   protected val milvusSchema: CollectionSchema =
     CollectionSchema.parseFrom(task.schemaBytes)
-  override val arrowSchema: Schema = Schema.fromJSON(physical.arrowSchemaJson)
-  private val names = arrowSchema.getFields.asScala.map(_.getName).toSet
+  private val declaredSchema = Schema.fromJSON(physical.arrowSchemaJson)
+  private val fieldsByName = declaredSchema.getFields.asScala.groupBy(_.getName)
+  private val names = fieldsByName.keySet
   require(
     physical.fieldNames.values.forall(names),
     "physical field names differ from the Arrow schema"
@@ -276,25 +277,55 @@ final case class PhysicalColumnBinding(
     stored.subsetOf(names),
     "physical groups name unknown Arrow columns"
   )
+  private def parquetFieldId(field: Field): Option[Long] =
+    Option(field.getMetadata.get("PARQUET:field_id"))
+      .flatMap(value => Try(value.toLong).toOption)
+      .filter(_ >= 0)
+
+  // The Arrow schema can describe several historical fields with the same
+  // physical name. Native looks up that name, so it needs the segment's field
+  // definition, including its type, even when another column is projected.
+  private val resolvedDuplicates = fieldsByName.iterator.collect {
+    case (name, candidates) if candidates.size > 1 && stored(name) =>
+      val ids = physical.fieldNames.iterator.collect { case (id, `name`) =>
+        id
+      }.toSet
+      val matches =
+        candidates.filter(field => parquetFieldId(field).exists(ids))
+      require(
+        ids.size == 1 && matches.size == 1,
+        s"Segment ${task.segmentId} needs a unique field id matching one Arrow field for stored column '$name'"
+      )
+      name -> matches.head
+  }.toMap
+  override val arrowSchema: Schema =
+    if (resolvedDuplicates.isEmpty) declaredSchema
+    else {
+      val fields = declaredSchema.getFields.asScala.filter { field =>
+        resolvedDuplicates.get(field.getName).forall(_ eq field)
+      }
+      new Schema(fields.asJava, declaredSchema.getCustomMetadata)
+    }
   // The adapter's Arrow schema can include fields added after this segment.
   // Only annotations on stored columns supply additional physical identities.
   private val fieldNames =
-    if (projectedParents.isEmpty) physical.fieldNames
+    if (projectedParents.isEmpty && resolvedDuplicates.isEmpty)
+      physical.fieldNames
     else {
       val annotated = arrowSchema.getFields.asScala.iterator
         .filter(field => stored(field.getName))
-        .flatMap { field =>
-          Option(field.getMetadata.get("PARQUET:field_id"))
-            .flatMap(value => Try(value.toLong).toOption)
-            .filter(_ >= 0)
-            .map(_ -> field.getName)
-        }
-      // An unannotated Spark output defaults to its own physical name. The
-      // adapter's explicit aliases also identify columns outside the projection.
-      val namedOutputs = schema.fields.iterator
+        .flatMap(field => parquetFieldId(field).map(_ -> field.getName))
+      // A collection-wide alias for a shared name cannot establish that the
+      // other field exists in this segment. Still validate any requested
+      // unannotated ordinary output against the resolved identity.
+      val aliases = physical.outputColumns.filterNot { case (_, name) =>
+        resolvedDuplicates.contains(name)
+      }
+      val namedOutputs = aliases ++ schema.fields.iterator
         .filterNot(_.metadata.contains(FieldMetadata.MilvusFieldIdMetadataKey))
-        .map(field => field.name -> field.name)
-        .toMap ++ physical.outputColumns
+        .map(field =>
+          field.name -> physical.outputColumns.getOrElse(field.name, field.name)
+        )
       val ordinary = milvusSchema.fields.iterator
         .filterNot(field => physical.fieldNames.contains(field.fieldID))
         .flatMap { field =>

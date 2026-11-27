@@ -74,10 +74,7 @@ object SegmentLayout {
       fieldNames: Map[Long, String],
       outputColumns: Map[String, String]
   ) extends SegmentLayout {
-    require(
-      groups != null && groups.nonEmpty && groups.forall(_ != null),
-      "physical column groups must not be empty or contain null"
-    )
+    PhysicalColumnGroup.validateGroups(groups)
     require(
       arrowSchemaJson != null && arrowSchemaJson.nonEmpty,
       "physical column groups require an Arrow schema"

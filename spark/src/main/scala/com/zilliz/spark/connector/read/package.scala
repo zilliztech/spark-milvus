@@ -11,20 +11,22 @@ package com.zilliz.spark.connector
   * segments it requests the stored siblings that supply array lengths. For
   * resolved column groups it binds stored ordinary columns through the
   * adapter's aliases independently of the Spark projection, including columns
-  * needed only by predicates. Arrow Parquet field IDs identify stored members
-  * when the adapter's mapping is incomplete. A member can be treated as absent
-  * only when its identity is unambiguous. With no remaining sibling, both
-  * layouts check the stored field ids to establish that the segment predates
-  * the parent before returning null rows. The snapshot reader applies deletes
-  * and predicates to Arrow batches and returns Spark columnar batches. Each
-  * segment task receives the field IDs required by Spark projection and
-  * predicates. MetadataColumns binds the hidden timestamp to stored field 1 and
-  * supplies partition, segment and row position from each task. When Spark
-  * projects `_milvus_row_id` on a physical read, planning requires a positive
-  * snapshot ID and the reader combines it with the stored position. Operational
-  * read metrics distinguish decoded rows, mutually exclusive deletion and
-  * predicate exclusions, and rows handed to Spark after a pushed limit. Reader
-  * state records exhaustion, early stops and failures once; planning reports
-  * the current segment count without accumulating replans.
+  * needed only by predicates. When collection fields share a physical name, the
+  * segment's field ID selects the Arrow field passed to the native reader.
+  * Arrow Parquet field IDs identify stored members when the adapter's mapping
+  * is incomplete. A member can be treated as absent only when its identity is
+  * unambiguous. With no remaining sibling, both layouts check the stored field
+  * ids to establish that the segment predates the parent before returning null
+  * rows. The snapshot reader applies deletes and predicates to Arrow batches
+  * and returns Spark columnar batches. Each segment task receives the field IDs
+  * required by Spark projection and predicates. MetadataColumns binds the
+  * hidden timestamp to stored field 1 and supplies partition, segment and row
+  * position from each task. When Spark projects `_milvus_row_id` on a physical
+  * read, planning requires a positive snapshot ID and the reader combines it
+  * with the stored position. Operational read metrics distinguish decoded rows,
+  * mutually exclusive deletion and predicate exclusions, and rows handed to
+  * Spark after a pushed limit. Reader state records exhaustion, early stops and
+  * failures once; planning reports the current segment count without
+  * accumulating replans.
   */
 package object read

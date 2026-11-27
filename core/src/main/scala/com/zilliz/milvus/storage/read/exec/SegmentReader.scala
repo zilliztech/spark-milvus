@@ -282,14 +282,7 @@ object SegmentReader {
       segmentId: Long,
       allocator: BufferAllocator
   ): SegmentReader = {
-    require(
-      groups != null && groups.nonEmpty,
-      "physical column groups must not be empty"
-    )
-    require(
-      groups.forall(_ != null),
-      "physical column groups must not contain null"
-    )
+    PhysicalColumnGroup.validateGroups(groups)
     openNative(
       ColumnGroupsSource(groups),
       arrowSchema,
